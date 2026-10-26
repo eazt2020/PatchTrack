@@ -1,0 +1,383 @@
+# User guide
+
+Audience: anyone who signs in to PatchTrack to read compliance position,
+investigate the servers behind it, or produce a report.
+
+## 1. Signing in
+
+Browse to the PatchTrack address your administrator gave you. Enter your
+username and password.
+
+- Five wrong passwords lock the account for 15 minutes. Wait, or ask an
+  administrator to reset it.
+- On your first sign-in, or after an administrator reset, you must choose a new
+  password. Use at least 12 characters; a passphrase is better than a short
+  complex string.
+- The session lasts 30 minutes of use. After that you are returned to the login
+  page; there is no silent background refresh in the browser.
+
+If the page offers **Create administrator**, the system has never been
+initialised. That form appears only when no user exists.
+
+## 2. The dashboard
+
+The first screen is the executive view for the whole estate, filtered by any
+selection in the filter bar.
+
+**Five tiles across the top:**
+
+| Tile | Meaning |
+|------|---------|
+| Total servers (in scope) | The population being judged; the sub-line counts the servers excluded from scope |
+| Compliant | No outstanding blocking findings, with a fresh assessment |
+| Non-compliant | One or more outstanding blocking findings |
+| Unknown / stale | No usable assessment, or one older than the freshness threshold |
+| Compliance vs target | The percentage and the gap to the policy target |
+
+**Compliance percentage** is:
+
+```
+compliant ÷ (compliant + non-compliant + unknown + stale)
+```
+
+Unknown and stale count **against** compliance. They are not quietly removed
+from the bottom of the fraction. If the number looks worse than another tool's
+figure, that is usually why — the other tool is excluding data it does not
+have.
+
+If the denominator is zero the tile shows `n/a`. An empty estate is not a
+perfect one.
+
+**Charts:**
+
+- **Compliance by operating system / environment / business service** —
+  stacked bars showing the composition of each group. Operating system is the
+  platform family (RHEL, Microsoft Windows, Solaris, Other), not the version.
+  Environment and business service are the **effective** values, so a local
+  placement correction moves the server into its new group on the next render.
+  Every group is listed; a long list scrolls rather than hiding the tail.
+- **Patch status distribution** — donut of the four states.
+- **Compliance trend** — the recorded percentage over the chosen basis
+  (monthly, quarterly or yearly), from immutable daily snapshots, with the
+  target line. Monthly is drawn as a line; quarterly and yearly as bars, one
+  bar per period.
+- **Period summary** — the same observations as a table: compliance, target,
+  the change against the previous period, the average server count, and the
+  number of daily snapshots the period rests on.
+- **Outstanding findings by severity** — patch counts, which are separate from
+  the server percentage and never combined with it.
+
+**Basis, auto-refresh and wall displays.** The controls to the right of the
+filter bar set how the trend is grouped and how often the page reloads itself:
+
+| Control | Values | Notes |
+|---------|--------|-------|
+| Basis | Monthly (12 points), Quarterly (8), Yearly (5) | Each point is the average of the daily snapshots recorded in that calendar period. The snapshot count is shown, so a period with little data is visible as such. |
+| Auto-refresh | Off, 30 seconds, 1 minute, 5 minutes | Reloads the tiles and charts in place. It pauses while the browser tab is hidden and while a dialog is open, and resumes on the next tick. |
+| TV mode | on / off | Hides the left navigation and lets the content use the whole screen. |
+
+The choices are remembered per browser, so a wall display keeps them after a
+reload. TV mode is presentation only: it does not change what your role may
+see.
+
+- Press **K** to toggle TV mode and **Esc** to leave it.
+- `#/dashboard?tv=1` opens the dashboard already in TV mode for a bookmarked
+  NOC/SOC display; the parameter applies to that visit and does not overwrite
+  the stored preference.
+- Auto-refresh keeps the page signed in only as long as the session lasts. When
+  the session expires the next refresh returns you to the sign-in page instead
+  of leaving stale numbers on screen.
+
+**Freshness line** under the title shows when inventory and patch data were last
+collected. If it is older than you expect, the number below it describes the
+past, not the present.
+
+## 3. Filters
+
+The filter bar applies to the dashboard, the server list and the findings view:
+
+| Filter | Values come from |
+|--------|------------------|
+| Environment | AssetExplorer |
+| Business service | AssetExplorer |
+| Operating system | AssetExplorer |
+| Application group | AssetExplorer |
+| Patch source | Which system assessed the asset |
+
+Filters are ANDed. Clicking a chart segment or a bar applies the matching
+filter — the fastest way to answer "which environment is dragging the number
+down".
+
+The filter selection is not saved between sessions; the URL hash carries it, so
+a bookmark reproduces a view.
+
+### Narrowing and sorting any list
+
+Every register — non-compliant servers, remediation, the snapshot ledger,
+server inventory, reconciliation, report history, schedules, integrations,
+compliance policy, users and the audit trail — has the same three controls
+above the table:
+
+| Control | What it does |
+|---------|--------------|
+| Search | Matches **any column of the row**, not one nominated field: a single term can hit a hostname, an operating system, an environment, a business service, a status, an actor, an advisory title, a source, an owner, a location or a note. Matching is case-insensitive and updates as you type. |
+| Field filters | One dropdown per useful field (severity, status, source, role, cadence…). They combine with each other and with the page filter bar. |
+| Sort by + Order | Choose the field, then press the order button to switch between ascending and descending. |
+
+- The line under the table says **"Showing X of Y rows"** whenever a filter or
+  search is active, so a narrowed list can never look like missing data.
+- Rows without a value (a server never assessed, a schedule never run) sort
+  last in both directions: "never" is not "oldest".
+- On **Non-compliant servers** and **Server inventory** the list is paged by the
+  service, so sorting is applied to the whole matching set, not just the 25 rows
+  on screen. The chosen sort survives paging and searching.
+- Filter and sort choices are kept while you stay in the console; reloading the
+  page keeps them for that view until you sign out.
+- **A status name is matched as a whole term.** Searching `Compliant` returns
+  compliant servers only; it never also returns `Non-compliant` rows. To pick an
+  exact state, use the **Status** filter on Server inventory or the state tabs
+  on Non-compliant servers — a filter is always the unambiguous way to ask.
+- The search box keeps the **text and caret** while the paged lists re-fetch, so
+  you can keep typing without clicking back into it after each pause.
+
+## 4. Non-compliant servers
+
+**Compliance → Non-compliant servers** lists the servers behind the tiles, with
+tabs for Non-compliant, Compliant, Unknown and Stale.
+
+Columns: hostname, IP, operating system, environment, business service, status,
+critical finding count, total patches, last assessment date.
+
+- Click a **hostname** to open the server detail: identifiers, ownership,
+  compliance reason, outstanding findings, and its assessment history. From
+  there, Operations and Administrators can correct the environment or business
+  service locally — see [Editing environment and business service](#editing-environment-and-business-service).
+- Search covers every column on the list — hostname, FQDN, IP, operating system, environment, business service and the compliance reason — not just the hostname. A state name matches as a whole term, so `Compliant` does not also return `Non-compliant` rows; use the tabs for an exact state.
+- The status tab and the filters combine, so "Unknown in Production" is two
+  clicks.
+
+The **reason** column on the detail page explains the state in a sentence, for
+example "Assessment is 51.2h old; freshness threshold is 48h". That sentence is
+the one to quote in an audit.
+
+## 5. Remediation
+
+**Compliance → Remediation** lists individual outstanding patch findings with
+hostname, advisory id, title, severity, source system, business service and
+release date.
+
+- Severity bars at the top summarise the current findings.
+- Remediation deadlines come from the active policy: critical 7 days,
+  important 30 days, moderate 90 days, low 180 days from publication.
+- PatchTrack does **not** deploy patches. Take the advisory id and hostname to
+  Satellite, SCCM or the Solaris process.
+
+## 6. History and trends
+
+**Compliance → History & trends** shows the monthly trend over twelve months
+and the list of captured snapshots.
+
+A snapshot is a frozen record: the population, the counts, the policy version
+and the methodology, captured at a moment in time. It never changes. Monthly
+reports are generated from snapshots, which is why a report for a past month
+still shows the past month's number.
+
+If the trend is empty, no daily snapshots have been captured yet — they
+accumulate from the day the platform went into service.
+
+## 7. Inventory
+
+**Inventory → Server inventory** is the full asset list from AssetExplorer,
+including assets outside the compliance scope. Use it to confirm what
+PatchTrack believes about a server: hostname, FQDN, IP, OS, environment,
+business group, application group, lifecycle, scope and patch source.
+
+- **Exclude** takes a server out of the compliance denominator. It requires a
+  reason and is recorded in the audit trail. Use it only for a server that is
+  genuinely outside scope; a decommissioned server should be retired in
+  AssetExplorer instead.
+- **Include** reverses an exclusion.
+- The **Search** box matches every column, including the ones not shown by
+  default in a narrow window: owner, department, location, lifecycle, patch
+  source and compliance state. A status name is an exact term — `Compliant`
+  shows compliant servers only.
+- The **Status** dropdown above the table selects one compliance state exactly
+  (Compliant, Non-compliant, Unknown, Stale) and combines with the search box
+  and the paging.
+
+If a field is wrong, fix it in AssetExplorer. PatchTrack does not edit its own
+inventory, by design — one authoritative record, one place to correct it.
+
+### Editing environment and business service
+
+Environment and business service are the exception, because a reorganisation
+or migration is often recorded late in the source system. Operations and
+administrators can correct either locally without touching AssetExplorer:
+
+1. In **Server inventory**, press **Edit** in the **Placement** column (or open
+   a server and press **Edit environment / business service**).
+2. Choose the environment and/or business service from the list. Leave a field
+   at **Use AssetExplorer value** to keep the source value for it.
+3. Write a short reason — it is required and is recorded in the audit trail.
+4. Press **Save override**.
+
+The values in those lists are maintained by an administrator in
+**Settings → Inventory placement values**, not typed per server. That is what
+keeps `Production` from being entered three ways in a week. If a needed value is
+missing, ask an administrator to add it; until the list for a field is
+configured, the editor falls back to free text.
+
+The correction is stored *beside* the source value:
+
+- The AssetExplorer sync **keeps running exactly as before**. It continues to
+  update its own columns on every collection and never overwrites or clears the
+  override. The asset stays matched by its immutable AssetExplorer ID, so
+  reconciliation is unaffected.
+- Lists, filters, the dashboard's environment and business-service panels,
+  the compliance engine, reports and the Grafana dashboard all use the
+  effective placement, so a correction moves the server into its new group on
+  the next refresh. Overridden cells carry a **LOCAL** marker whose
+  tooltip names the AssetExplorer value, and the server detail shows both.
+  A value that an administrator renamed in Settings shows the new name with
+  `(AssetExplorer: old name)` and no **LOCAL** marker — it is the list, not a
+  local correction, that changed it.
+- If the environment changes which policy scope rule applies, saving the
+  override re-evaluates compliance, so the persisted states follow immediately.
+- **Use AssetExplorer values** in the same dialog removes the override; the
+  source value applies at once, with no sync needed.
+- Both actions are audited (`inventory.placement_overridden` and
+  `inventory.placement_restored`) with the old value, the new value, the reason
+  and the operator.
+
+Compliance history is not rewritten. Snapshots already captured keep the
+placement they were captured with; the next snapshot uses the effective value.
+
+## 8. Reconciliation
+
+**Inventory → Reconciliation** shows patch records that could not be matched to
+an AssetExplorer server.
+
+| Reason | What it means | What to do |
+|--------|---------------|------------|
+| `assessment_unmatched` | The patch system reports a host AssetExplorer does not have | Add it to AssetExplorer |
+| `ambiguous_match` | Two assets share a hostname, FQDN or IP | Fix the duplicate in AssetExplorer, then resolve |
+| `identifier_changed` | A patch system id now points at a different host than before | Confirm with the patch team, then resolve |
+
+Resolving a conflict requires choosing the asset (or confirming there is none)
+and writing a note. Nothing is guessed automatically — a patch assessment is
+never attached to the wrong server.
+
+An unattended conflict means those servers show as Unknown. That is the honest
+answer, and the conflict list is where to fix it.
+
+## 9. Reports
+
+**Reporting → Reports** lists generated reports: type, period, status, size,
+requested by and digest.
+
+- **Generate** asks for a type and a month or quarter. A snapshot must already
+  exist for that period; if not, the message tells you so and you can capture
+  one from the same screen.
+- **Download** retrieves the archived PDF.
+- **Retry** applies to a failed report. It never replaces a completed one.
+- The **SHA-256** shown against a report lets an auditor verify that the copy
+  they hold is the copy you issued.
+
+Report contents are described in [reporting.md](reporting.md). Every report
+states its own methodology, population and denominator.
+
+### Schedules
+
+**Reporting → Schedules** creates recurring reports: monthly or quarterly, a
+day of the month (1–28), an hour, a timezone and a recipient list.
+
+- The report covers the period that **ended**, not the one in progress.
+- A scheduled period runs at most once, even if two scheduler instances race.
+- Email delivery is recorded separately. If the mail fails, the report is still
+  generated and downloadable; ask for a resend rather than regenerating.
+
+## 10. Administration
+
+| Screen | Role required | Purpose |
+|--------|---------------|---------|
+| Integrations | Administrator | Endpoint, credential reference, TLS, enable, run now |
+| Compliance policy | Administrator | Target, freshness, blocking severities, scope rules |
+| Users & roles | Administrator | Accounts, roles, password resets |
+| Audit trail | Administrator | Who did what, when |
+| Operational health | Operations | Integration status and manual collection |
+| Settings | Administrator | Organisation name on reports; environment and business-service lists |
+
+### Editing policy
+
+1. Open **Compliance policy**, choose **New version**.
+2. Change the target percentage, freshness hours, blocking severities or
+   scope rules. Write a change note — it is shown in the report's methodology.
+3. **Activate** the version. This re-evaluates the estate immediately.
+
+Past snapshots keep the policy version they were captured with. Activating a
+new policy does not rewrite history.
+
+### Adding a user
+
+**Users & roles → Add user**: username, display name, email, role, and an
+initial password of at least 12 characters. Deliver the password out of band,
+never by email with a report. The account must change it at first sign-in.
+
+### Managing the placement lists
+
+**Settings → Inventory placement values** holds the environment and business
+service values an operator can choose when correcting a server.
+
+- **Add** a value: type it and press **Add** (or Enter). Duplicates are refused
+  case-insensitively, so `Production`, `production` and `Production ` are one
+  entry.
+- **Edit** renames the value everywhere. Every server holding the old spelling
+  shows the new name in the inventory, filters, the dashboard panels, the
+  compliance engine, reports and Grafana on the next render. The *In use*
+  column tells you how many servers a rename will carry. Compliance is
+  re-evaluated after a rename, because a scope rule may match the environment
+  by name.
+- **Delete** is available only when *In use* is `—`. A value that servers still
+  hold cannot be removed, because the inventory would then show a placement the
+  list no longer recognises; rename it instead. Deleting an unused entry
+  removes it from the picker.
+
+A rename does **not** rewrite the inventory source. The value AssetExplorer
+reports stays in `environment_source` / `business_group_source`, is shown beside
+the effective value on the server detail, and the next collection cannot undo
+the rename: the old spelling resolves to the new name on every read. Nothing is
+written back to AssetExplorer, so correct the source there when you can — that
+removes the need for the alias.
+
+A former name cannot be added again as a new value while it still resolves to
+its renamed entry, and renaming a second entry onto another entry's former name
+is refused. Both would make one spelling mean two things.
+
+The list starts as the distinct values already present in the inventory, and
+the AssetExplorer sync never writes to it. If a list is emptied, the placement
+editor falls back to free text rather than blocking the correction.
+
+## 11. Understanding the numbers
+
+| Question | Where to look |
+|----------|---------------|
+| Why did compliance drop? | Compare the dashboard by environment/business service with last month's report |
+| Why is a server Unknown? | Server detail → reason |
+| Why is a server Stale? | Reason shows the assessment age and the threshold |
+| Why is a server excluded? | Server detail, or the inventory row's exclusion reason |
+| Why don't these numbers match another tool? | Check whether that tool excludes unknown/stale data, and whether the populations match |
+| Is this report the one we issued? | Compare SHA-256 |
+| When did we last collect? | Freshness line, and Operational health |
+
+## 12. Keyboard and accessibility notes
+
+- The UI is server-side rendered HTML with no build step; it is usable with a
+  screen reader.
+- Status is conveyed with a text label as well as colour.
+- The page is designed for a desktop browser at 1280 px or wider. There is no
+  mobile layout.
+
+## 13. Getting help
+
+Send your administrator: the screen, the period, the filter selection, and the
+hostname or report id involved. Do not send passwords or `.env` contents.

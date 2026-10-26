@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>PatchTrack — Patch Compliance</title>
+<link rel="stylesheet" href="/static/styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%232a78d6'/><path d='M9 16.5l4.6 4.5L23 11.5' stroke='white' stroke-width='3.2' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+</head>
+<body>
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">PT</div>
+      <div>
+        <div class="brand-name">PatchTrack</div>
+        <div class="brand-sub">Patch compliance</div>
+      </div>
+    </div>
+    <nav class="nav" id="nav" aria-label="Primary"></nav>
+    <div class="sidebar-foot">
+      <div class="user-chip">
+        <div class="avatar" id="user-initials">–</div>
+        <div>
+          <div class="user-name" id="user-name">–</div>
+          <div class="user-role" id="user-role">–</div>
+        </div>
+      </div>
+      <button class="btn btn-sm" id="logout" style="width:100%;justify-content:center">Sign out</button>
+    </div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <h1 id="page-title">Executive dashboard</h1>
+      <span id="page-context" class="topbar-meta"></span>
+      <span class="spacer"></span>
+      <span class="topbar-meta" id="last-refresh"></span>
+      <button class="btn btn-sm" id="kiosk-toggle" title="Hide the navigation for a wall display (K)" aria-pressed="false">⛶ TV mode</button>
+      <button class="btn btn-sm" id="refresh" title="Refresh data">Refresh</button>
+    </header>
+    <main class="content" id="view" tabindex="-1"></main>
+  </div>
+</div>
+<div id="modal-root"></div>
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>

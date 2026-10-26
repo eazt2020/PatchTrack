@@ -1,0 +1,77 @@
+# PatchTrack per-service systemd unit (native installation, no containers).
+#
+# Install as /etc/systemd/system/patchtrack@.service and enable one instance
+# per service:
+#
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now patchtrack-migrate.service
+#   sudo systemctl enable --now patchtrack@identity patchtrack@inventory \
+#     patchtrack@compliance patchtrack@reporting patchtrack@gateway
+#
+# Each instance needs its own port, in /etc/patchtrack/ports/<instance>:
+#
+#   PORT=8001        # identity     (8002 inventory, 8003 compliance,
+#                    #               8004 reporting, 8005 gateway)
+#
+# Shared configuration lives in /etc/patchtrack/.env (mode 0600, owned by
+# root:patchtrack). Nothing in this unit is a credential.
+[Unit]
+Description=PatchTrack %i service
+Documentation=file:/opt/patchtrack/docs/operations-runbook.md
+After=network-online.target postgresql-13.service patchtrack-migrate.service
+Wants=network-online.target
+Requires=patchtrack-migrate.service
+ConditionPathIsDirectory=/opt/patchtrack/services/%i
+
+[Service]
+Type=simple
+User=patchtrack
+Group=patchtrack
+
+# A default for the log level, so an environment file that omits it still
+# starts. It is set before the files below, so a value in /etc/patchtrack/.env
+# wins. uvicorn accepts only lowercase names (critical|error|warning|info|
+# debug|trace); systemd cannot change the case, so the file must use them.
+Environment=PATCHTRACK_LOG_LEVEL=info
+
+# The shared environment first, then the per-instance port. Both are optional
+# files so a missing one fails loudly at start rather than silently binding an
+# unintended address: PORT has no default here.
+EnvironmentFile=/etc/patchtrack/.env
+EnvironmentFile=/etc/patchtrack/ports/%i
+Environment=PATCHTRACK_SERVICE=%i
+Environment=PYTHONPATH=/opt/patchtrack/services/common:/opt/patchtrack/services
+WorkingDirectory=/opt/patchtrack
+
+ExecStart=/opt/patchtrack-venv/bin/python -m uvicorn app.main:app \
+    --app-dir /opt/patchtrack/services/%i \
+    --host 127.0.0.1 --port ${PORT} \
+    --proxy-headers --forwarded-allow-ips ${PATCHTRACK_FORWARDED_IPS} \
+    --no-server-header --log-level ${PATCHTRACK_LOG_LEVEL}
+
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+
+# Hardening. The service never needs to write anything outside the report and
+# Solaris inbox directories, and never needs a capability.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ReadWritePaths=/var/lib/patchtrack
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

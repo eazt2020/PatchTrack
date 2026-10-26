@@ -1,0 +1,2413 @@
+/* PatchTrack console — vanilla ES-module SPA.
+ *
+ * Authorization is enforced by the services; the UI only hides controls the
+ * signed-in role cannot use. Deep links are hash routes so a refresh keeps
+ * the user on the same view.
+ */
+
+import { api, download } from "/static/api.js";
+import {
+  STATUS, donut, legend, severityBars,
+  stackedColumns, stackedRows, targetColumns, trendLine,
+} from "/static/charts.js";
+import {
+  alert, card, debounce, escapeHtml, fmtDate, fmtNumber, fmtPct, fmtRelative,
+  h, modal, mount, pill, select, spinnerRows, statePill, statTile,
+  table, toMonthInput,
+} from "/static/ui.js";
+
+const BASIS_CHOICES = [
+  { value: "monthly", label: "Monthly" },
+  { value: "quarterly", label: "Quarterly" },
+  { value: "yearly", label: "Yearly" },
+];
+const REFRESH_CHOICES = [
+  { value: "0", label: "Off" },
+  { value: "30", label: "30 seconds" },
+  { value: "60", label: "1 minute" },
+  { value: "300", label: "5 minutes" },
+];
+const BASIS_POINTS = { monthly: 12, quarterly: 8, yearly: 5 };
+const BASIS_NOUNS = { monthly: "months", quarterly: "quarters", yearly: "years" };
+
+function stored(key, fallback) {
+  try {
+    return localStorage.getItem(key) ?? fallback;
+  } catch {
+    return fallback;   // private mode / storage disabled
+  }
+}
+
+function remember(key, value) {
+  try { localStorage.setItem(key, String(value)); } catch { /* optional */ }
+}
+
+const state = {
+  user: null,
+  route: "dashboard",
+  filters: {
+    environment: "", business_group: "", os_family: "", application_group: "",
+    patch_source: "",
+  },
+  dimensions: {},
+  // The executive dashboard's own preferences. They are per browser, not per
+  // account: a wall display should keep its basis and refresh rate after a
+  // reload without touching anyone else's view.
+  dashboard: {
+    basis: BASIS_CHOICES.some((c) => c.value === stored("patchtrack.basis", "monthly"))
+      ? stored("patchtrack.basis", "monthly") : "monthly",
+    refreshSeconds: REFRESH_CHOICES.some(
+      (c) => c.value === stored("patchtrack.refresh", "60"))
+      ? stored("patchtrack.refresh", "60") : "60",
+  },
+  kiosk: stored("patchtrack.kiosk", "0") === "1",
+};
+
+const ROUTES = [
+  { group: "Compliance" },
+  { id: "dashboard", label: "Executive dashboard", icon: "▦", perm: "dashboard:view" },
+  { id: "servers", label: "Non-compliant servers", icon: "▤", perm: "compliance:view" },
+  { id: "findings", label: "Remediation", icon: "⚑", perm: "findings:view" },
+  { id: "trends", label: "History & trends", icon: "◷", perm: "dashboard:view" },
+  { group: "Inventory" },
+  { id: "inventory", label: "Server inventory", icon: "▣", perm: "inventory:view" },
+  { id: "reconciliation", label: "Reconciliation", icon: "⇄", perm: "inventory:view" },
+  { group: "Reporting" },
+  { id: "reports", label: "Reports", icon: "▧", perm: "reports:view" },
+  { id: "schedules", label: "Schedules", icon: "◔", perm: "reports:view" },
+  { group: "Administration" },
+  { id: "integrations", label: "Integrations", icon: "⇌", perm: "integrations:view" },
+  { id: "policies", label: "Compliance policy", icon: "◎", perm: "compliance:view" },
+  { id: "users", label: "Users & roles", icon: "☖", perm: "users:manage" },
+  { id: "audit", label: "Audit trail", icon: "⌸", perm: "audit:view" },
+  { id: "health", label: "Operational health", icon: "♡", perm: "integrations:view" },
+  { id: "settings", label: "Settings", icon: "⚙", perm: "settings:manage" },
+];
+
+const view = document.getElementById("view");
+const nav = document.getElementById("nav");
+const pageTitle = document.getElementById("page-title");
+const pageContext = document.getElementById("page-context");
+const lastRefresh = document.getElementById("last-refresh");
+
+const can = (permission) =>
+  state.user?.permissions?.includes("*") || state.user?.permissions?.includes(permission);
+
+/* ------------------------------------------------------------------ router */
+function parseHash() {
+  const raw = window.location.hash.replace(/^#\/?/, "");
+  const [path, query = ""] = raw.split("?");
+  return { path: path || "dashboard", params: new URLSearchParams(query) };
+}
+
+function navigate(path, params) {
+  const query = params ? `?${new URLSearchParams(params)}` : "";
+  window.location.hash = `#/${path}${query}`;
+}
+
+/* A route render is asynchronous. If the operator changes the hash again while
+ * a fetch is in flight, the older render must not paint over the newer one. */
+let renderToken = 0;
+
+async function renderRoute() {
+  renderToken += 1;
+  const { path, params } = parseHash();
+  // The dashboard arms its own timer; any other route must not inherit it.
+  stopDashboardRefresh();
+  // A wall display can be bookmarked as #/dashboard?tv=1. The parameter wins
+  // over the stored preference for this visit but does not overwrite it.
+  if (params.get("tv") === "1") setKiosk(true, { persist: false });
+  const route = ROUTES.find((r) => r.id === path) || ROUTES.find((r) => r.id === "dashboard");
+  if (route.perm && !can(route.perm)) {
+    mount(view, alert("error", "Your role does not permit access to this area."));
+    return;
+  }
+  state.route = route.id;
+  renderNav();
+  pageTitle.textContent = route.label;
+  setActiveNav(route.id);
+  try {
+    const renderer = RENDERERS[route.id];
+    if (!renderer) throw new Error(`Unknown view ${route.id}`);
+    await renderer(params);
+  } catch (error) {
+    mount(view, alert("error",
+      `This view could not be loaded: ${error.message || error}`));
+  }
+}
+
+function renderNav() {
+  mount(nav, ...ROUTES.filter((r) => r.group || can(r.perm)).map((route) => {
+    if (route.group) return h("div", { class: "nav-group-label" }, route.group);
+    return h("a", {
+      href: `#/${route.id}`,
+      dataset: { route: route.id },
+    }, h("span", { class: "ico" }, route.icon), route.label);
+  }));
+}
+
+function setActiveNav(id) {
+  for (const link of nav.querySelectorAll("a")) {
+    link.classList.toggle("active", link.dataset.route === id);
+  }
+}
+
+/* ------------------------------------------------------------------ shared pieces */
+let dimensionsPromise = null;
+
+async function loadDimensions(force = false) {
+  if (!dimensionsPromise || force) {
+    dimensionsPromise = api("inventory/dimensions").catch(() => ({}));
+  }
+  state.dimensions = await dimensionsPromise;
+  return state.dimensions;
+}
+
+function filterBar(onChange, options = {}) {
+  const dims = state.dimensions || {};
+  const fields = [
+    ["environment", "Environment"],
+    ["business_group", "Business service"],
+    ["application_group", "Application group"],
+    ["os_family", "Operating system"],
+    ["patch_source", "Patch source"],
+  ];
+  const bar = h("div", { class: "filterbar" });
+  for (const [key, label] of fields) {
+    if (options.skip?.includes(key)) continue;
+    bar.appendChild(select({
+      label,
+      value: state.filters[key],
+      options: dims[key] || [],
+      allLabel: "All",
+      onChange: (value) => {
+        state.filters[key] = value;
+        onChange();
+      },
+    }));
+  }
+  if (options.extra) bar.appendChild(options.extra);
+  if (Object.values(state.filters).some(Boolean)) {
+    bar.appendChild(h("button", {
+      class: "btn btn-sm",
+      style: { marginBottom: "1px" },
+      onclick: () => {
+        for (const key of Object.keys(state.filters)) state.filters[key] = "";
+        onChange();
+      },
+    }, "Clear filters"));
+  }
+  return bar;
+}
+
+function filterQuery() {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(state.filters)) {
+    if (value) params.set(key, value);
+  }
+  return params.toString();
+}
+
+function segmented(label, choices, value, onChange) {
+  const group = h("div", { class: "segmented", role: "group", "aria-label": label });
+  for (const choice of choices) {
+    group.appendChild(h("button", {
+      type: "button",
+      class: choice.value === value ? "active" : "",
+      "aria-pressed": choice.value === value ? "true" : "false",
+      onclick: () => onChange(choice.value),
+    }, choice.label));
+  }
+  return h("div", { class: "field" },
+    h("span", { class: "field-label" }, label), group);
+}
+
+/* --------------------------------------------------------------- list tools */
+/* Every register in the console is a list an operator needs to narrow and
+ * re-order. These controls work on the rows the view has already fetched, so a
+ * filter never changes a total: the count line says "showing X of Y" and the
+ * unfiltered totals stay visible in the card subtitle. Server-side lists
+ * (server list, inventory) pass the sort to the API instead, because the page
+ * only holds one page of rows.
+ *
+ * A facet is { field, label, format?, value? }; a sort is
+ * { field, label, numeric?, rank?, dir? }. `rank` orders enumerated values such
+ * as severity by meaning rather than alphabetically. */
+const LIST_STATE = new Map();
+
+function listState(key, defaults) {
+  if (!LIST_STATE.has(key)) LIST_STATE.set(key, { ...defaults });
+  const stateForList = LIST_STATE.get(key);
+  for (const [name, value] of Object.entries(defaults)) {
+    if (!(name in stateForList)) stateForList[name] = value;
+  }
+  return stateForList;
+}
+
+function rowValue(row, field) {
+  return field.split(".").reduce(
+    (value, part) => (value === null || value === undefined ? value : value[part]), row);
+}
+
+function facetValue(row, facet) {
+  if (facet.value) return String(facet.value(row));
+  const value = rowValue(row, facet.field);
+  return value === null || value === undefined ? "" : String(value);
+}
+
+function compareRows(a, b, sort, direction) {
+  const av = sort.value ? sort.value(a) : rowValue(a, sort.field);
+  const bv = sort.value ? sort.value(b) : rowValue(b, sort.field);
+  const blankA = av === null || av === undefined || av === "";
+  const blankB = bv === null || bv === undefined || bv === "";
+  // Rows without a value sort last in both directions: "never" is not "oldest".
+  if (blankA || blankB) return blankA && blankB ? 0 : blankA ? 1 : -1;
+  let result;
+  if (sort.rank) {
+    const ai = sort.rank.indexOf(String(av));
+    const bi = sort.rank.indexOf(String(bv));
+    result = (ai < 0 ? sort.rank.length : ai) - (bi < 0 ? sort.rank.length : bi);
+  } else if (sort.numeric) {
+    result = Number(av) - Number(bv);
+  } else {
+    result = String(av).localeCompare(String(bv), undefined,
+      { numeric: true, sensitivity: "base" });
+  }
+  return direction === "desc" ? -result : result;
+}
+
+/* Search reads every value in the row, not one nominated column. A single term
+ * can hit a hostname, an operating system, an environment, a status, a title or
+ * a note, which is what an operator means by "search". Nested objects and
+ * arrays are walked so a report's delivery status or a schedule's recipients
+ * are searchable too. Values are only ever compared, never rendered. */
+function searchableText(value) {
+  const parts = [];
+  const visit = (item) => {
+    if (item === null || item === undefined) return;
+    if (Array.isArray(item)) { item.forEach(visit); return; }
+    if (typeof item === "object") { Object.values(item).forEach(visit); return; }
+    parts.push(String(item));
+  };
+  visit(value);
+  return parts.join(" ").toLowerCase();
+}
+
+function applyList(rows, st, facets, sorts) {
+  let out = rows.slice();
+  for (const facet of facets) {
+    const wanted = st[facet.field] || "";
+    if (!wanted) continue;
+    out = out.filter((row) => facetValue(row, facet) === wanted);
+  }
+  const needle = st.q.trim().toLowerCase();
+  if (needle) {
+    // One flattening per row per keystroke; the rows are pages, not estates.
+    const text = new Map();
+    const haystack = (row) => {
+      if (!text.has(row)) text.set(row, searchableText(row));
+      return text.get(row);
+    };
+    out = out.filter((row) => haystack(row).includes(needle));
+  }
+  const sort = sorts.find((entry) => entry.field === st.sort);
+  if (sort) out.sort((a, b) => compareRows(a, b, sort, st.dir));
+  return out;
+}
+
+function listPanel(key, {
+  title, subtitle, columns, rows, empty = "No records found.",
+  searchLabel = "Search", searchPlaceholder = "Search every column…",
+  facets = [], sorts = [], extra = null, note = null,
+}) {
+  const source = rows || [];
+  const st = listState(key, {
+    q: "",
+    sort: sorts[0]?.field || "",
+    dir: sorts[0]?.dir || "asc",
+    ...Object.fromEntries(facets.map((facet) => [facet.field, ""])),
+  });
+
+  const body = h("div");
+  const count = h("div", { class: "list-count muted small" });
+  const direction = h("button", {
+    type: "button", class: "btn btn-sm", title: "Reverse the sort direction",
+    onclick: () => { st.dir = st.dir === "asc" ? "desc" : "asc"; paint(); },
+  });
+
+  const tools = [h("div", { class: "field list-search" },
+    h("label", {}, searchLabel),
+    h("input", {
+      type: "search", placeholder: searchPlaceholder, value: st.q,
+      "aria-label": `${searchLabel} ${title}`,
+      oninput: debounce((event) => { st.q = event.target.value; paint(); }, 120),
+    }))];
+
+  for (const facet of facets) {
+    const seen = new Map();
+    for (const row of source) {
+      const value = facetValue(row, facet);
+      if (value && !seen.has(value)) {
+        seen.set(value, facet.format ? facet.format(value) : value);
+      }
+    }
+    tools.push(select({
+      label: facet.label,
+      value: st[facet.field],
+      options: [...seen.entries()]
+        .sort((a, b) => String(a[1]).localeCompare(String(b[1]), undefined, { numeric: true }))
+        .map(([value, label]) => ({ value, label })),
+      allLabel: "All",
+      onChange: (value) => { st[facet.field] = value; paint(); },
+    }));
+  }
+
+  if (sorts.length) {
+    tools.push(select({
+      label: "Sort by",
+      value: st.sort,
+      options: sorts.map((sort) => ({ value: sort.field, label: sort.label })),
+      allLabel: null,
+      onChange: (value) => {
+        st.sort = value;
+        st.dir = sorts.find((sort) => sort.field === value)?.dir || "asc";
+        paint();
+      },
+    }));
+    tools.push(h("div", { class: "field" },
+      h("span", { class: "field-label" }, "Order"), direction));
+  }
+
+  function paint() {
+    const shown = applyList(source, st, facets, sorts);
+    direction.textContent = st.dir === "asc" ? "↑ Ascending" : "↓ Descending";
+    direction.setAttribute("aria-label",
+      `Sort ${st.dir === "asc" ? "ascending" : "descending"}; click to reverse`);
+    body.replaceChildren(table(columns, shown, { compact: true, empty }));
+    const noun = source.length === 1 ? "row" : "rows";
+    count.textContent = shown.length === source.length
+      ? `${fmtNumber(source.length)} ${noun}`
+      : `Showing ${fmtNumber(shown.length)} of ${fmtNumber(source.length)} ${noun}`;
+  }
+
+  paint();
+  return card(title, subtitle,
+    h("div", {},
+      h("div", { class: "list-tools" }, ...tools),
+      note || null,
+      body,
+      count),
+    extra);
+}
+
+/* ----------------------------------------------------- server-side search box */
+/* The two paged registers re-fetch on a debounced keystroke, which replaces the
+ * input the operator is typing into. The box therefore owns the latest text and
+ * caret it was given, and the render that replaces it puts both back and
+ * restores focus — otherwise the caret vanishes at every pause. */
+const SEARCH_DRAFT = { route: "", value: "", caret: null, active: false };
+
+function searchBox({ route, value, placeholder, minWidth = "220px", onChange }) {
+  return h("input", {
+    type: "search", placeholder,
+    value: SEARCH_DRAFT.route === route ? SEARCH_DRAFT.value : value,
+    style: { minWidth },
+    oninput: (event) => {
+      SEARCH_DRAFT.route = route;
+      SEARCH_DRAFT.value = event.target.value;
+      SEARCH_DRAFT.caret = event.target.selectionStart;
+      SEARCH_DRAFT.active = true;
+      onChange(event.target.value);
+    },
+    onblur: () => {
+      // Replacing the focused input fires blur too. Give the browser a tick:
+      // if focus moved to another control the operator has moved on, and the
+      // next render must not pull it back.
+      setTimeout(() => {
+        if (document.activeElement && document.activeElement !== document.body) {
+          SEARCH_DRAFT.active = false;
+        }
+      }, 0);
+    },
+  });
+}
+
+function restoreSearchFocus(route, input) {
+  if (SEARCH_DRAFT.route !== route || !SEARCH_DRAFT.active) return;
+  if (input.value !== SEARCH_DRAFT.value) input.value = SEARCH_DRAFT.value;
+  input.focus({ preventScroll: true });
+  const caret = Math.min(SEARCH_DRAFT.caret ?? input.value.length, input.value.length);
+  try {
+    input.setSelectionRange(caret, caret);
+  } catch {
+    // Some input types do not expose selection; the focus restore still stands.
+  }
+}
+
+/* A debounced keystroke from a render that has since been replaced must not
+ * navigate with stale text: only the latest value the operator typed, on the
+ * route it was typed on, counts. */
+function searchAction(route, term, run) {
+  if (state.route !== route || term !== SEARCH_DRAFT.value) return;
+  run();
+}
+
+/* ------------------------------------------------------------- TV / wall mode */
+/* The left navigation and the surrounding chrome are noise on a NOC/SOC wall.
+ * Kiosk mode hides the navigation and lets the content use the full width; it
+ * is a presentation preference only, never an authorization change. */
+function setKiosk(on, { persist = true } = {}) {
+  state.kiosk = Boolean(on);
+  document.body.classList.toggle("kiosk", state.kiosk);
+  const button = document.getElementById("kiosk-toggle");
+  if (button) {
+    button.textContent = state.kiosk ? "⛶ Exit TV" : "⛶ TV mode";
+    button.title = state.kiosk
+      ? "Show the navigation (Esc)"
+      : "Hide the navigation for a wall display (K)";
+    button.setAttribute("aria-pressed", state.kiosk ? "true" : "false");
+  }
+  if (persist) remember("patchtrack.kiosk", state.kiosk ? "1" : "0");
+}
+
+function bindKiosk() {
+  setKiosk(state.kiosk, { persist: false });
+  document.getElementById("kiosk-toggle").addEventListener("click", () => {
+    setKiosk(!state.kiosk);
+  });
+  document.addEventListener("keydown", (event) => {
+    const typing = ["INPUT", "SELECT", "TEXTAREA"].includes(
+      event.target?.tagName) || event.target?.isContentEditable;
+    if (typing || event.ctrlKey || event.metaKey || event.altKey) return;
+    if (event.key === "k" || event.key === "K") {
+      event.preventDefault();
+      setKiosk(!state.kiosk);
+    } else if (event.key === "Escape" && state.kiosk
+               && !document.getElementById("modal-root").childElementCount) {
+      setKiosk(false);
+    }
+  });
+}
+
+/* --------------------------------------------------------- dashboard refresh */
+let dashboardTimer = null;
+
+function stopDashboardRefresh() {
+  if (dashboardTimer) {
+    clearInterval(dashboardTimer);
+    dashboardTimer = null;
+  }
+}
+
+function startDashboardRefresh(seconds) {
+  stopDashboardRefresh();
+  if (!seconds) return;
+  dashboardTimer = setInterval(() => {
+    // Do not pull the page out from under an operator who is reading it in a
+    // hidden tab or filling in a dialog. The next tick catches up.
+    if (document.hidden || state.route !== "dashboard") return;
+    if (document.getElementById("modal-root").childElementCount) return;
+    renderDashboard({ silent: true }).catch(() => {
+      lastRefresh.textContent =
+        `Refresh failed at ${new Date().toLocaleTimeString()} — retrying`;
+    });
+  }, seconds * 1000);
+}
+
+function freshnessLine(freshness) {
+  return h("span", {},
+    `Inventory: ${fmtRelative(freshness?.inventory_synced_at)} · `,
+    `Patch data: ${fmtRelative(freshness?.patch_synced_at)}`);
+}
+
+function kpiRow(summary) {
+  const k = summary.kpis;
+  const target = k.target_pct;
+  const gap = k.gap_pct;
+  const met = gap !== null && gap >= 0;
+  return h("div", { class: "grid grid-kpi" },
+    statTile({
+      label: "Total servers (in scope)",
+      value: fmtNumber(k.total_servers),
+      sub: k.excluded ? `${fmtNumber(k.excluded)} excluded` : "",
+      foot: "Active lifecycle, in compliance scope",
+      accent: "#3987e5",
+    }),
+    statTile({
+      label: "Compliant",
+      value: fmtNumber(k.compliant),
+      sub: fmtPct(k.compliance_pct),
+      delta: k.total_servers
+        ? fmtPct((k.compliant / Math.max(1, k.in_scope)) * 100)
+        : null,
+      tone: "good",
+      meter: k.in_scope ? (k.compliant / k.in_scope) * 100 : 0,
+      accent: STATUS.compliant,
+      foot: "No outstanding blocking findings",
+    }),
+    statTile({
+      label: "Non-compliant",
+      value: fmtNumber(k.non_compliant),
+      delta: k.in_scope ? fmtPct((k.non_compliant / k.in_scope) * 100) : null,
+      tone: "bad",
+      meter: k.in_scope ? (k.non_compliant / k.in_scope) * 100 : 0,
+      accent: STATUS.non_compliant,
+      foot: "Blocking findings outstanding",
+    }),
+    statTile({
+      label: "Unknown / no data",
+      value: fmtNumber(k.unknown + k.stale),
+      sub: `${fmtNumber(k.unknown)} unknown · ${fmtNumber(k.stale)} stale`,
+      delta: k.in_scope
+        ? fmtPct(((k.unknown + k.stale) / k.in_scope) * 100) : null,
+      tone: "neutral",
+      meter: k.in_scope ? ((k.unknown + k.stale) / k.in_scope) * 100 : 0,
+      accent: STATUS.unknown,
+      foot: "Counted against compliance, never as compliant",
+    }),
+    statTile({
+      label: "Compliance vs target",
+      value: fmtPct(k.compliance_pct),
+      sub: `Target ${fmtPct(target, 0)}`,
+      delta: gap === null ? null : `${gap >= 0 ? "+" : ""}${gap.toFixed(1)} pp`,
+      tone: gap === null ? "neutral" : met ? "good" : "bad",
+      meter: k.compliance_pct ?? 0,
+      accent: met ? STATUS.compliant : STATUS.critical,
+      foot: summary.policy?.name || "Baseline policy",
+    }),
+  );
+}
+
+const STATUS_KEYS = ["compliant", "non_compliant", "unknown"];
+const STATUS_LABELS = {
+  compliant: "Compliant", non_compliant: "Non-compliant", unknown: "Unknown / stale",
+};
+
+/* The engine groups by os_family, which stores the normalised key. The panel
+ * is read by people, so it shows the platform name, not the key. */
+const OS_FAMILY_LABELS = {
+  rhel: "RHEL",
+  windows: "Microsoft Windows",
+  solaris: "Solaris",
+  other: "Other",
+};
+
+function statusChartCard(title, subtitle, rows, mode = "columns") {
+  // A vertical list shows every group. It used to stop at seven, so an
+  // eighth business service simply disappeared from the panel with no
+  // indication that anything was missing. Long lists scroll instead.
+  const body = h("div", { class: mode === "rows" ? "chart-scroll" : "" });
+  const legendBox = h("div", { class: "legend" });
+  const cardEl = card(title, subtitle, h("div", {}, body, legendBox));
+  if (mode === "rows") {
+    stackedRows(body, {
+      rows: rows.map((r) => ({ ...r, unknown: (r.unknown || 0) + (r.stale || 0) })),
+      keys: STATUS_KEYS, labels: STATUS_LABELS, colors: STATUS, withPct: true,
+      maxRows: rows.length,
+    });
+  } else {
+    stackedColumns(body, {
+      rows: rows.map((r) => ({ ...r, unknown: (r.unknown || 0) + (r.stale || 0) })),
+      keys: STATUS_KEYS, labels: STATUS_LABELS, colors: STATUS, height: 230,
+    });
+  }
+  legend(legendBox, STATUS_KEYS.map((key) => ({
+    label: STATUS_LABELS[key], color: STATUS[key],
+  })));
+  return cardEl;
+}
+
+/* ------------------------------------------------------------------ dashboard */
+async function renderDashboard({ silent = false } = {}) {
+  // A timed refresh must not blank a working dashboard while it fetches: the
+  // new content replaces the old one only after every request has succeeded.
+  if (!silent) mount(view, spinnerRows(3));
+  const basis = state.dashboard.basis;
+  const points = BASIS_POINTS[basis];
+  const noun = BASIS_NOUNS[basis];
+  const [dims] = await Promise.all([loadDimensions(), api("me").then((me) => {
+    state.user = { ...state.user, ...me };
+  })]);
+  const query = filterQuery();
+  const [summary, trend] = await Promise.all([
+    api(`compliance/summary${query ? `?${query}` : ""}`),
+    api(`compliance/trends?period=${basis}&points=${points}`),
+  ]);
+  const refreshSeconds = Number(state.dashboard.refreshSeconds) || 0;
+  lastRefresh.textContent = refreshSeconds
+    ? `Updated ${new Date().toLocaleTimeString()} · every ${
+      REFRESH_CHOICES.find((c) => c.value === String(refreshSeconds))?.label || `${refreshSeconds}s`}`
+    : `Updated ${new Date().toLocaleTimeString()} · auto-refresh off`;
+  // freshnessLine builds a node, so it is mounted rather than stringified.
+  pageContext.replaceChildren(freshnessLine(summary.freshness));
+
+  // One point per month/quarter/year, each the average of the daily snapshots
+  // recorded in that period. The API sends the sample count so the table can
+  // show how many observations a point rests on.
+  const series = (trend.series || []).map((row) => ({
+    label: row.label,
+    value: row.compliance_pct,
+    target: row.target_pct,
+    total: row.total_servers,
+    compliant: row.compliant_servers,
+    samples: row.samples,
+    change: null,
+  }));
+  series.forEach((point, index) => {
+    if (index === 0 || point.value === null) return;
+    const before = series[index - 1].value;
+    point.change = before === null ? null : Number(point.value) - Number(before);
+  });
+
+  const donutBody = h("div");
+  donut(donutBody, {
+    rows: [
+      { label: "Compliant", value: summary.kpis.compliant, color: STATUS.compliant },
+      { label: "Non-compliant", value: summary.kpis.non_compliant, color: STATUS.non_compliant },
+      { label: "Unknown", value: summary.kpis.unknown, color: STATUS.unknown },
+      { label: "Stale", value: summary.kpis.stale, color: STATUS.stale },
+    ],
+    centerValue: fmtPct(summary.kpis.compliance_pct),
+    centerLabel: "compliance",
+  });
+  const donutLegend = h("div", { class: "legend" });
+  legend(donutLegend, [
+    { label: `Compliant ${fmtNumber(summary.kpis.compliant)}`, color: STATUS.compliant },
+    { label: `Non-compliant ${fmtNumber(summary.kpis.non_compliant)}`, color: STATUS.non_compliant },
+    { label: `Unknown ${fmtNumber(summary.kpis.unknown)}`, color: STATUS.unknown },
+    { label: `Stale ${fmtNumber(summary.kpis.stale)}`, color: STATUS.stale },
+  ]);
+
+  const trendBody = h("div");
+  if (basis === "monthly") {
+    trendLine(trendBody, {
+      points: series, target: summary.kpis.target_pct,
+      empty: "No daily snapshots recorded in the last 12 months.",
+    });
+  } else {
+    targetColumns(trendBody, {
+      points: series, target: summary.kpis.target_pct,
+      empty: `No daily snapshots recorded in the last ${points} ${noun}.`,
+    });
+  }
+
+  // The table is the accessible counterpart of the chart: same numbers, the
+  // observation count behind each point, and the change against the period
+  // before it.
+  const periodTable = table([
+    { label: "Period", key: "label" },
+    { label: "Compliance", numeric: true,
+      render: (r) => fmtPct(r.value) },
+    { label: "Target", numeric: true, render: (r) => fmtPct(r.target, 0) },
+    { label: "Change", numeric: true, render: (r) => {
+      if (r.change === null || Number.isNaN(r.change)) return "—";
+      return h("span", {
+        style: { color: r.change >= 0 ? STATUS.compliant : STATUS.non_compliant },
+      }, `${r.change >= 0 ? "+" : ""}${r.change.toFixed(1)} pp`);
+    } },
+    { label: "Servers (avg)", numeric: true, render: (r) => fmtNumber(r.total) },
+    { label: "Snapshots", numeric: true, render: (r) => fmtNumber(r.samples) },
+  ], series.slice().reverse(), {
+    compact: true,
+    empty: `No daily snapshots in the last ${points} ${noun}.`,
+  });
+
+  const severityBody = h("div");
+  severityBars(severityBody,
+    (summary.severity || []).map((s) => ({ severity: s.severity, count: s.count })));
+
+  const recent = await api(
+    `compliance/servers?state=non_compliant&page_size=6${query ? `&${query}` : ""}`
+  ).catch(() => ({ items: [] }));
+  const recentTable = table([
+    { label: "Hostname", render: (r) => h("a", {
+      href: "#", onclick: (e) => { e.preventDefault(); openServer(r.id); },
+    }, r.hostname) },
+    { label: "IP address", key: "ip_address", mono: true },
+    { label: "OS", render: (r) => `${r.os_name} ${r.os_version}`.trim() },
+    { label: "Environment", key: "environment" },
+    { label: "Business service", key: "business_group" },
+    { label: "Missing patches", numeric: true, render: (r) => fmtNumber(r.total_patches) },
+    { label: "Last checked", render: (r) => fmtDate(r.last_assessed_at, true) },
+  ], recent.items, { compact: true, empty: "No non-compliant servers match these filters." });
+
+  const topBusiness = (summary.by_business_group || [])
+    .slice()
+    .sort((a, b) => (b.non_compliant || 0) - (a.non_compliant || 0))
+    .slice(0, 6);
+  const topTable = table([
+    { label: "Business service", key: "group" },
+    { label: "Total", numeric: true, render: (r) => fmtNumber(r.total_servers) },
+    { label: "Non-compliant", numeric: true,
+      render: (r) => h("span", { style: { color: "#ff9a9a" } }, fmtNumber(r.non_compliant)) },
+    { label: "%", numeric: true,
+      render: (r) => (r.in_scope ? fmtPct((r.non_compliant / r.in_scope) * 100) : "—") },
+  ], topBusiness, { compact: true });
+
+  const controls = h("div", { class: "dashboard-controls" },
+    segmented("Basis", BASIS_CHOICES, basis, (value) => {
+      state.dashboard.basis = value;
+      remember("patchtrack.basis", value);
+      renderDashboard();
+    }),
+    select({
+      label: "Auto-refresh",
+      value: state.dashboard.refreshSeconds,
+      options: REFRESH_CHOICES,
+      allLabel: null,
+      onChange: (value) => {
+        state.dashboard.refreshSeconds = value;
+        remember("patchtrack.refresh", value);
+        renderDashboard();
+      },
+    }));
+
+  const periodTitle = {
+    monthly: "Monthly compliance trend",
+    quarterly: "Quarterly compliance",
+    yearly: "Yearly compliance",
+  }[basis];
+
+  mount(view,
+    filterBar(renderDashboard, { extra: controls }),
+    h("div", { class: "stack", style: { marginTop: "14px" } },
+      kpiRow(summary),
+      h("div", { class: "grid grid-3" },
+        statusChartCard("Compliance by operating system", "Server counts by OS family",
+          (summary.by_os || []).map((row) => ({
+            ...row, group: OS_FAMILY_LABELS[row.group] || row.group,
+          }))),
+        statusChartCard("Compliance by environment", "Server counts by environment",
+          summary.by_environment || []),
+        statusChartCard("Compliance by business service", "Server counts by business service",
+          summary.by_business_group || [], "rows")),
+      h("div", { class: "grid grid-2-1" },
+        card("Patch status distribution", `${fmtNumber(summary.kpis.total_servers)} servers in population`,
+          h("div", { class: "row", style: { justifyContent: "center", gap: "26px" } },
+            donutBody, donutLegend)),
+        card("Outstanding remediation", "Findings by severity",
+          severityBody)),
+      h("div", { class: "grid grid-2" },
+        card(periodTitle,
+          `Last ${points} ${noun} · average of daily snapshots · target ${
+            fmtPct(summary.kpis.target_pct, 0)}`,
+          trendBody),
+        card("Period summary",
+          `Same observations as the chart · change is against the previous ${basis.slice(0, -2)}`,
+          periodTable)),
+      h("div", { class: "grid grid-2-1" },
+        card("Recent non-compliant servers", "Highest outstanding patch counts",
+          recentTable,
+          h("a", { class: "card-link", href: "#/servers" }, "View all →")),
+        card("Top non-compliance by business service", "Largest gaps by count",
+          topTable)),
+    ));
+  startDashboardRefresh(refreshSeconds);
+}
+
+/* ------------------------------------------------------------------ servers */
+async function renderServers(params) {
+  const token = renderToken;
+  mount(view, spinnerRows(3));
+  await loadDimensions();
+  if (token !== renderToken) return;
+  const page = Number(params?.get("page") || 1);
+  const stateFilter = params?.get("state") ?? "non_compliant";
+  const search = params?.get("q") || "";
+  const sort = params?.get("sort") || "total_patches";
+  const direction = params?.get("dir") === "asc" ? "asc" : "desc";
+  const query = new URLSearchParams({ page: String(page), page_size: "25" });
+  if (stateFilter) query.set("state", stateFilter);
+  const merged = new URLSearchParams(filterQuery());
+  for (const [key, value] of merged) query.set(key, value);
+  if (search) query.set("search", search);
+  query.set("sort", sort);
+  query.set("direction", direction);
+  const data = await api(`compliance/servers?${query.toString()}`);
+  if (token !== renderToken) return;   // a newer keystroke or navigation won
+
+  // The list is paged by the service, so the sort is part of the query, not a
+  // client-side rearrangement of the 25 rows on screen.
+  const link = (changes = {}) => {
+    const next = new URLSearchParams();
+    const keep = { state: stateFilter, q: search, sort, dir: direction, ...changes };
+    for (const [key, value] of Object.entries(keep)) {
+      if (value && !(key === "dir" && value === "desc")
+          && !(key === "sort" && value === "total_patches")) next.set(key, value);
+    }
+    navigate("servers", next);
+  };
+  const searchInput = searchBox({
+    route: "servers",
+    value: search,
+    placeholder: "Any column — host, IP, OS, environment…",
+    onChange: debounce((term) => searchAction("servers", term,
+      () => link({ q: term, page: "" })), 500),
+  });
+  // Each field carries the direction that reads naturally for it, so choosing
+  // "Hostname" starts A→Z while "Missing patches" starts worst-first. The order
+  // button is still there to reverse either.
+  const SORTS = [
+    { value: "total_patches", label: "Missing patches", dir: "desc" },
+    { value: "critical_count", label: "Critical findings", dir: "desc" },
+    { value: "hostname", label: "Hostname", dir: "asc" },
+    { value: "last_assessed_at", label: "Last assessed", dir: "desc" },
+    { value: "environment", label: "Environment", dir: "asc" },
+    { value: "business_group", label: "Business service", dir: "asc" },
+    { value: "os_name", label: "Operating system", dir: "asc" },
+    { value: "state", label: "Compliance state", dir: "asc" },
+  ];
+  const sortSelect = select({
+    label: "Sort by", allLabel: null,
+    value: sort,
+    options: SORTS.map(({ value, label }) => ({ value, label })),
+    onChange: (value) => link({
+      sort: value, dir: SORTS.find((entry) => entry.value === value)?.dir || "asc", page: "",
+    }),
+  });
+  const directionButton = h("button", {
+    type: "button", class: "btn btn-sm",
+    title: "Reverse the sort direction",
+    onclick: () => link({ dir: direction === "asc" ? "desc" : "asc", page: "" }),
+  }, direction === "asc" ? "↑ Ascending" : "↓ Descending");
+
+  const body = table([
+    { label: "Hostname", render: (r) => h("a", {
+      href: "#", onclick: (e) => { e.preventDefault(); openServer(r.id); },
+    }, r.hostname) },
+    { label: "IP address", key: "ip_address", mono: true },
+    { label: "Operating system", render: (r) => `${r.os_name} ${r.os_version}`.trim() },
+    { label: "Environment", key: "environment" },
+    { label: "Business service", key: "business_group" },
+    { label: "Status", render: (r) => statePill(r.state) },
+    { label: "Critical", numeric: true, render: (r) => fmtNumber(r.critical_count) },
+    { label: "Patches", numeric: true, render: (r) => fmtNumber(r.total_patches) },
+    { label: "Last assessed", render: (r) => fmtDate(r.last_assessed_at, true) },
+  ], data.items, { compact: true });
+
+  const stateBar = h("div", { class: "row", style: { marginBottom: "12px" } },
+    ...[
+      ["non_compliant", "Non-compliant"], ["compliant", "Compliant"],
+      ["unknown", "Unknown"], ["stale", "Stale"],
+    ].map(([key, label]) => h("button", {
+      class: `btn btn-sm ${stateFilter === key ? "btn-primary" : ""}`,
+      onclick: () => link({ state: key, page: "" }),
+    }, label)),
+    h("div", { class: "right muted small" },
+      `${fmtNumber(data.total)} matching servers`));
+
+  const pages = Math.max(1, Math.ceil(data.total / 25));
+  const pager = h("div", { class: "pagination" },
+    h("button", {
+      class: "btn btn-sm", disabled: page <= 1,
+      onclick: () => link({ page: page - 1 }),
+    }, "Previous"),
+    h("span", { class: "muted" }, `Page ${page} of ${pages}`),
+    h("button", {
+      class: "btn btn-sm", disabled: page >= pages,
+      onclick: () => link({ page: page + 1 }),
+    }, "Next"));
+
+  mount(view,
+    filterBar(() => renderServers(new URLSearchParams({ state: stateFilter })),
+      { skip: ["patch_source"],
+        extra: h("div", { class: "row", style: { alignItems: "flex-end" } },
+          h("div", { class: "field" }, h("label", {}, "Search"), searchInput),
+          sortSelect,
+          h("div", { class: "field" },
+            h("span", { class: "field-label" }, "Order"), directionButton)) }),
+    h("div", { class: "stack", style: { marginTop: "14px" } },
+      stateBar,
+      card("Servers", "Drill into any server for its assessment and findings", body, pager)));
+  restoreSearchFocus("servers", searchInput);
+}
+
+/* ------------------------------------------------------------------ server detail */
+async function openServer(assetId) {
+  const close = modal("Server detail", spinnerRows(2));
+  try {
+    const data = await api(`inventory/assets/${assetId}`);
+    const asset = data.asset;
+    const assessment = data.assessment;
+    const findings = data.findings || [];
+    const detail = h("div", { class: "stack" },
+      h("div", { class: "row between" },
+        h("div", {},
+          h("h3", { style: { margin: "0 0 4px" } }, asset.hostname),
+          h("div", { class: "muted small" },
+            `${asset.os_name} ${asset.os_version} · ${asset.environment} · `,
+            asset.business_group)),
+        h("div", { class: "row", style: { alignItems: "center" } },
+          can("inventory:manage")
+            ? h("button", {
+              class: "btn btn-sm",
+              onclick: () => { close(); editPlacement(asset); },
+            }, "Edit environment / business service")
+            : null,
+          statePill(asset.compliance_state))),
+      h("dl", { class: "kv" },
+        h("dt", {}, "AssetExplorer ID"), h("dd", { class: "mono" }, asset.assetexplorer_id),
+        h("dt", {}, "Environment"), h("dd", {}, placementText(asset, "environment")),
+        h("dt", {}, "Business service"),
+        h("dd", {}, placementText(asset, "business_group")),
+        asset.override_set_at
+          ? h("dt", {}, "Placement override")
+          : null,
+        asset.override_set_at
+          ? h("dd", {}, `${asset.override_reason} — ${asset.override_set_by}, ` +
+            fmtDate(asset.override_set_at, true))
+          : null,
+        h("dt", {}, "FQDN"), h("dd", { class: "mono" }, asset.fqdn || "—"),
+        h("dt", {}, "IP address"), h("dd", { class: "mono" }, asset.ip_address || "—"),
+        h("dt", {}, "Owner"), h("dd", {}, asset.asset_owner || "—"),
+        h("dt", {}, "Department"), h("dd", {}, asset.department || "—"),
+        h("dt", {}, "Location"), h("dd", {}, asset.location || "—"),
+        h("dt", {}, "Lifecycle"), h("dd", {}, asset.lifecycle_status),
+        h("dt", {}, "Patch source"), h("dd", {}, asset.patch_source || "—"),
+        h("dt", {}, "Inventory synced"), h("dd", {}, fmtDate(asset.last_synced_at, true)),
+        h("dt", {}, "Last assessment"), h("dd", {}, fmtDate(asset.last_assessed_at, true)),
+        h("dt", {}, "Compliance reason"), h("dd", {}, asset.compliance_reason || "—")),
+      h("div", { class: "alert warn" }, h("span", { class: "ico" }, "!"),
+        h("div", {}, "Remediation is performed in the authoritative patch-management " +
+          "system. PatchTrack records status and references only.")),
+      card("Outstanding findings",
+        assessment ? `${fmtNumber(findings.length)} recorded · assessment ${fmtDate(assessment.assessed_at, true)}` : "No assessment recorded",
+        table([
+          { label: "Advisory", key: "advisory_id", mono: true },
+          { label: "Title", render: (r) => r.title },
+          { label: "Severity", render: (r) => pill(r.severity, r.severity) },
+          { label: "Category", key: "category" },
+          { label: "Released", render: (r) => fmtDate(r.released_at) },
+          { label: "Source", key: "source_system" },
+        ], findings, { compact: true, empty: "No outstanding findings recorded." })),
+      data.assessment_history?.length
+        ? card("Assessment history", "Most recent first",
+          table([
+            { label: "Assessed", render: (r) => fmtDate(r.assessed_at, true) },
+            { label: "Status", key: "status" },
+            { label: "Total", numeric: true, key: "total_patches" },
+            { label: "Critical", numeric: true, key: "critical_count" },
+            { label: "Important", numeric: true, key: "important_count" },
+          ], data.assessment_history, { compact: true }))
+        : null,
+    );
+    close();
+    modal(`Server · ${asset.hostname}`, detail);
+  } catch (error) {
+    close();
+    modal("Server detail", alert("error", error.message));
+  }
+}
+
+/* ------------------------------------------------------- placement overrides */
+/* Environment and business service come from AssetExplorer. An operator can
+ * correct either locally: the correction is stored beside the source value, so
+ * the next collection keeps updating its own columns and the override stands.
+ * Everything that reads placement — lists, the compliance engine, reports and
+ * the Grafana dashboard — reads the effective value, and the source answer is
+ * always shown next to it. */
+function placementText(asset, field) {
+  // Effective value differs from the source either because an operator
+  // overrode it or because an administrator renamed the Settings value. Both
+  // are shown with the source answer so nothing is hidden.
+  const source = asset[`${field}_source`];
+  if (source === null || source === undefined || source === asset[field]) {
+    return asset[field];
+  }
+  return `${asset[field]} (AssetExplorer: ${source})`;
+}
+
+function placementCell(asset, field) {
+  const overridden = asset[`${field}_overridden`];
+  const source = asset[`${field}_source`];
+  // The tooltip covers both ways the effective value can differ from the
+  // source: a local override, or a Settings rename the server now resolves to.
+  const title = overridden
+    ? `Local override — AssetExplorer reports ${source}`
+      + (asset.override_reason ? `; reason: ${asset.override_reason}` : "")
+    : (source && source !== asset[field]
+      ? `Renamed in Settings — AssetExplorer reports ${source}` : null);
+  return h("span", { class: "placement", title },
+    asset[field],
+    overridden ? h("span", { class: "override-mark" }, "local") : null);
+}
+
+/* The environment / business-service picker.
+ *
+ * Once an administrator has curated the list in Settings, the editor offers a
+ * select rather than free text, so a correction cannot introduce a second
+ * spelling of a value that already exists. With no list configured (a fresh
+ * installation) it falls back to a text input with the values already in use,
+ * so the dialog still works before anyone has visited Settings. */
+function placementInput(kind, asset, options, listId) {
+  const current = asset[kind] || "";
+  const source = asset[`${kind}_source`] || "";
+  const overridden = Boolean(asset[`${kind}_overridden`]);
+  const values = (options || []).map((option) => option.value);
+  if (values.length === 0) {
+    return h("input", {
+      type: "text", maxLength: 128, value: current, list: listId,
+    });
+  }
+  const select = h("select", {});
+  select.appendChild(h("option", { value: "" },
+    source ? `Use AssetExplorer value — ${source}` : "Use AssetExplorer value"));
+  for (const value of values) select.appendChild(h("option", { value }, value));
+  // A value can leave the Settings list while a server still holds it. Keep it
+  // selectable rather than silently changing the server on the next save.
+  if (current && !values.includes(current)) {
+    select.appendChild(h("option", { value: current }, `${current} (not in Settings)`));
+  }
+  select.value = overridden ? current : "";
+  return select;
+}
+
+async function editPlacement(asset) {
+  const error = h("div");
+  const dimensions = state.dimensions || {};
+  let options = { environments: [], business_groups: [] };
+  try {
+    options = await api("inventory/settings/placement");
+  } catch {
+    // Keep the dialog usable if the list cannot be read; free text applies.
+  }
+  const envInput = placementInput("environment", asset, options.environments,
+    "placement-environments");
+  const groupInput = placementInput("business_group", asset, options.business_groups,
+    "placement-groups");
+  const reason = h("textarea", {
+    rows: 3, maxLength: 500,
+    placeholder: "Why does this server differ from AssetExplorer? This is recorded in the audit trail.",
+  });
+  const buttons = [];
+  let saving = false;
+  let close = () => {};
+
+  async function refresh() {
+    // A placement can move a server between policy scope rules, so persisted
+    // compliance states are refreshed. A failed refresh must not look like a
+    // failed save — the override is already stored.
+    try {
+      await api("compliance/evaluate", { method: "POST" });
+    } catch (error_) {
+      console.warn("compliance refresh after a placement change failed", error_);
+    }
+    await renderRoute();
+  }
+
+  const save = h("button", { class: "btn btn-primary" }, "Save override");
+  save.onclick = async () => {
+    if (saving) return;
+    const environment = envInput.value.trim();
+    const businessGroup = groupInput.value.trim();
+    const why = reason.value.trim();
+    error.replaceChildren();
+    if (why.length < 3) {
+      error.appendChild(alert("error", "A reason of at least 3 characters is required."));
+      return;
+    }
+    saving = true;
+    save.disabled = true;
+    save.textContent = "Saving…";
+    try {
+      await api(`inventory/assets/${asset.id}/overrides`, {
+        method: "PUT",
+        body: { environment, business_group: businessGroup, reason: why },
+      });
+      close();
+      await refresh();
+    } catch (error_) {
+      saving = false;
+      save.disabled = false;
+      save.textContent = "Save override";
+      error.appendChild(alert("error", `The override was not saved: ${error_.message}`));
+    }
+  };
+  buttons.push(save, h("button", { class: "btn", onclick: () => close() }, "Cancel"));
+
+  if (asset.environment_overridden || asset.business_group_overridden) {
+    const restore = h("button", { class: "btn" }, "Use AssetExplorer values");
+    restore.onclick = async () => {
+      error.replaceChildren();
+      try {
+        await api(`inventory/assets/${asset.id}/overrides`, { method: "DELETE" });
+        close();
+        await refresh();
+      } catch (error_) {
+        error.appendChild(alert("error",
+          `The override was not removed: ${error_.message}`));
+      }
+    };
+    buttons.push(restore);
+  }
+
+  close = modal(`Environment and business service · ${asset.hostname}`,
+    h("div", { class: "stack" },
+      error,
+      h("div", { class: "alert" }, h("span", { class: "ico" }, "i"),
+        h("div", {},
+          "This is a local override, not an edit in AssetExplorer. The sync keeps " +
+          "running and keeps updating its own values; the override stays until you " +
+          "remove it. Leave a field blank to use the AssetExplorer value.")),
+      h("div", { class: "grid grid-2" },
+        h("div", { class: "field" }, h("label", {}, "Environment"), envInput,
+          h("span", { class: "muted small" },
+            `AssetExplorer: ${asset.environment_source || "—"}`)),
+        h("div", { class: "field" }, h("label", {}, "Business service"), groupInput,
+          h("span", { class: "muted small" },
+            `AssetExplorer: ${asset.business_group_source || "—"}`))),
+      h("datalist", { id: "placement-environments" },
+        (dimensions.environment || []).map((v) => h("option", { value: v }))),
+      h("datalist", { id: "placement-groups" },
+        (dimensions.business_group || []).map((v) => h("option", { value: v }))),
+      h("div", { class: "field" }, h("label", {}, "Reason"), reason)),
+    buttons);
+}
+
+/* ------------------------------------------------------------------ findings */
+async function renderFindings() {
+  mount(view, spinnerRows(3));
+  await loadDimensions();
+  const severity = "";
+  const query = new URLSearchParams({ page_size: "100" });
+  const data = await api(`compliance/findings?${query}`);
+  const grid2 = h("div", { class: "grid grid-2" });
+  const sevCounts = {};
+  for (const item of data.items) sevCounts[item.severity] = (sevCounts[item.severity] || 0) + 1;
+  const sevBody = h("div");
+  severityBars(sevBody, Object.entries(sevCounts).map(([severityKey, count]) => ({
+    severity: severityKey, count,
+  })));
+  grid2.appendChild(card("Findings by severity", "Current outstanding patch findings", sevBody));
+  grid2.appendChild(card("Remediation guidance", "How deadlines are derived", h("div", { class: "stack small secondary" },
+    h("p", {}, "Remediation windows come from the active compliance policy: critical 7 days, " +
+      "important 30 days, moderate 90 days, low 180 days from publication."),
+    h("p", {}, "Overdue items are visible where the source system reports a release date. " +
+      "PatchTrack never initiates deployment."))));
+
+  mount(view,
+    filterBar(renderFindings, { skip: ["patch_source"] }),
+    h("div", { class: "stack", style: { marginTop: "14px" } },
+      grid2,
+      listPanel("findings", {
+        title: "Outstanding patch findings",
+        subtitle: `${fmtNumber(data.total)} findings recorded`,
+        columns: [
+          { label: "Hostname", render: (r) => h("a", {
+            href: "#", onclick: (e) => { e.preventDefault(); openServer(r.asset_id); },
+          }, r.hostname) },
+          { label: "Advisory", key: "advisory_id", mono: true },
+          { label: "Title", render: (r) => r.title },
+          { label: "Severity", render: (r) => pill(r.severity, r.severity) },
+          { label: "Source", key: "source_system" },
+          { label: "Business service", key: "business_group" },
+          { label: "Released", render: (r) => fmtDate(r.released_at) },
+        ],
+        rows: data.items,
+        searchPlaceholder: "Hostname, advisory, title…",
+        facets: [
+          { field: "severity", label: "Severity" },
+          { field: "source_system", label: "Source" },
+          { field: "business_group", label: "Business service" },
+        ],
+        sorts: [
+          { field: "severity", label: "Severity",
+            rank: ["critical", "important", "moderate", "low"] },
+          { field: "released_at", label: "Released", dir: "desc" },
+          { field: "hostname", label: "Hostname" },
+          { field: "advisory_id", label: "Advisory" },
+        ],
+        empty: "No outstanding findings match this selection.",
+      })));
+}
+
+/* ------------------------------------------------------------------ history */
+async function renderTrends() {
+  mount(view, spinnerRows(3));
+  const [trends, snapshots] = await Promise.all([
+    api("compliance/trends?months=12"),
+    api("compliance/snapshots?limit=40"),
+  ]);
+  const monthly = (trends.monthly || []).map((row) => ({
+    label: new Date(row.month).toLocaleString(undefined, { month: "short", year: "2-digit" }),
+    value: row.compliance_pct,
+  }));
+  const quarterly = (trends.quarterly || []).slice().reverse().map((row) => {
+    const start = new Date(row.period_start);
+    return {
+      label: `Q${Math.floor(start.getMonth() / 3) + 1} ${start.getFullYear()}`,
+      value: row.compliance_pct,
+    };
+  });
+  const policy = await api("compliance/policies/active").catch(() => null);
+  const target = policy?.policy?.target_pct ?? 95;
+  const trendBody = h("div");
+  trendLine(trendBody, { points: monthly, target, height: 250 });
+  const quarterBody = h("div");
+  targetColumns(quarterBody, { points: quarterly, target, height: 250 });
+
+  mount(view, h("div", { class: "stack" },
+    h("div", { class: "grid grid-2" },
+      card("Monthly compliance", "Rolled up from daily snapshots", trendBody),
+      card("Quarterly compliance", "Immutable quarterly snapshots", quarterBody)),
+    listPanel("snapshots", {
+      title: "Snapshot ledger",
+      subtitle: "Every capture is retained; reports reference a specific snapshot",
+      columns: [
+        { label: "Captured", render: (r) => fmtDate(r.captured_at, true) },
+        { label: "Scope", key: "scope" },
+        { label: "Period start", render: (r) => fmtDate(r.period_start) },
+        { label: "Total", numeric: true, key: "total_servers" },
+        { label: "Compliant", numeric: true, key: "compliant_servers" },
+        { label: "Non-compliant", numeric: true, key: "non_compliant_servers" },
+        { label: "Compliance", numeric: true, render: (r) => fmtPct(r.compliance_pct) },
+        { label: "Target", numeric: true, render: (r) => fmtPct(r.target_pct, 0) },
+        { label: "By", key: "generated_by" },
+      ],
+      rows: snapshots,
+      searchPlaceholder: "Scope, generator, date…",
+      facets: [
+        { field: "scope", label: "Scope" },
+        { field: "generated_by", label: "Generated by" },
+      ],
+      sorts: [
+        { field: "captured_at", label: "Captured", dir: "desc" },
+        { field: "period_start", label: "Period start", dir: "desc" },
+        { field: "compliance_pct", label: "Compliance", numeric: true, dir: "desc" },
+        { field: "total_servers", label: "Total servers", numeric: true, dir: "desc" },
+        { field: "scope", label: "Scope" },
+      ],
+      empty: "No snapshots match this selection.",
+    })));
+}
+
+/* ------------------------------------------------------------------ inventory */
+async function renderInventory(params) {
+  const token = renderToken;
+  mount(view, spinnerRows(3));
+  await loadDimensions();
+  if (token !== renderToken) return;
+  const page = Number(params?.get("page") || 1);
+  const search = params?.get("q") || "";
+  // The status filter is an exact state, separate from the free-text search:
+  // "Compliant" in the search box must not also match "Non-compliant".
+  const stateFilter = params?.get("state") || "";
+  const sort = params?.get("sort") || "hostname";
+  const direction = params?.get("dir") === "desc" ? "desc" : "asc";
+  const query = new URLSearchParams({ page: String(page), page_size: "25" });
+  const filters = new URLSearchParams(filterQuery());
+  for (const [key, value] of filters) query.set(key, value);
+  if (search) query.set("search", search);
+  if (stateFilter) query.set("compliance_state", stateFilter);
+  query.set("sort", sort);
+  query.set("direction", direction);
+  const data = await api(`inventory/assets?${query}`);
+  if (token !== renderToken) return;   // a newer keystroke or navigation won
+  const link = (changes = {}) => {
+    const next = new URLSearchParams();
+    const keep = { q: search, state: stateFilter, sort, dir: direction, ...changes };
+    for (const [key, value] of Object.entries(keep)) {
+      if (value && !(key === "dir" && value === "asc")
+          && !(key === "sort" && value === "hostname")) next.set(key, value);
+    }
+    navigate("inventory", next);
+  };
+  const searchInput = searchBox({
+    route: "inventory",
+    value: search,
+    placeholder: "Any column — host, OS, owner, service…",
+    minWidth: "250px",
+    onChange: debounce((term) => searchAction("inventory", term,
+      () => link({ q: term, page: "" })), 500),
+  });
+  const statusSelect = select({
+    label: "Status", value: stateFilter, allLabel: "All statuses",
+    options: [
+      { value: "compliant", label: "Compliant" },
+      { value: "non_compliant", label: "Non-compliant" },
+      { value: "unknown", label: "Unknown" },
+      { value: "stale", label: "Stale" },
+    ],
+    onChange: (value) => link({ state: value, page: "" }),
+  });
+  const INVENTORY_SORTS = [
+    { value: "hostname", label: "Hostname", dir: "asc" },
+    { value: "os_family", label: "Operating system", dir: "asc" },
+    { value: "environment", label: "Environment", dir: "asc" },
+    { value: "business_group", label: "Business service", dir: "asc" },
+    { value: "lifecycle_status", label: "Lifecycle", dir: "asc" },
+    { value: "patch_source", label: "Patch source", dir: "asc" },
+    { value: "state", label: "Compliance state", dir: "asc" },
+  ];
+  const sortSelect = select({
+    label: "Sort by", allLabel: null, value: sort,
+    options: INVENTORY_SORTS.map(({ value, label }) => ({ value, label })),
+    onChange: (value) => link({
+      sort: value,
+      dir: INVENTORY_SORTS.find((entry) => entry.value === value)?.dir || "asc",
+      page: "",
+    }),
+  });
+  const directionButton = h("button", {
+    type: "button", class: "btn btn-sm",
+    title: "Reverse the sort direction",
+    onclick: () => link({ dir: direction === "asc" ? "desc" : "asc", page: "" }),
+  }, direction === "asc" ? "↑ Ascending" : "↓ Descending");
+  const pages = Math.max(1, Math.ceil(data.total / 25));
+  mount(view,
+    filterBar(() => renderInventory(new URLSearchParams({ state: stateFilter })), {
+      skip: ["patch_source"],
+      extra: h("div", { class: "row", style: { alignItems: "flex-end" } },
+        h("div", { class: "field" }, h("label", {}, "Search"), searchInput),
+        statusSelect,
+        sortSelect,
+        h("div", { class: "field" },
+          h("span", { class: "field-label" }, "Order"), directionButton)),
+    }),
+    h("div", { class: "stack", style: { marginTop: "14px" } },
+      card("Authoritative inventory", "Synchronised from ManagedEngine AssetExplorer",
+        table([
+          { label: "Hostname", render: (r) => h("a", {
+            href: "#", onclick: (e) => { e.preventDefault(); openServer(r.id); },
+          }, r.hostname) },
+          { label: "Asset ID", key: "assetexplorer_id", mono: true },
+          { label: "IP address", key: "ip_address", mono: true },
+          { label: "OS", render: (r) => `${r.os_name} ${r.os_version}`.trim() },
+          { label: "Environment", render: (r) => placementCell(r, "environment") },
+          { label: "Business service", render: (r) => placementCell(r, "business_group") },
+          { label: "Lifecycle", key: "lifecycle_status" },
+          { label: "Patch source", key: "patch_source" },
+          { label: "Status", render: (r) => statePill(r.compliance_state) },
+          { label: "Inventory sync", render: (r) => fmtRelative(r.last_synced_at) },
+          can("inventory:manage") ? {
+            label: "Placement",
+            render: (r) => h("button", {
+              class: "btn btn-sm",
+              title: "Override the environment or business service locally",
+              onclick: () => editPlacement(r),
+            }, "Edit"),
+          } : null,
+        ].filter(Boolean), data.items, { compact: true }),
+        h("div", { class: "pagination" },
+          h("button", {
+            class: "btn btn-sm", disabled: page <= 1,
+            onclick: () => link({ page: page - 1 }),
+          }, "Previous"),
+          h("span", { class: "muted" },
+            `${fmtNumber(data.total)} assets · page ${page} of ${pages}`),
+          h("button", {
+            class: "btn btn-sm", disabled: page >= pages,
+            onclick: () => link({ page: page + 1 }),
+          }, "Next")))));
+  restoreSearchFocus("inventory", searchInput);
+}
+
+/* ------------------------------------------------------------------ reconciliation */
+async function renderReconciliation() {
+  mount(view, spinnerRows(3));
+  const data = await api("inventory/reconciliation");
+  const summaryTable = table([
+    { label: "Source", key: "source_system" },
+    { label: "Reason", key: "reason" },
+    { label: "Open", numeric: true, key: "n" },
+  ], data.summary, { compact: true, empty: "No open conflicts." });
+  const items = {
+    title: "Conflict queue",
+    subtitle: `${data.items.length} item(s) awaiting review`,
+    columns: [
+      { label: "Detected", render: (r) => fmtDate(r.detected_at, true) },
+      { label: "Source", key: "source_system" },
+      { label: "Source ref", key: "source_ref", mono: true },
+      { label: "Match key", key: "match_key", mono: true },
+      { label: "Reason", key: "reason" },
+      { label: "Asset", render: (r) => r.asset_hostname || "—" },
+      {
+        label: "Action", render: (r) => (can("integrations:manage")
+          ? h("button", {
+            class: "btn btn-sm",
+            onclick: () => resolveConflict(r),
+          }, "Resolve") : "—"),
+      },
+    ],
+    rows: data.items,
+    searchPlaceholder: "Source, reference, match key…",
+    facets: [
+      { field: "source_system", label: "Source" },
+      { field: "reason", label: "Reason" },
+    ],
+    sorts: [
+      { field: "detected_at", label: "Detected", dir: "desc" },
+      { field: "source_system", label: "Source" },
+      { field: "reason", label: "Reason" },
+      { field: "source_ref", label: "Source reference" },
+    ],
+    empty: "No open reconciliation conflicts match this selection.",
+  };
+  mount(view, h("div", { class: "stack" },
+    alert("warn", "Records that cannot be matched unambiguously are never attached to an " +
+      "asset automatically. Resolve them here once the correct asset is confirmed."),
+    card("Open conflicts by source and reason", "Unresolved matches", summaryTable),
+    listPanel("reconciliation", items)));
+}
+
+async function resolveConflict(conflict) {
+  const form = h("div", { class: "stack" },
+    h("div", { class: "small secondary" },
+      `Source ${conflict.source_system} · reference ${conflict.source_ref} · ${conflict.reason}`),
+    h("div", { class: "field" }, h("label", {}, "Resolve by asset ID (optional)"),
+      h("input", { type: "text", id: "resolve-asset", placeholder: "UUID" })),
+    h("div", { class: "field" }, h("label", {}, "Resolution note"),
+      h("input", { type: "text", id: "resolve-note", value: "Reviewed and confirmed" })));
+  const close = modal("Resolve reconciliation conflict", form, [
+    h("button", {
+      class: "btn btn-primary",
+      onclick: async () => {
+        const assetId = document.getElementById("resolve-asset").value.trim() || null;
+        try {
+          await api(`inventory/reconciliation/${conflict.id}/resolve`, {
+            method: "POST",
+            body: {
+              asset_id: assetId,
+              resolution: document.getElementById("resolve-note").value || "Resolved",
+            },
+          });
+          close();
+          renderRoute();
+        } catch (error) {
+          alert("error", escapeMessage(error));
+        }
+      },
+    }, "Resolve"),
+  ]);
+  function escapeMessage(error) {
+    const box = document.getElementById("modal-root");
+    box.querySelector(".alert")?.remove();
+    form.prepend(alert("error", error.message));
+  }
+}
+
+/* ------------------------------------------------------------------ reports */
+async function renderReports() {
+  mount(view, spinnerRows(3));
+  const [reports, snapshots] = await Promise.all([
+    api("reporting/reports?limit=40"),
+    api("compliance/snapshots?limit=24"),
+  ]);
+  const monthInput = h("input", { type: "month", id: "report-month", value: toMonthInput() });
+  const typeSelect = h("select", { id: "report-type" },
+    h("option", { value: "monthly_management" }, "Monthly management report"),
+    h("option", { value: "quarterly_compliance" }, "Quarterly compliance report"));
+  const snapshotSelect = h("select", { id: "report-snapshot" },
+    h("option", { value: "" }, "Latest snapshot covering the period"),
+    ...snapshots.map((snap) => h("option", { value: snap.id },
+      `${snap.scope} · ${snap.period_start} → ${snap.period_end} · ${fmtPct(snap.compliance_pct)}`)));
+  const requestCard = can("reports:generate") ? card("Generate a report",
+    "PDF is produced server-side and archived; download does not depend on email",
+    h("div", { class: "row", style: { alignItems: "flex-end" } },
+      h("div", { class: "field" }, h("label", {}, "Report type"), typeSelect),
+      h("div", { class: "field" }, h("label", {}, "Reporting month"), monthInput),
+      h("div", { class: "field", style: { minWidth: "320px" } },
+        h("label", {}, "Snapshot"), snapshotSelect),
+      h("button", {
+        class: "btn btn-primary", id: "generate-report",
+        onclick: async (event) => {
+          event.target.disabled = true;
+          event.target.textContent = "Queuing…";
+          try {
+            await api("reporting/reports", {
+              method: "POST",
+              body: {
+                report_type: typeSelect.value,
+                reporting_month: monthInput.value || null,
+                snapshot_id: snapshotSelect.value || null,
+              },
+            });
+            await renderReports();
+          } catch (error) {
+            event.target.disabled = false;
+            event.target.textContent = "Generate report";
+            alert("error", error.message);
+          }
+        },
+      }, "Generate report"))) : null;
+
+  const history = listPanel("reports", {
+    title: "Report history",
+    subtitle: `${fmtNumber(reports.total)} reports retained`,
+    columns: [
+      { label: "Requested", render: (r) => fmtDate(r.requested_at, true) },
+      { label: "Type", render: (r) => r.report_type.replaceAll("_", " ") },
+      { label: "Period", render: (r) => `${r.period_start} → ${r.period_end}` },
+      { label: "Status", render: (r) => pill(r.status, r.status) },
+      { label: "Size", numeric: true,
+        render: (r) => (r.file_size ? `${(r.file_size / 1024).toFixed(0)} KB` : "—") },
+      { label: "SHA-256", render: (r) => (r.sha256
+        ? h("span", { class: "mono small", title: r.sha256 }, `${r.sha256.slice(0, 12)}…`)
+        : "—") },
+      { label: "Delivery", render: (r) => (r.deliveries?.length
+        ? pill(r.deliveries[0].status, r.deliveries[0].status)
+        : h("span", { class: "muted" }, "—")) },
+      { label: "Requested by", key: "requested_by" },
+      {
+        label: "",
+        render: (r) => (r.status === "completed" && r.download_available
+          ? h("button", {
+            class: "btn btn-sm",
+            onclick: () => download(`reporting/reports/${r.id}/download`, r.filename),
+          }, "Download")
+          : r.status === "failed"
+            ? h("button", {
+              class: "btn btn-sm",
+              onclick: async () => {
+                await api(`reporting/reports/${r.id}/retry`, { method: "POST" });
+                renderReports();
+              },
+            }, "Retry")
+            : "—"),
+      },
+    ],
+    rows: reports.items,
+    searchPlaceholder: "Type, status, requester…",
+    facets: [
+      { field: "report_type", label: "Type",
+        format: (value) => value.replaceAll("_", " ") },
+      { field: "status", label: "Status" },
+      { field: "requested_by", label: "Requested by" },
+    ],
+    sorts: [
+      { field: "requested_at", label: "Requested", dir: "desc" },
+      { field: "period_start", label: "Period start", dir: "desc" },
+      { field: "status", label: "Status" },
+      { field: "file_size", label: "Size", numeric: true, dir: "desc" },
+      { field: "requested_by", label: "Requested by" },
+    ],
+    empty: "No reports match this selection.",
+  });
+
+  mount(view, h("div", { class: "stack" }, requestCard, history));
+}
+
+/* ------------------------------------------------------------------ schedules */
+async function renderSchedules() {
+  mount(view, spinnerRows(3));
+  const data = await api("reporting/schedules");
+  const manage = can("schedules:manage");
+  const rows = listPanel("schedules", {
+    title: "Scheduled reports",
+    subtitle: "Persisted in PostgreSQL; survive restarts",
+    columns: [
+      { label: "Name", key: "name" },
+      { label: "Report", render: (r) => r.report_type.replaceAll("_", " ") },
+      { label: "Cadence", key: "cadence" },
+      { label: "Runs", render: (r) => `${r.day_of_month} at ${String(r.run_hour).padStart(2, "0")}:00 ${r.timezone}` },
+      { label: "Recipients", render: (r) => (r.recipients?.length
+        ? r.recipients.join(", ") : h("span", { class: "muted" }, "none")) },
+      { label: "Enabled", render: (r) => pill(r.enabled ? "success" : "unknown", r.enabled ? "enabled" : "disabled") },
+      { label: "Next run", render: (r) => fmtDate(r.next_run_at, true) },
+      { label: "Last result", render: (r) => (r.last_run_status ? pill(r.last_run_status, r.last_run_status) : "—") },
+      { label: "", render: (r) => (manage ? h("div", { class: "row" },
+        h("button", {
+          class: "btn btn-sm",
+          onclick: async () => {
+            await api(`reporting/schedules/${r.id}`, {
+              method: "PATCH", body: { enabled: !r.enabled },
+            });
+            renderSchedules();
+          },
+        }, r.enabled ? "Disable" : "Enable"),
+        h("button", {
+          class: "btn btn-sm btn-danger",
+          onclick: async () => {
+            if (!window.confirm(`Delete schedule “${r.name}”?`)) return;
+            await api(`reporting/schedules/${r.id}`, { method: "DELETE" });
+            renderSchedules();
+          },
+        }, "Delete")) : "—") },
+    ],
+    rows: data,
+    searchPlaceholder: "Name, report, recipient…",
+    facets: [
+      { field: "cadence", label: "Cadence" },
+      { field: "report_type", label: "Report",
+        format: (value) => value.replaceAll("_", " ") },
+      { field: "enabled", label: "Enabled", value: (r) => String(Boolean(r.enabled)),
+        format: (value) => (value === "true" ? "Enabled" : "Disabled") },
+    ],
+    sorts: [
+      { field: "name", label: "Name" },
+      { field: "next_run_at", label: "Next run", dir: "asc" },
+      { field: "cadence", label: "Cadence" },
+      { field: "enabled", label: "Enabled", rank: ["true", "false"] },
+      { field: "last_run_status", label: "Last result" },
+    ],
+    empty: "No schedules match this selection.",
+  });
+
+  const form = h("div", { class: "row", style: { alignItems: "flex-end" } },
+    h("div", { class: "field" }, h("label", {}, "Name"),
+      h("input", { id: "schedule-name", type: "text", placeholder: "Monthly compliance" })),
+    h("div", { class: "field" }, h("label", {}, "Report"),
+      h("select", { id: "schedule-report" },
+        h("option", { value: "monthly_management" }, "Monthly management"),
+        h("option", { value: "quarterly_compliance" }, "Quarterly compliance"))),
+    h("div", { class: "field" }, h("label", {}, "Cadence"),
+      h("select", { id: "schedule-cadence" },
+        h("option", { value: "monthly" }, "Monthly"),
+        h("option", { value: "quarterly" }, "Quarterly"))),
+    h("div", { class: "field" }, h("label", {}, "Day"),
+      h("input", { id: "schedule-day", type: "number", min: "1", max: "28", value: "1" })),
+    h("div", { class: "field" }, h("label", {}, "Hour (UTC)"),
+      h("input", { id: "schedule-hour", type: "number", min: "0", max: "23", value: "6" })),
+    h("div", { class: "field" }, h("label", {}, "Recipients"),
+      h("input", { id: "schedule-recipients", type: "text", placeholder: "a@example.com, b@example.com" })),
+    h("button", {
+      class: "btn btn-primary",
+      onclick: async () => {
+        try {
+          await api("reporting/schedules", {
+            method: "POST",
+            body: {
+              name: document.getElementById("schedule-name").value,
+              report_type: document.getElementById("schedule-report").value,
+              cadence: document.getElementById("schedule-cadence").value,
+              day_of_month: Number(document.getElementById("schedule-day").value),
+              run_hour: Number(document.getElementById("schedule-hour").value),
+              recipients: document.getElementById("schedule-recipients").value
+                .split(",").map((s) => s.trim()).filter(Boolean),
+              timezone: "UTC",
+            },
+          });
+          renderSchedules();
+        } catch (error) {
+          alert("error", error.message);
+        }
+      },
+    }, "Add schedule"));
+
+  mount(view, h("div", { class: "stack" },
+    manage ? card("New schedule", "Runs are idempotent per period", form) : null,
+    rows));
+}
+
+/* ------------------------------------------------------------------ integrations */
+async function renderIntegrations() {
+  mount(view, spinnerRows(3));
+  const data = await api("inventory/integrations");
+  const runs = await api("inventory/sync-runs?limit=20");
+  const manage = can("integrations:manage");
+  const cards = data.map((integration) => {
+    const last = integration.last_run || {};
+    const body = h("div", { class: "stack" },
+      h("dl", { class: "kv" },
+        h("dt", {}, "Status"), h("dd", {}, pill(integration.health, integration.health.replaceAll("_", " "))),
+        h("dt", {}, "Endpoint"), h("dd", { class: "mono small" }, integration.endpoint || "not configured"),
+        h("dt", {}, "Authentication"), h("dd", {}, `${integration.auth_method} · ${integration.secret_configured ? "secret configured" : "no secret"}`),
+        h("dt", {}, "Last attempt"), h("dd", {}, last.started_at ? fmtDate(last.started_at, true) : "never"),
+        h("dt", {}, "Last success"), h("dd", {}, fmtDate(integration.last_success_at, true)),
+        h("dt", {}, "Records"), h("dd", {}, `${fmtNumber(last.records_seen)} seen · ${fmtNumber(last.records_updated)} matched · ${fmtNumber(last.records_rejected)} rejected`),
+        h("dt", {}, "Duration"), h("dd", {}, last.duration_s ? `${Number(last.duration_s).toFixed(1)} s` : "—"),
+        h("dt", {}, "Error"), h("dd", { class: "small" }, last.error_summary || "—")),
+      h("div", { class: "row" },
+        can("sync:run") ? h("button", {
+          class: "btn btn-sm",
+          onclick: async (event) => {
+            event.target.disabled = true;
+            event.target.textContent = "Running…";
+            try {
+              await api("inventory/sync", {
+                method: "POST", body: { integration: integration.key },
+              });
+              renderIntegrations();
+            } catch (error) {
+              event.target.disabled = false;
+              event.target.textContent = "Run now";
+              alert("error", error.message);
+            }
+          },
+        }, "Run now") : null,
+        manage ? h("button", {
+          class: "btn btn-sm",
+          onclick: () => editIntegration(integration),
+        }, "Configure") : null));
+    return card(integration.display_name || integration.key,
+      `${integration.kind} · every ${integration.sync_interval_minutes} min`, body);
+  });
+
+  mount(view, h("div", { class: "stack" },
+    alert("warn", "Integrations are only marked healthy after a successful collection. " +
+      "A failure never deletes inventory and never classifies servers as compliant."),
+    h("div", { class: "grid grid-2" }, ...cards),
+    listPanel("sync-runs", {
+      title: "Recent collection runs",
+      subtitle: "Newest first",
+      columns: [
+        { label: "Started", render: (r) => fmtDate(r.started_at, true) },
+        { label: "Integration", key: "integration_key" },
+        { label: "Trigger", key: "trigger" },
+        { label: "Status", render: (r) => pill(r.status, r.status) },
+        { label: "Seen", numeric: true, key: "records_seen" },
+        { label: "Created", numeric: true, key: "records_created" },
+        { label: "Updated", numeric: true, key: "records_updated" },
+        { label: "Rejected", numeric: true, key: "records_rejected" },
+        { label: "Unmatched", numeric: true, key: "assets_unmatched" },
+        { label: "Error", render: (r) => h("span", { class: "small muted" }, r.error_summary || "—") },
+      ],
+      rows: runs,
+      searchPlaceholder: "Integration, trigger, error…",
+      facets: [
+        { field: "integration_key", label: "Integration" },
+        { field: "status", label: "Status" },
+        { field: "trigger", label: "Trigger" },
+      ],
+      sorts: [
+        { field: "started_at", label: "Started", dir: "desc" },
+        { field: "integration_key", label: "Integration" },
+        { field: "status", label: "Status" },
+        { field: "records_seen", label: "Records seen", numeric: true, dir: "desc" },
+        { field: "records_rejected", label: "Rejected", numeric: true, dir: "desc" },
+      ],
+      empty: "No collection runs match this selection.",
+    })));
+}
+
+function editIntegration(integration) {
+  const form = h("div", { class: "stack" },
+    h("div", { class: "field" }, h("label", {}, "Display name"),
+      h("input", { id: "int-name", type: "text", value: integration.display_name || "" })),
+    h("div", { class: "field" }, h("label", {}, "Endpoint"),
+      h("input", { id: "int-endpoint", type: "text", value: integration.endpoint || "",
+        placeholder: "https://assetexplorer.example.com" })),
+    h("div", { class: "field" }, h("label", {}, "Authentication method"),
+      h("select", { id: "int-auth" },
+        ...["bearer", "apikey", "basic", "none"].map((method) =>
+          h("option", { value: method, selected: integration.auth_method === method }, method)))),
+    h("div", { class: "field" }, h("label", {}, "Credential reference (write-only)"),
+      h("input", { id: "int-secret", type: "password", autocomplete: "new-password",
+        placeholder: integration.secret_configured ? "•••••• configured — leave blank to keep" : "Enter secret" })),
+    h("div", { class: "field" }, h("label", {}, "Sync interval (minutes)"),
+      h("input", { id: "int-interval", type: "number", min: "5", max: "10080",
+        value: integration.sync_interval_minutes })),
+    h("div", { class: "row" },
+      h("label", { class: "row", style: { gap: "6px" } },
+        h("input", { id: "int-enabled", type: "checkbox", checked: integration.enabled }),
+        "Enabled"),
+      h("label", { class: "row", style: { gap: "6px" } },
+        h("input", { id: "int-tls", type: "checkbox", checked: integration.verify_tls }),
+        "Verify TLS")));
+  modal(`Configure ${integration.key}`, form, [
+    h("button", {
+      class: "btn btn-primary",
+      onclick: async () => {
+        const payload = {
+          display_name: document.getElementById("int-name").value,
+          endpoint: document.getElementById("int-endpoint").value,
+          auth_method: document.getElementById("int-auth").value,
+          enabled: document.getElementById("int-enabled").checked,
+          verify_tls: document.getElementById("int-tls").checked,
+          sync_interval_minutes: Number(document.getElementById("int-interval").value),
+        };
+        const secret = document.getElementById("int-secret").value;
+        if (secret) payload.secret_ref = secret;
+        try {
+          await api(`inventory/integrations/${integration.key}`, {
+            method: "PATCH", body: payload,
+          });
+          document.getElementById("modal-root").innerHTML = "";
+          renderIntegrations();
+        } catch (error) {
+          form.prepend(alert("error", error.message));
+        }
+      },
+    }, "Save configuration"),
+  ]);
+}
+
+/* ------------------------------------------------------------------ policies */
+async function renderPolicies() {
+  mount(view, spinnerRows(3));
+  const [policies, active] = await Promise.all([
+    api("compliance/policies"),
+    api("compliance/policies/active"),
+  ]);
+  const current = active.policy;
+  const summaryCard = card("Active policy",
+    active.version_id ? `Version ${active.version_id.slice(0, 8)}` : "Built-in baseline (no policy activated)",
+    h("dl", { class: "kv" },
+      h("dt", {}, "Name"), h("dd", {}, current.name || "Built-in baseline"),
+      h("dt", {}, "Overall target"), h("dd", {}, fmtPct(current.target_pct)),
+      h("dt", {}, "Quarterly target"), h("dd", {}, fmtPct(current.quarterly_target_pct)),
+      h("dt", {}, "Freshness threshold"), h("dd", {}, `${current.freshness_hours} hours`),
+      h("dt", {}, "Blocking severities"),
+      h("dd", {}, (current.default_rule?.blocking_severities || []).join(", ")),
+      h("dt", {}, "Remediation windows"), h("dd", {},
+        Object.entries(current.default_rule?.remediation_days || {})
+          .map(([severity, days]) => `${severity}: ${days}d`).join(" · ")),
+      h("dt", {}, "Excluded environments"), h("dd", {},
+        (current.excluded_environments || []).join(", ") || "none")));
+
+  const rows = listPanel("policies", {
+    title: "Policy register",
+    subtitle: "All versions retained",
+    columns: [
+      { label: "Policy", key: "name" },
+      { label: "Version", render: (r) => (r.active_version ?? "—") },
+      { label: "Target", render: (r) => fmtPct(r.definition?.target_pct) },
+      { label: "Active", render: (r) => (r.is_active ? pill("success", "active") : "—") },
+      { label: "Effective", render: (r) => fmtDate(r.effective_from, true) },
+      { label: "", render: (r) => (can("policies:manage") && !r.is_active
+        ? h("button", {
+          class: "btn btn-sm",
+          onclick: async () => {
+            await api(`compliance/policies/${r.id}/activate`, { method: "POST" });
+            renderPolicies();
+          },
+        }, "Activate") : "—") },
+    ],
+    rows: policies,
+    searchPlaceholder: "Policy name, note…",
+    facets: [
+      { field: "is_active", label: "Active", value: (r) => String(Boolean(r.is_active)),
+        format: (value) => (value === "true" ? "Active" : "Not active") },
+    ],
+    sorts: [
+      { field: "effective_from", label: "Effective", dir: "desc" },
+      { field: "name", label: "Policy" },
+      { field: "active_version", label: "Version", numeric: true, dir: "desc" },
+      { field: "is_active", label: "Active", rank: ["true", "false"] },
+    ],
+    empty: policies.length
+      ? "No policies match this selection."
+      : "No policies created. The built-in baseline is in use.",
+  });
+
+  const form = can("policies:manage") ? card("New policy version",
+    "Policy versions are immutable; activating one re-evaluates every asset",
+    h("div", { class: "row", style: { alignItems: "flex-end", flexWrap: "wrap" } },
+      h("div", { class: "field" }, h("label", {}, "Name"),
+        h("input", { id: "pol-name", type: "text", placeholder: "Q4 2026 security baseline" })),
+      h("div", { class: "field" }, h("label", {}, "Target %"),
+        h("input", { id: "pol-target", type: "number", min: "0", max: "100", value: "95" })),
+      h("div", { class: "field" }, h("label", {}, "Quarterly target %"),
+        h("input", { id: "pol-qtarget", type: "number", min: "0", max: "100", value: "95" })),
+      h("div", { class: "field" }, h("label", {}, "Freshness (hours)"),
+        h("input", { id: "pol-fresh", type: "number", min: "1", value: "48" })),
+      h("button", {
+        class: "btn btn-primary",
+        onclick: async () => {
+          try {
+            await api("compliance/policies", {
+              method: "POST",
+              body: {
+                name: document.getElementById("pol-name").value,
+                target_pct: Number(document.getElementById("pol-target").value),
+                quarterly_target_pct: Number(document.getElementById("pol-qtarget").value),
+                freshness_hours: Number(document.getElementById("pol-fresh").value),
+                change_note: "Created from console",
+              },
+            });
+            renderPolicies();
+          } catch (error) {
+            alert("error", error.message);
+          }
+        },
+      }, "Create policy"))) : null;
+
+  const reasoning = alert("ok",
+    "Unknown and stale assets remain in the denominator. A server is only compliant " +
+    "when a fresh assessment shows no blocking findings on its scope rule.");
+  mount(view, h("div", { class: "stack" },
+    reasoning, summaryCard, form, rows));
+}
+
+/* ------------------------------------------------------------------ users */
+async function renderUsers() {
+  mount(view, spinnerRows(3));
+  const [users, roles] = await Promise.all([api("identity/users"), api("identity/roles")]);
+  const roleNames = roles.map((r) => r.role);
+  const rows = listPanel("users", {
+    title: "Users",
+    subtitle: `${users.length} accounts`,
+    columns: [
+    { label: "Username", render: (r) => h("span", { class: "mono" }, r.username) },
+    { label: "Display name", key: "display_name" },
+    { label: "Role", render: (r) => h("span", { class: "badge-role" }, r.role.replaceAll("_", " ")) },
+    { label: "Status", render: (r) => pill(r.is_active ? "success" : "unknown", r.is_active ? "active" : "disabled") },
+    { label: "Last sign-in", render: (r) => fmtDate(r.last_login_at, true) },
+    { label: "", render: (r) => h("div", { class: "row" },
+      h("button", { class: "btn btn-sm", onclick: () => editUser(r, roleNames) }, "Edit"),
+      h("button", {
+        class: "btn btn-sm",
+        onclick: () => modal("Reset password",
+          h("div", { class: "stack" },
+            h("div", { class: "small secondary" }, `Set a new password for ${r.username}.`),
+            h("div", { class: "field" }, h("label", {}, "New password (min 12 chars)"),
+              h("input", { id: "reset-pw", type: "password", autocomplete: "new-password" }))),
+          [h("button", {
+            class: "btn btn-primary",
+            onclick: async () => {
+              try {
+                await api(`identity/users/${r.id}/password`, {
+                  method: "POST",
+                  body: { password: document.getElementById("reset-pw").value },
+                });
+                document.getElementById("modal-root").innerHTML = "";
+              } catch (error) {
+                alert("error", error.message);
+              }
+            },
+          }, "Set password")]),
+      }, "Reset")) },
+    ],
+    rows: users,
+    searchPlaceholder: "Username, display name, role…",
+    facets: [
+      { field: "role", label: "Role", format: (value) => value.replaceAll("_", " ") },
+      { field: "is_active", label: "Status", value: (r) => String(Boolean(r.is_active)),
+        format: (value) => (value === "true" ? "Active" : "Disabled") },
+    ],
+    sorts: [
+      { field: "username", label: "Username" },
+      { field: "display_name", label: "Display name" },
+      { field: "role", label: "Role" },
+      { field: "last_login_at", label: "Last sign-in", dir: "desc" },
+      { field: "is_active", label: "Status", rank: ["true", "false"] },
+    ],
+    empty: "No accounts match this selection.",
+  });
+
+  const createForm = h("div", { class: "row", style: { alignItems: "flex-end" } },
+    h("div", { class: "field" }, h("label", {}, "Username"),
+      h("input", { id: "user-name", type: "text" })),
+    h("div", { class: "field" }, h("label", {}, "Display name"),
+      h("input", { id: "user-display", type: "text" })),
+    h("div", { class: "field" }, h("label", {}, "Role"),
+      h("select", { id: "user-role" },
+        ...roleNames.map((role) => h("option", { value: role }, role.replaceAll("_", " "))))),
+    h("div", { class: "field" }, h("label", {}, "Temporary password"),
+      h("input", { id: "user-pw", type: "password", autocomplete: "new-password" })),
+    h("button", {
+      class: "btn btn-primary",
+      onclick: async () => {
+        try {
+          await api("identity/users", {
+            method: "POST",
+            body: {
+              username: document.getElementById("user-name").value,
+              display_name: document.getElementById("user-display").value,
+              role: document.getElementById("user-role").value,
+              password: document.getElementById("user-pw").value,
+            },
+          });
+          renderUsers();
+        } catch (error) {
+          alert("error", error.message);
+        }
+      },
+    }, "Create user"));
+
+  mount(view, h("div", { class: "stack" },
+    card("Create user", "New accounts must change their password at first sign-in", createForm),
+    rows));
+}
+
+function editUser(user, roles) {
+  const form = h("div", { class: "stack" },
+    h("div", { class: "field" }, h("label", {}, "Display name"),
+      h("input", { id: "edit-display", type: "text", value: user.display_name || "" })),
+    h("div", { class: "field" }, h("label", {}, "Role"),
+      h("select", { id: "edit-role" },
+        ...roles.map((role) => h("option", {
+          value: role, selected: role === user.role,
+        }, role.replaceAll("_", " "))))),
+    h("label", { class: "row", style: { gap: "6px" } },
+      h("input", { id: "edit-active", type: "checkbox", checked: user.is_active }),
+      "Account active"));
+  modal(`Edit ${user.username}`, form, [
+    h("button", {
+      class: "btn btn-primary",
+      onclick: async () => {
+        try {
+          await api(`identity/users/${user.id}`, {
+            method: "PATCH",
+            body: {
+              display_name: document.getElementById("edit-display").value,
+              role: document.getElementById("edit-role").value,
+              is_active: document.getElementById("edit-active").checked,
+            },
+          });
+          document.getElementById("modal-root").innerHTML = "";
+          renderUsers();
+        } catch (error) {
+          form.prepend(alert("error", error.message));
+        }
+      },
+    }, "Save"),
+  ]);
+}
+
+/* ------------------------------------------------------------------ audit */
+async function renderAudit() {
+  mount(view, spinnerRows(3));
+  const data = await api("identity/audit?limit=200");
+  mount(view, h("div", { class: "stack" },
+    alert("ok", "Audit events are append-only. Passwords, tokens and secrets are never recorded."),
+    listPanel("audit", {
+      title: "Audit trail",
+      subtitle: `${fmtNumber(data.total)} events retained`,
+      columns: [
+        { label: "Time", render: (r) => fmtDate(r.occurred_at, true) },
+        { label: "Actor", key: "actor" },
+        { label: "Role", key: "actor_role" },
+        { label: "Event", key: "event_type", mono: true },
+        { label: "Target", render: (r) => (r.target_type ? `${r.target_type} ${r.target_id}` : "—") },
+        { label: "Outcome", render: (r) => pill(r.outcome, r.outcome) },
+        { label: "Source", key: "source_ip", mono: true },
+      ],
+      rows: data.items,
+      searchPlaceholder: "Actor, event, target, address…",
+      facets: [
+        { field: "event_type", label: "Event" },
+        { field: "outcome", label: "Outcome" },
+        { field: "actor_role", label: "Role", format: (value) => value.replaceAll("_", " ") },
+      ],
+      sorts: [
+        { field: "occurred_at", label: "Time", dir: "desc" },
+        { field: "actor", label: "Actor" },
+        { field: "event_type", label: "Event" },
+        { field: "outcome", label: "Outcome" },
+      ],
+      empty: "No audit events match this selection.",
+    })));
+}
+
+/* ------------------------------------------------------------------ health */
+async function renderHealth() {
+  mount(view, spinnerRows(3));
+  const gateway = await fetch("/readyz").then((r) => r.json()).catch(() => ({}));
+  const [summary, runs, integrations] = await Promise.all([
+    api("compliance/summary").catch(() => null),
+    api("inventory/sync-runs?limit=30").catch(() => []),
+    api("inventory/integrations").catch(() => []),
+  ]);
+  const serviceRows = Object.entries(gateway.services || {}).map(([name, status]) => ({
+    name, status,
+  }));
+  mount(view, h("div", { class: "stack" },
+    card("Service availability", "Core functionality remains available if Grafana is down",
+      table([
+        { label: "Component", key: "name" },
+        { label: "Status", render: (r) => pill(r.status, r.status) },
+      ], [
+        { name: "gateway", status: gateway.status || "unknown" },
+        ...serviceRows,
+        { name: "grafana (optional)", status: "separate" },
+      ], { compact: true })),
+    card("Data freshness", "Inventory and patch collection are tracked separately",
+      h("dl", { class: "kv" },
+        h("dt", {}, "Inventory synchronised"), h("dd", {}, fmtDate(summary?.freshness?.inventory_synced_at, true)),
+        h("dt", {}, "Patch data synchronised"), h("dd", {}, fmtDate(summary?.freshness?.patch_synced_at, true)),
+        ...Object.entries(summary?.freshness?.per_source || {}).flatMap(([key, value]) => [
+          h("dt", {}, `${key} last success`), h("dd", {}, fmtDate(value, true)),
+        ]))),
+    card("Integration health", "Per-source state", table([
+      { label: "Integration", key: "key" },
+      { label: "Health", render: (r) => pill(r.health, r.health.replaceAll("_", " ")) },
+      { label: "Last success", render: (r) => fmtDate(r.last_success_at, true) },
+      { label: "Last status", render: (r) => (r.last_run ? pill(r.last_run.status, r.last_run.status) : "—") },
+    ], integrations, { compact: true })),
+    card("Recent collection runs", "Operational history", table([
+      { label: "Started", render: (r) => fmtDate(r.started_at, true) },
+      { label: "Integration", key: "integration_key" },
+      { label: "Status", render: (r) => pill(r.status, r.status) },
+      { label: "Seen", numeric: true, key: "records_seen" },
+      { label: "Rejected", numeric: true, key: "records_rejected" },
+      { label: "Error", render: (r) => r.error_summary || "—" },
+    ], runs, { compact: true }))));
+}
+
+/* ------------------------------------------------------------------ settings */
+/* Settings → Inventory placement values.
+ *
+ * The list is the vocabulary every screen displays. Renaming an entry
+ * propagates to every server holding the old spelling (the source value in
+ * AssetExplorer is preserved and shown beside it); a value still in use cannot
+ * be deleted, only renamed. */
+let SETTINGS_FLASH = null;
+
+function renamePlacementOption(item, label) {
+  const error = h("div");
+  const input = h("input", { type: "text", maxLength: 128, value: item.value });
+  let saving = false;
+  let close = () => {};
+  const save = h("button", { class: "btn btn-primary" }, "Save");
+  save.onclick = async () => {
+    if (saving) return;
+    saving = true;
+    save.disabled = true;
+    error.replaceChildren();
+    try {
+      await api(`inventory/settings/placement/${item.id}`, {
+        method: "PATCH", body: { value: input.value },
+      });
+      close();
+      if (item.in_use) {
+        // A rename can move servers between policy scope rules, exactly as an
+        // override does. The rename is already stored; a failed refresh must
+        // not be presented as a failed rename.
+        try {
+          await api("compliance/evaluate", { method: "POST" });
+        } catch (error_) {
+          console.warn("compliance refresh after a rename failed", error_);
+        }
+      }
+      await renderSettings();
+    } catch (error_) {
+      saving = false;
+      save.disabled = false;
+      error.appendChild(alert("error", error_.message));
+    }
+  };
+  close = modal(`Edit ${label} · ${item.value}`,
+    h("div", { class: "stack" },
+      error,
+      item.in_use
+        ? alert("warn", `The ${item.in_use} server`
+          + `${item.in_use === 1 ? "" : "s"} using “${item.value}” will show the `
+          + "new name on the next refresh. The value AssetExplorer reports is "
+          + "kept and shown beside it.")
+        : null,
+      h("div", { class: "field" }, h("label", {}, label), input)),
+    [save, h("button", { class: "btn", onclick: () => close() }, "Cancel")]);
+}
+
+async function removePlacementOption(item, label) {
+  // The server refuses this too; guarding here avoids a pointless round trip
+  // and explains the way out (rename instead).
+  if (item.in_use) {
+    SETTINGS_FLASH = alert("warn",
+      `${item.in_use} server${item.in_use === 1 ? "" : "s"} still use `
+      + `“${item.value}”. Rename it instead — the new name reaches those `
+      + "servers without touching the value AssetExplorer reports.");
+    await renderSettings();
+    return;
+  }
+  if (!window.confirm(`Remove “${item.value}” from the ${label} list?`)) return;
+  try {
+    await api(`inventory/settings/placement/${item.id}`, { method: "DELETE" });
+    SETTINGS_FLASH = alert("ok", "Removed from the list.");
+    await renderSettings();
+  } catch (error) {
+    SETTINGS_FLASH = alert("error", error.message);
+    await renderSettings();
+  }
+}
+
+function placementOptionSection(kind, label, items) {
+  const addInput = h("input", {
+    type: "text", maxLength: 128, placeholder: `New ${label} value`,
+  });
+  const status = h("div");
+  const add = async () => {
+    status.replaceChildren();
+    try {
+      await api("inventory/settings/placement", {
+        method: "POST", body: { kind, value: addInput.value },
+      });
+      await renderSettings();
+    } catch (error) {
+      status.appendChild(alert("error", error.message));
+    }
+  };
+  addInput.onkeydown = (event) => {
+    if (event.key === "Enter") { event.preventDefault(); add(); }
+  };
+  return h("div", { class: "stack" },
+    h("h3", { style: { margin: 0, fontSize: "13.5px" } }, `Allowed ${label} values`),
+    items.length
+      ? table([
+        { label: "Value", key: "value" },
+        { label: "In use", numeric: true, render: (r) => (r.in_use
+          ? `${r.in_use} server${r.in_use === 1 ? "" : "s"}` : "—") },
+        { label: "", render: (r) => h("div", { class: "row" },
+          h("button", {
+            class: "btn btn-sm",
+            onclick: () => renamePlacementOption(r, label),
+          }, "Edit"),
+          h("button", {
+            class: "btn btn-sm",
+            disabled: r.in_use ? true : null,
+            title: r.in_use
+              ? "In use — rename it instead, or change those servers first"
+              : null,
+            onclick: () => removePlacementOption(r, label),
+          }, "Delete")) },
+      ], items, { compact: true })
+      : h("p", { class: "muted small" },
+        `No ${label} values configured yet. Until one is added, the placement `
+        + "editor offers free text."),
+    h("div", { class: "row", style: { alignItems: "flex-end" } },
+      h("div", { class: "field", style: { minWidth: "260px" } }, addInput),
+      h("button", { class: "btn btn-primary", onclick: add }, "Add")),
+    status);
+}
+
+async function renderSettings() {
+  mount(view, spinnerRows(3));
+  const orgInput = h("input", { id: "org-name", type: "text", placeholder: "Organisation name" });
+  const orgStatus = h("div");
+  let placement = { environments: [], business_groups: [] };
+  try {
+    const value = await api("inventory/settings/organization");
+    orgInput.value = value?.name || "";
+  } catch { /* not configured yet */ }
+  try {
+    placement = await api("inventory/settings/placement");
+  } catch { /* the free-text fallback in the editor still works */ }
+  const flash = SETTINGS_FLASH;
+  SETTINGS_FLASH = null;
+  const form = h("div", { class: "stack" },
+    h("div", { class: "row", style: { alignItems: "flex-end" } },
+      h("div", { class: "field", style: { minWidth: "320px" } },
+        h("label", {}, "Organisation name (report branding)"), orgInput),
+      h("button", {
+        class: "btn btn-primary",
+        onclick: async () => {
+          orgStatus.replaceChildren();
+          try {
+            await api("inventory/settings/organization", {
+              method: "PUT", body: { name: orgInput.value },
+            });
+            orgStatus.appendChild(alert("ok", "Saved"));
+          } catch (error) {
+            orgStatus.appendChild(alert("error", error.message));
+          }
+        },
+      }, "Save")),
+    orgStatus);
+  mount(view, h("div", { class: "stack" },
+    flash,
+    card("Report branding", "Used in PDF headers and footers", form),
+    card("Inventory placement values",
+      "The picker offered when an operator corrects environment or business "
+      + "service, and the names shown across inventory, compliance, reports and "
+      + "the dashboard. A rename updates every server holding the old value; "
+      + "the AssetExplorer value is preserved beside it.",
+      h("div", { class: "stack" },
+        placementOptionSection("environment", "environment",
+          placement.environments || []),
+        placementOptionSection("business_group", "business service",
+          placement.business_groups || []))),
+    card("Platform", "Deployment facts",
+      h("dl", { class: "kv" },
+        h("dt", {}, "Application"), h("dd", {}, "PatchTrack 1.0.0"),
+        h("dt", {}, "Timezone"), h("dd", {}, "UTC (schedules and snapshots)"),
+        h("dt", {}, "Report retention"), h("dd", {}, "2555 days by default"),
+        h("dt", {}, "Database"), h("dd", {}, "PostgreSQL")))));
+}
+
+const RENDERERS = {
+  dashboard: renderDashboard,
+  servers: renderServers,
+  findings: renderFindings,
+  trends: renderTrends,
+  inventory: renderInventory,
+  reconciliation: renderReconciliation,
+  reports: renderReports,
+  schedules: renderSchedules,
+  integrations: renderIntegrations,
+  policies: renderPolicies,
+  users: renderUsers,
+  audit: renderAudit,
+  health: renderHealth,
+  settings: renderSettings,
+};
+
+/* ------------------------------------------------- forced password rotation */
+/* A user whose account was just created, or whose password an administrator
+ * reset, may not use the console until they set a new password. The gateway
+ * enforces this on every other route; this dialog is only the way to satisfy
+ * it without a support call. */
+function promptPasswordChange(me) {
+  const current = h("input", { type: "password", autocomplete: "current-password" });
+  const next = h("input", { type: "password", autocomplete: "new-password", minLength: 12 });
+  const confirm = h("input", { type: "password", autocomplete: "new-password", minLength: 12 });
+  const error = h("div", { class: "small", style: { color: "var(--critical)" }, hidden: true });
+  const submit = h("button", { class: "btn btn-primary", type: "submit" }, "Set new password");
+  const form = h("form", {
+    class: "stack",
+    onsubmit: async (event) => {
+      event.preventDefault();
+      error.hidden = true;
+      if (next.value !== confirm.value) {
+        error.textContent = "The new passwords do not match.";
+        error.hidden = false;
+        return;
+      }
+      submit.disabled = true;
+      try {
+        const result = await api("session/change-password", {
+          method: "POST",
+          body: { current_password: current.value, new_password: next.value },
+          // A 401 here is a mistyped current password, not an expired
+          // session; show it inline instead of bouncing to /login.
+          redirectOnUnauthorized: false,
+        });
+        // The password changed but the gateway could not mint a fresh session
+        // (for example the account locked during the change). Send the user to
+        // sign in rather than looping back into this dialog.
+        window.location.replace(result?.reauthenticate ? "/login" : "/");
+      } catch (failure) {
+        error.textContent = failure.message;
+        error.hidden = false;
+        submit.disabled = false;
+      }
+    },
+  },
+    h("p", { class: "small secondary" },
+      `${me.display_name || me.username}, you must choose a new password before continuing.`),
+    h("div", { class: "field" }, h("label", {}, "Current password"), current),
+    h("div", { class: "field" }, h("label", {}, "New password (at least 12 characters)"), next),
+    h("div", { class: "field" }, h("label", {}, "Confirm new password"), confirm),
+    error,
+    submit);
+  // Not dismissible: every other route answers 403 until this is done, so a
+  // close button would leave the user staring at a console that cannot load.
+  modal("Set a new password", form, [], { dismissible: false });
+}
+
+/* ------------------------------------------------------------------ boot */
+async function boot() {
+  try {
+    const me = await api("me");
+    state.user = me;
+    // Bound before the rotation check: a user who no longer knows their
+    // current password must still be able to sign out.
+    document.getElementById("logout").addEventListener("click", async () => {
+      // Through api() so the CSRF header travels with the request: the
+      // gateway rejects a bare POST here, and signing out would silently
+      // leave the session cookie in place.
+      try { await api("session/logout", { method: "POST" }); } catch { /* already gone */ }
+      window.location.replace("/login");
+    });
+    if (me.must_change_password) {
+      promptPasswordChange(me);
+      return;
+    }
+    document.getElementById("user-name").textContent = me.display_name || me.username;
+    document.getElementById("user-role").textContent = me.role.replaceAll("_", " ");
+    document.getElementById("user-initials").textContent =
+      (me.display_name || me.username).slice(0, 2).toUpperCase();
+  } catch {
+    window.location.replace("/login");
+    return;
+  }
+  await loadDimensions();
+  bindKiosk();
+  document.getElementById("refresh").addEventListener("click", () => renderRoute());
+  window.addEventListener("hashchange", renderRoute);
+  const route = parseHash().path;
+  if (!window.location.hash) navigate(route);
+  renderRoute();
+}
+
+boot();

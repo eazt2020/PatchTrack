@@ -1,0 +1,50 @@
+# PatchTrack scheduled jobs (native installation, no containers).
+#
+# Install as /etc/systemd/system/patchtrack-tick.service and start it from
+# patchtrack-tick.timer. scripts/patchtrack-tick.sh decides what is actually
+# due on each run, so one hourly timer covers every cadence (see
+# PATCHTRACK_SYNC_*_INTERVAL in /etc/patchtrack/tick.env).
+#
+# The script calls the services directly on 127.0.0.1 with the shared service
+# token; it never uses a human account and never goes through the gateway.
+# Nothing in this unit is a credential.
+[Unit]
+Description=PatchTrack scheduled jobs
+Documentation=file:/opt/patchtrack/docs/operations-runbook.md
+After=network-online.target patchtrack@identity.service \
+    patchtrack@inventory.service patchtrack@compliance.service \
+    patchtrack@reporting.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=patchtrack
+Group=patchtrack
+
+# The shared environment supplies PATCHTRACK_SERVICE_TOKEN. tick.env is
+# optional so the shipped cadences apply until an operator overrides them.
+EnvironmentFile=/etc/patchtrack/.env
+EnvironmentFile=-/etc/patchtrack/tick.env
+WorkingDirectory=/opt/patchtrack
+ExecStart=/opt/patchtrack/scripts/patchtrack-tick.sh
+
+# Hardening: the job runner writes only its stamps, in /var/lib/patchtrack.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ReadWritePaths=/var/lib/patchtrack
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,24 @@
+# PatchTrack scheduled-job timer (native installation, no containers).
+#
+# Install as /etc/systemd/system/patchtrack-tick.timer, then:
+#
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now patchtrack-tick.timer
+#
+# Fires hourly; scripts/patchtrack-tick.sh skips whatever is not yet due, so
+# the per-integration cadences live in /etc/patchtrack/tick.env rather than in
+# the schedule here. Persistent=true means a missed run (host down) happens
+# once after boot instead of being dropped.
+[Unit]
+Description=Run PatchTrack scheduled jobs hourly
+Documentation=file:/opt/patchtrack/docs/operations-runbook.md
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=60
+AccuracySec=1min
+Unit=patchtrack-tick.service
+
+[Install]
+WantedBy=timers.target
