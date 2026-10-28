@@ -140,7 +140,9 @@ def test_the_tick_service_loads_the_shared_environment():
     directives = "\n".join(
         line for line in text.splitlines() if not line.lstrip().startswith("#")
     )
-    assert "EnvironmentFile=/etc/patchtrack/.env\n" in text
+    # Optional for a container installation, which resolves the token inside
+    # the service container; a native installation still loads it here.
+    assert "EnvironmentFile=-/etc/patchtrack/.env\n" in text
     assert "PATCHTRACK_SERVICE_TOKEN" not in directives
     assert "Environment=PATCHTRACK_SERVICE_TOKEN" not in directives
 
@@ -153,7 +155,9 @@ def test_the_timer_fires_hourly_and_survives_a_reboot():
     assert timer["Install"]["WantedBy"] == "timers.target"
 
 
-def test_the_tick_script_covers_every_service_port():
-    script = (UNIT_DIR.parents[1] / "scripts" / "patchtrack-tick.sh").read_text()
+def test_the_job_script_covers_every_service_port():
+    # The tick runner delegates transport to the job script, which owns the
+    # port map for native installations.
+    script = (UNIT_DIR.parents[1] / "scripts" / "patchtrack-job.sh").read_text()
     for service in SERVICES:
         assert f"{service}) port=" in script, f"{service} has no port fallback"

@@ -22,12 +22,21 @@ def test_the_script_exists_and_is_executable(name: str):
     assert path.stat().st_mode & 0o111, f"{name} is not executable"
 
 
-@pytest.mark.parametrize("name", RUNNERS)
-def test_the_script_authenticates_as_the_scheduler(name: str):
-    text = (SCRIPTS / name).read_text()
+def test_the_job_script_authenticates_as_the_scheduler():
+    text = (SCRIPTS / "patchtrack-job.sh").read_text()
     assert '"x-patchtrack-internal"' in text or "'x-patchtrack-internal'" in text
     assert "PATCHTRACK_SERVICE_TOKEN" in text
     assert '"scheduler"' in text or "'scheduler'" in text
+
+
+def test_the_tick_script_delegates_to_the_job_script():
+    # The tick runner owns due-state only. Credentials, ports and the
+    # container/native choice live in one place, so the systemd timer works
+    # for both deployments.
+    text = (SCRIPTS / "patchtrack-tick.sh").read_text()
+    assert "patchtrack-job.sh" in text
+    assert 'JOB="${PATCHTRACK_JOB_SCRIPT:-$ROOT/scripts/patchtrack-job.sh}"' in text
+    assert "x-patchtrack-internal" not in text
 
 
 def executable_lines(name: str) -> str:
@@ -47,10 +56,17 @@ def test_the_script_never_uses_a_human_credential(name: str):
     assert "/api/" not in text
 
 
-@pytest.mark.parametrize("name", RUNNERS)
-def test_the_script_fails_on_a_failed_job(name: str):
-    text = (SCRIPTS / name).read_text()
+def test_the_job_script_fails_on_a_reported_failure():
+    text = (SCRIPTS / "patchtrack-job.sh").read_text()
     assert '"status"' in text and '"failed"' in text
+
+
+def test_the_tick_script_fails_when_a_step_fails():
+    # It does not parse the response itself; it trusts the job script's exit
+    # status and turns any failure into its own non-zero exit.
+    text = (SCRIPTS / "patchtrack-tick.sh").read_text()
+    assert '"$JOB" "$@"' in text
+    assert 'exit "$FAILED"' in text
 
 
 def test_the_job_script_works_in_both_deployments():
@@ -88,12 +104,12 @@ def test_the_native_transport_isolates_the_interpreter():
 
 def test_the_tick_script_writes_a_stamp_only_after_success():
     text = (SCRIPTS / "patchtrack-tick.sh").read_text()
-    # The stamp call sits inside the success branch of each job, so a failed
+    # The stamp call sits inside the success branch of due_run, so a failed
     # collection is retried on the next tick instead of waiting a full
     # interval.
-    collection = text[text.index("collection() {"):text.index("daily_snapshot() {")]
-    assert collection.index("post inventory") < collection.index("stamp ")
-    assert collection.index("stamp ") > collection.index("then")
+    runner = text[text.index("due_run() {"):text.index("collection() {")]
+    assert runner.index('"$JOB" "$@"') < runner.index("stamp ")
+    assert runner.index("stamp ") > runner.index("then")
 
 
 def test_the_tick_script_isolates_a_failing_step():

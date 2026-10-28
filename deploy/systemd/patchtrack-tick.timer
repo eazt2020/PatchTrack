@@ -1,4 +1,5 @@
-# PatchTrack scheduled-job timer (native installation, no containers).
+# PatchTrack scheduled-job timer. This is the only supported scheduler; there
+# is deliberately no cron entry.
 #
 # Install as /etc/systemd/system/patchtrack-tick.timer, then:
 #

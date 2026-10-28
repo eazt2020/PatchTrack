@@ -187,23 +187,35 @@ Per-source detail: [AssetExplorer](integration-assetexplorer.md),
 
 ## 11. Schedule collection, snapshots and reports
 
-Add a systemd timer or cron on the host. The scripts call each service directly
-with the shared service token — not the gateway, whose `/api` routes need a
-browser session. Times below are illustrative; the shipped
-`patchtrack-tick.timer` replaces all six lines with one hourly run.
+Scheduling is done by the shipped **systemd timer**. Do not add a crontab or
+an `/etc/cron.d` entry: PatchTrack does not support cron scheduling, and the
+timer is the single place the cadence is configured.
 
-```cron
-# /etc/cron.d/patchtrack — run as the patchtrack account, not as root.
-15 */6 * * *  patchtrack  /opt/patchtrack/scripts/patchtrack-job.sh sync assetexplorer
-30 */6 * * *  patchtrack  /opt/patchtrack/scripts/patchtrack-job.sh sync satellite
-0  3  * * *   patchtrack  /opt/patchtrack/scripts/patchtrack-job.sh sync sccm
-0  4  * * 1   patchtrack  /opt/patchtrack/scripts/patchtrack-job.sh sync solaris
-30 0  * * *   patchtrack  /opt/patchtrack/scripts/patchtrack-job.sh daily
-5  *  * * *   patchtrack  /opt/patchtrack/scripts/patchtrack-job.sh tick
+```bash
+sudo install -m 0644 deploy/systemd/patchtrack-tick.service \
+  deploy/systemd/patchtrack-tick.timer /etc/systemd/system/
+sudo install -m 0755 scripts/patchtrack-tick.sh scripts/patchtrack-job.sh \
+  /opt/patchtrack/scripts/
+sudo install -d -m 0750 -o patchtrack -g patchtrack /var/lib/patchtrack/state
+sudo systemctl daemon-reload
+sudo systemctl enable --now patchtrack-tick.timer
 ```
 
+`patchtrack-tick.timer` fires hourly and `scripts/patchtrack-tick.sh` runs only
+what is due, so every cadence lives in `/etc/patchtrack/tick.env` rather than
+in the schedule. The runner delegates the request to
+`scripts/patchtrack-job.sh`, which works for both deployments: it executes
+inside the service container when one is running, and calls
+`127.0.0.1:$PORT` for a native installation. In both cases it presents the
+shared service token — never a human account and never the gateway, whose
+`/api` routes need a browser session.
+
+A container installation needs the `patchtrack` account to be able to reach
+the container runtime (for example membership of the `docker` group) and the
+compose project directory, since the job script execs into the container.
+
 See [operations-runbook.md](operations-runbook.md#3-scheduled-jobs) for what
-each job does, the systemd timer equivalent, and the credential it uses.
+each job does, the available cadences, and the credential it uses.
 
 ## 12. Optional: start the Grafana dashboard
 
@@ -269,10 +281,10 @@ Four unit files ship in `deploy/systemd/`:
 | `patchtrack-tick.service` | `/etc/systemd/system/` | One run of `scripts/patchtrack-tick.sh`; every step not yet due is skipped |
 | `patchtrack-tick.timer` | `/etc/systemd/system/` | Fires the job unit hourly |
 
-Installing the timer units is optional — nothing starts unless you enable the
-timer — but they are shipped so the scheduler is reproducible rather than
-hand-written. The per-integration cadences are configuration, in
-`/etc/patchtrack/tick.env` (see
+The timer is the only supported scheduler — never a crontab or
+`/etc/cron.d` entry. It is not started until you enable it, but it is shipped
+so the schedule is reproducible rather than hand-written. The per-integration
+cadences are configuration, in `/etc/patchtrack/tick.env` (see
 [operations-runbook.md](operations-runbook.md#3-scheduled-jobs)).
 
 ```bash
@@ -286,7 +298,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now patchtrack-migrate.service
 sudo systemctl enable --now patchtrack@identity patchtrack@inventory \
   patchtrack@compliance patchtrack@reporting patchtrack@gateway
-# Optional: collect and report on a schedule.
+# The only scheduler: collection, snapshots, reports and audit retention.
 sudo systemctl enable --now patchtrack-tick.timer
 ```
 

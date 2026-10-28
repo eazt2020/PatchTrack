@@ -121,8 +121,10 @@ period permanently — the claim row exists, so an operator must retry
 explicitly; the report-level unique index permits it because `status='failed'`
 is excluded.
 
-The scheduler is driven by `POST /api/reporting/jobs/tick`. Wire it to a
-systemd timer or a cron entry calling the gateway with the service token.
+The scheduler is driven by `POST /jobs/tick` on the reporting service. It is
+run by the shipped `patchtrack-tick.timer` through
+`scripts/patchtrack-job.sh tick`; PatchTrack does not use cron. The job calls
+the service directly with the shared service token, not through the gateway.
 
 ## 8. Email delivery
 

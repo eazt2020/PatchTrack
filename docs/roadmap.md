@@ -75,8 +75,8 @@ Ordered by value, not committed:
 4. **Prometheus metrics endpoint** per service, replacing the query-based
    monitoring described in the runbook.
 5. **Scheduled collection inside the application.** Today the schedule lives in
-   cron/systemd. An in-app scheduler (gated by the same idempotency ledger as
-   reports) would remove an external dependency, at the cost of a second
+   the systemd timer. An in-app scheduler (gated by the same idempotency ledger
+   as reports) would remove an external dependency, at the cost of a second
    scheduler to reason about.
 6. **Framework mapping** (PCI DSS, APRA CPS 234, ISO 27001 control references
    against each finding category).

@@ -357,7 +357,8 @@ recorded because each one changed a published figure or a stored record.
 - No MFA and no OIDC/enterprise sign-in (the schema accommodates the latter;
   the login path refuses such accounts with an explanatory message).
 - Role model is global: a Viewer sees the whole estate.
-- Collection scheduling is external (cron/systemd), not in-app.
+- Collection scheduling is external (the shipped systemd timer), not in-app.
+  Cron scheduling is deliberately not supported.
 - No Prometheus exporter; monitoring is query-based.
 - The four systemd units in `deploy/systemd/` are written but have never been
   started: this host has no `patchtrack` account, no `/etc/patchtrack` and no

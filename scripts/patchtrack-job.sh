@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run a single PatchTrack background job from cron or a systemd timer.
+# Run a single PatchTrack background job from the systemd timer (or by hand).
 #
 # The gateway is the only published port, and its /api routes need a browser
 # session cookie — the wrong credential for a timer. Jobs therefore call the
@@ -29,11 +29,12 @@
 # PATCHTRACK_CONTAINER_CLI=docker|podman pins the runtime when both are
 # installed.
 #
-# scripts/patchtrack-tick.sh is the "run everything that is due" variant; this
-# script runs exactly one named job, which is what a cron entry wants.
+# scripts/patchtrack-tick.sh is the "run everything that is due" variant and
+# is what patchtrack-tick.timer executes; this script runs exactly one named
+# job, either from that runner or by hand.
 #
-# Exit status is non-zero when the job reports a failure, so cron mail and
-# systemd failures work as expected.
+# Exit status is non-zero when the job reports a failure, so the systemd unit
+# enters a failed state and journalctl shows the reason.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

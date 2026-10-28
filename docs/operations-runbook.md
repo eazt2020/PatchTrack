@@ -48,12 +48,16 @@ the service directly and present the shared service token instead. In every
 case they act as the `scheduler` principal — never as a named human user — so
 the audit trail answers "who ran what" without a shared account.
 
+**Scheduling is systemd-only.** Do not create a crontab or `/etc/cron.d`
+entry; the shipped `patchtrack-tick.timer` is the supported and reproducible
+scheduler.
+
 Two scripts, one job each versus everything due:
 
 | Script | What it runs | How the request is made |
 |--------|--------------|-------------------------|
-| `scripts/patchtrack-job.sh` | One named job (`sync …`, `daily`, `tick`, `purge`, `audit-purge`) — the cron shape | Detects the deployment per call: `docker compose exec` (or `podman-compose exec` / `podman exec`, the usual runtime on RHEL and Rocky) into the service's own container where one is running, otherwise a direct request to `127.0.0.1:$PORT`. `PATCHTRACK_MODE=container\|native` overrides the detection; `PATCHTRACK_CONTAINER_CLI=docker\|podman` pins the runtime when both are installed |
-| `scripts/patchtrack-tick.sh` | Every job not yet due — the timer shape | Direct request to `127.0.0.1:$PORT` with the token from `/etc/patchtrack/.env`; one hourly run covers every cadence |
+| `scripts/patchtrack-job.sh` | One named job (`sync …`, `daily`, `tick`, `purge`, `audit-purge`) — for manual use or by the timer runner | Detects the deployment per call: `docker compose exec` (or `podman-compose exec` / `podman exec`, the usual runtime on RHEL and Rocky) into the service's own container where one is running, otherwise a direct request to `127.0.0.1:$PORT`. `PATCHTRACK_MODE=container\|native` overrides the detection; `PATCHTRACK_CONTAINER_CLI=docker\|podman` pins the runtime when both are installed |
+| `scripts/patchtrack-tick.sh` | Every job not yet due; this is what the timer executes | Delegates each step to `patchtrack-job.sh`, so it works the same for containers and native; one hourly run covers every cadence |
 
 The tick script also applies the audit retention window once a day. The window
 itself is configured in **Settings → Audit trail retention** and stored in the
@@ -61,50 +65,29 @@ database; `audit-purge` is only the job that enforces it, and it is safe to run
 manually (`patchtrack-job.sh audit-purge`). Each run reports how many events it
 deleted and records `audit.purged`.
 
-Both exit non-zero when any job reports a failure, so cron mail and systemd
-unit failure states work without extra plumbing.
+Both exit non-zero when any job reports a failure, so the systemd unit enters
+a failed state and journalctl carries the reason; nothing depends on a mail
+spool.
 
-### Containers (cron or timer)
+### Install the timer
 
-```bash
-sudo -u patchtrack /opt/patchtrack/scripts/patchtrack-job.sh sync assetexplorer
-sudo -u patchtrack /opt/patchtrack/scripts/patchtrack-job.sh sync satellite
-sudo -u patchtrack /opt/patchtrack/scripts/patchtrack-job.sh daily
-sudo -u patchtrack /opt/patchtrack/scripts/patchtrack-job.sh tick
-```
-
-```cron
-# /etc/cron.d/patchtrack  — mode 0644, root-owned.
-SHELL=/bin/bash
-PATCHTRACK_JOB=/opt/patchtrack/scripts/patchtrack-job.sh
-
-15 */6 * * *  patchtrack  $PATCHTRACK_JOB sync assetexplorer
-30 */6 * * *  patchtrack  $PATCHTRACK_JOB sync satellite
-0  3  * * *   patchtrack  $PATCHTRACK_JOB sync sccm
-0  4  * * 1   patchtrack  $PATCHTRACK_JOB sync solaris
-30 0  * * *   patchtrack  $PATCHTRACK_JOB daily
-5  *  * * *   patchtrack  $PATCHTRACK_JOB tick
-```
-
-The script reads `PATCHTRACK_SERVICE_TOKEN` from **inside the service
-container** (loaded from `.env` by compose), so the calling account never needs
-to hold the token. Rotating the token remains a coordinated change across all
-five services.
-
-### Native (systemd timer — the preferred form where containers are prohibited)
-
-`scripts/patchtrack-tick.sh` decides what is actually due on each run; it is
-driven by two unit files that ship in `deploy/systemd/` alongside the service
-units. Nothing runs until the timer is enabled, so installing them is not the
-same as scheduling anything.
+`scripts/patchtrack-tick.sh` decides what is actually due on each run and
+delegates each step to `patchtrack-job.sh`. One timer therefore covers both
+deployments: a running service container is the target where one exists, and
+`127.0.0.1:$PORT` otherwise. In a container installation the `patchtrack`
+account needs access to the container runtime (for example the `docker`
+group) and the compose project directory.
 
 | File | What it does |
 |------|--------------|
-| `patchtrack-tick.service` | `Type=oneshot`; runs the script as `patchtrack` with `/etc/patchtrack/.env` (token) and the optional `/etc/patchtrack/tick.env` (cadences); writable only in `/var/lib/patchtrack` |
+| `patchtrack-tick.service` | `Type=oneshot`; runs the script as `patchtrack` with the optional `/etc/patchtrack/.env` (token for a native installation) and `/etc/patchtrack/tick.env` (cadences); writable only in `/var/lib/patchtrack` |
 | `patchtrack-tick.timer` | `OnCalendar=hourly`, `Persistent=true` so a run missed while the host was down happens once after boot |
 
 ```bash
-sudo install -m 0755 scripts/patchtrack-tick.sh /opt/patchtrack/scripts/
+sudo install -m 0644 deploy/systemd/patchtrack-tick.service \
+  deploy/systemd/patchtrack-tick.timer /etc/systemd/system/
+sudo install -m 0755 scripts/patchtrack-tick.sh scripts/patchtrack-job.sh \
+  /opt/patchtrack/scripts/
 sudo install -d -m 0750 -o patchtrack -g patchtrack /var/lib/patchtrack/state
 sudo systemctl daemon-reload
 sudo systemctl enable --now patchtrack-tick.timer

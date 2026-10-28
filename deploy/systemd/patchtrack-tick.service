@@ -1,13 +1,15 @@
-# PatchTrack scheduled jobs (native installation, no containers).
+# PatchTrack scheduled jobs. This is the only supported scheduler; there is
+# deliberately no cron entry.
 #
 # Install as /etc/systemd/system/patchtrack-tick.service and start it from
 # patchtrack-tick.timer. scripts/patchtrack-tick.sh decides what is actually
 # due on each run, so one hourly timer covers every cadence (see
 # PATCHTRACK_SYNC_*_INTERVAL in /etc/patchtrack/tick.env).
 #
-# The script calls the services directly on 127.0.0.1 with the shared service
-# token; it never uses a human account and never goes through the gateway.
-# Nothing in this unit is a credential.
+# The script delegates each job to scripts/patchtrack-job.sh, which sends the
+# request inside the service's container when one is running and to
+# 127.0.0.1:$PORT for a native installation. It never uses a human account and
+# never goes through the gateway. Nothing in this unit is a credential.
 [Unit]
 Description=PatchTrack scheduled jobs
 Documentation=file:/opt/patchtrack/docs/operations-runbook.md
@@ -21,9 +23,11 @@ Type=oneshot
 User=patchtrack
 Group=patchtrack
 
-# The shared environment supplies PATCHTRACK_SERVICE_TOKEN. tick.env is
-# optional so the shipped cadences apply until an operator overrides them.
-EnvironmentFile=/etc/patchtrack/.env
+# The shared environment supplies PATCHTRACK_SERVICE_TOKEN for a native
+# installation; a container installation reads it inside the service
+# container, so the file is optional here. tick.env is optional so the shipped
+# cadences apply until an operator overrides them.
+EnvironmentFile=-/etc/patchtrack/.env
 EnvironmentFile=-/etc/patchtrack/tick.env
 WorkingDirectory=/opt/patchtrack
 ExecStart=/opt/patchtrack/scripts/patchtrack-tick.sh
