@@ -315,3 +315,124 @@ def test_installer_help_is_safe_to_run_without_root(tmp_path):
     assert result.returncode == 0
     assert "--check" in result.stdout
     assert "--yes" in result.stdout
+
+
+def test_installer_accepts_airgap_options():
+    args = installer.parse_args(
+        ["--airgap", "--bundle-dir", "/srv/bundles/patchtrack-3.0.0", "--check"]
+    )
+
+    assert args.airgap is True
+    assert args.bundle_dir == "/srv/bundles/patchtrack-3.0.0"
+    assert installer.validate_bundle_dir("/srv/bundles/patchtrack-3.0.0") is None
+    assert installer.validate_bundle_dir("bundles/patchtrack") is not None
+
+
+def test_airgap_bundle_checksum_verification_detects_tampering(tmp_path):
+    import hashlib
+
+    archive = tmp_path / "postgres-17.tar"
+    archive.write_bytes(b"postgres image archive")
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    (tmp_path / installer.AIRGAP_SUMS).write_text(
+        f"{digest}  {archive.name}\n"
+    )
+
+    ok, detail = installer.verify_bundle(tmp_path)
+    assert ok is True
+    assert "1 file(s) verified" in detail
+
+    archive.write_bytes(b"tampered")
+    ok, detail = installer.verify_bundle(tmp_path)
+    assert ok is False
+    assert archive.name in detail
+
+
+def test_airgap_bundle_checksum_verification_requires_the_sums_file(tmp_path):
+    ok, detail = installer.verify_bundle(tmp_path)
+
+    assert ok is False
+    assert installer.AIRGAP_SUMS in detail
+
+
+def test_airgap_preflight_checks_the_bundle_and_skips_registry_probes(tmp_path):
+    import hashlib
+
+    version = installer.Config().version
+    archives = installer.bundle_archives(version)
+    for key in ("app", "base", "postgres", "grafana"):
+        (tmp_path / archives[key][0]).write_bytes(key.encode())
+    sums = []
+    for title in ("app", "base", "postgres", "grafana"):
+        name = archives[title][0]
+        digest = hashlib.sha256((tmp_path / name).read_bytes()).hexdigest()
+        sums.append(f"{digest}  {name}")
+    (tmp_path / installer.AIRGAP_SUMS).write_text("\n".join(sums) + "\n")
+
+    cfg = installer.Config(airgap=True, bundle_dir=tmp_path)
+    checks = installer.bundle_preflight_checks(
+        cfg, installer.RuntimePlan("podman", False), runtime_ready=False
+    )
+    by_name = {check.name: check for check in checks}
+
+    assert by_name["air-gap mode"].ok
+    assert by_name["bundle checksums"].ok
+    assert by_name["application image archive"].ok
+    assert by_name["PostgreSQL image archive"].ok
+    assert not any("registry" in name.lower() for name in by_name)
+    assert all(check.ok for check in checks if check.required)
+
+
+def test_airgap_preflight_rejects_a_bundle_missing_a_required_archive(tmp_path):
+    (tmp_path / installer.AIRGAP_SUMS).write_text("")
+    cfg = installer.Config(airgap=True, bundle_dir=tmp_path)
+
+    checks = installer.bundle_preflight_checks(
+        cfg, installer.RuntimePlan("podman", False), runtime_ready=False
+    )
+    by_name = {check.name: check for check in checks}
+
+    assert by_name["application image archive"].ok is False
+    assert by_name["PostgreSQL image archive"].ok is False
+
+
+def test_airgap_installer_loads_images_and_skips_the_build(tmp_path, monkeypatch):
+    import subprocess
+
+    version = installer.Config().version
+    cfg = installer.Config(airgap=True, bundle_dir=tmp_path)
+    subject = installer.Installer(cfg, installer.RuntimePlan("podman", False))
+    state = set()
+
+    def fake_image_exists(runtime, image):
+        if image == cfg.image:
+            return f"localhost/patchtrack:{version}" in state
+        return image in state
+
+    def fake_load(archive):
+        state.add({
+            f"patchtrack-app-{version}.tar":
+                f"docker.io/library/patchtrack:{version}",
+            installer.AIRGAP_POSTGRES_ARCHIVE: installer.AIRGAP_POSTGRES_IMAGE,
+            installer.AIRGAP_BASE_ARCHIVE: installer.AIRGAP_BASE_IMAGE,
+        }[archive.name])
+
+    def fake_run(args, **kwargs):
+        if list(args[:2]) == ["podman", "tag"]:
+            state.add(args[3])
+        elif list(args[:3]) == ["podman", "image", "rm"]:
+            state.discard(args[3])
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(subject, "load_archive", fake_load)
+    monkeypatch.setattr(installer, "image_exists", fake_image_exists)
+    monkeypatch.setattr(installer, "run_command", fake_run)
+
+    subject.prepare_images()
+
+    assert subject.prebuilt_image is True
+    assert subject.image_loaded is True
+    assert f"localhost/patchtrack:{version}" in state
+    assert f"docker.io/library/patchtrack:{version}" not in state
+    assert installer.AIRGAP_POSTGRES_IMAGE in state
+    assert installer.AIRGAP_BASE_IMAGE not in state

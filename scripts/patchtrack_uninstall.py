@@ -68,6 +68,8 @@ class Manifest:
     created_group: bool = False
     compose_project: str = COMPOSE_PROJECT
     version: str = ""
+    installation_mode: str = "online"
+    airgap_bundle: Optional[Path] = None
 
     @property
     def env_file(self) -> Path:
@@ -184,6 +186,22 @@ def load_manifest(path: Path) -> Manifest:
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", project):
         raise UninstallError("compose_project in install.json is not a valid project name")
 
+    # Manifests written before air-gap support have no mode and are online.
+    mode = str(data.get("installation_mode") or "online")
+    if mode not in ("online", "airgap"):
+        raise UninstallError(
+            "installation_mode in install.json must be online or airgap"
+        )
+    bundle_value = data.get("airgap_bundle")
+    if bundle_value is None:
+        bundle = None
+    elif not isinstance(bundle_value, str) or not bundle_value.startswith("/"):
+        raise UninstallError("airgap_bundle in install.json must be an absolute path")
+    else:
+        bundle = base.clean_path(bundle_value)
+        problem = base._path_error(str(bundle))
+        if problem:
+            raise UninstallError(f"airgap_bundle {problem}")
     return Manifest(
         path=path,
         config_dir=config_dir,
@@ -199,6 +217,8 @@ def load_manifest(path: Path) -> Manifest:
         created_group=data.get("created_group") is True,
         compose_project=project,
         version=version,
+        installation_mode=mode,
+        airgap_bundle=bundle,
     )
 
 
@@ -334,6 +354,14 @@ def collect_preflight(manifest: Manifest, options: Options) -> Tuple[List[base.C
         manifest.path.is_file(),
         str(manifest.path),
     ))
+
+    if manifest.installation_mode == "airgap":
+        detail = "air-gapped installation"
+        if manifest.airgap_bundle:
+            detail += f"; bundle at {manifest.airgap_bundle} is not removed"
+        checks.append(base.Check("installation mode", True, detail))
+    else:
+        checks.append(base.Check("installation mode", True, "online installation"))
 
     for label, path in (
         ("application directory", manifest.install_dir),
@@ -794,6 +822,9 @@ def summary(manifest: Manifest, options: Options, state: RuntimeState,
     print(f"    Application directory : {manifest.install_dir}")
     print(f"    Configuration         : {manifest.config_dir}")
     print(f"    Runtime               : {manifest.runtime}")
+    print(f"    Installation mode     : {manifest.installation_mode}")
+    if manifest.airgap_bundle:
+        print(f"    Air-gap bundle        : {manifest.airgap_bundle} (kept)")
     print(f"    Compose project       : {manifest.compose_project}")
     print(f"    Container image       : "
           f"{'keep ' if options.keep_image else 'remove '}{manifest.image}")

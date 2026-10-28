@@ -32,6 +32,7 @@ It asks for:
 | Certificate name | Host FQDN or IP | Used in the generated self-signed certificate |
 | HTTP(S) proxy | Blank (direct) | For hosts whose outbound access is through a proxy; see [Hosts behind an HTTP proxy](#hosts-behind-an-http-proxy) |
 | Proxy bypass list | Loopback and compose service names | Shown only when a proxy is set |
+| Air-gapped host | No | When yes, asks for the verified bundle directory; see [Air-gapped installation](#air-gapped-installation) |
 | First administrator | Create | Username, display name, optional email and password; the password is read without echo |
 
 Before changing anything it checks root access, RHEL/Rocky 9 and architecture,
@@ -90,7 +91,8 @@ web form for the operator. Useful variables are
 `PATCHTRACK_INSTALL_GATEWAY_PORT`, `PATCHTRACK_INSTALL_TLS_HOSTNAME`,
 `PATCHTRACK_INSTALL_ADMIN_USERNAME`, `PATCHTRACK_INSTALL_ADMIN_DISPLAY_NAME`,
 `PATCHTRACK_INSTALL_ADMIN_EMAIL`, `PATCHTRACK_INSTALL_RUNTIME`,
-`PATCHTRACK_INSTALL_PROXY`, `PATCHTRACK_INSTALL_NO_PROXY` and the preflight
+`PATCHTRACK_INSTALL_PROXY`, `PATCHTRACK_INSTALL_NO_PROXY`,
+`PATCHTRACK_INSTALL_AIRGAP`, `PATCHTRACK_INSTALL_BUNDLE_DIR` and the preflight
 minimums `PATCHTRACK_INSTALL_MIN_DISK_GB` and
 `PATCHTRACK_INSTALL_MIN_MEMORY_GB`.
 
@@ -145,6 +147,49 @@ the bypass list with `PATCHTRACK_INSTALL_NO_PROXY` (interactive: the "Hosts that
 must bypass the proxy" prompt). When rolling back, the installer removes the
 drop-in, reloads systemd and restarts Docker, restoring the previous daemon
 configuration.
+
+### Air-gapped installation
+
+An air-gapped host has no internet access. Install from the verified bundle
+described in [offline-deployment.md](offline-deployment.md); do not run the
+installer against an unverified bundle.
+
+```bash
+sudo ./install.sh --airgap --bundle-dir /srv/bundles/patchtrack-3.0.0
+sudo ./install.sh --airgap --bundle-dir /srv/bundles/patchtrack-3.0.0 --check
+```
+
+`--bundle-dir` implies `--airgap`. In interactive mode the installer asks
+whether the host is air-gapped and, if so, for the bundle directory. The
+directory may also be supplied with `PATCHTRACK_INSTALL_BUNDLE_DIR` (and
+`PATCHTRACK_INSTALL_AIRGAP=1`); a blank bundle directory means the images were
+already loaded by hand.
+
+Air-gap mode changes the preflight and the installation:
+
+- it does not probe registries, the package index, the proxy or any outbound
+  endpoint;
+- it requires `SHA256SUMS` in the bundle and runs `sha256sum -c SHA256SUMS`.
+  Every file must verify before anything is changed. It then requires the
+  application and PostgreSQL archives; a missing pinned base, Grafana, source
+  archive or wheel directory is only a warning;
+- if packages must be installed it requires an enabled `dnf` repository and
+  reminds you to confirm that repository is local. It never adds the remote
+  Docker CE repository;
+- before installing files it loads the application and PostgreSQL images from
+  the bundle when they are not already present. When the application image is
+  supplied, it is used as-is instead of being rebuilt; the pinned base image is
+  loaded only if a local build is still required;
+- Docker Compose starts with `--pull never`; a Podman build uses
+  `--pull=never`.
+
+The bundle directory is recorded in `/etc/patchtrack/install.json` as
+`airgap_bundle` with `installation_mode: airgap`. The bundle itself is not
+modified or copied; keep it for upgrades and rollback.
+
+If an air-gap installation fails after an image was loaded, rollback removes
+the image tag this installation created. The application image is not restored
+from the bundle automatically; rerun the installer, which will load it again.
 
 ## Manual installation
 
@@ -487,7 +532,12 @@ It preserves by default:
 - the Docker or Podman packages and the Docker proxy drop-in. Use
   `--remove-proxy-config` only when the proxy drop-in written by the installer
   is no longer needed; it is removed only when it carries the installer's
-  marker, and Docker is restarted.
+  marker, and Docker is restarted;
+- for an air-gap installation (`installation_mode: airgap` in `install.json`),
+  the bundle directory and its archives. The uninstaller reports the mode and
+  the recorded `airgap_bundle`, removes the application image it installed,
+  and leaves the bundle in place for reinstalling, upgrading or rollback. The
+  PostgreSQL and base images are not installer-owned and are not removed.
 
 Other options: `--keep-image`, `--keep-account`, `--yes` (non-interactive;
 combine with `--purge-data` only when you intend to destroy the data). There

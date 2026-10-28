@@ -28,6 +28,13 @@
   `HTTPS_PROXY` and `NO_PROXY` to the generated `.env` for the services. The
   proxy URL's credentials are redacted from all output, and rollback removes
   the drop-in and restarts Docker.
+- The installer supports air-gapped hosts with `--airgap --bundle-dir PATH`
+  (or `PATCHTRACK_INSTALL_AIRGAP` and `PATCHTRACK_INSTALL_BUNDLE_DIR`). It
+  verifies the bundle's `SHA256SUMS`, checks the required image archives,
+  skips every outbound probe, does not add a remote Docker repository, loads
+  the application and PostgreSQL images when needed, skips the build when the
+  application image is supplied, and starts Compose with pulls disabled. The
+  mode and bundle path are recorded in `install.json`.
 - `install.sh --check` runs the same preflight without changing the host.
 - `uninstall.sh` reverses an installation from its manifest. It prechecks the
   manifest, paths, runtime, compose project, image, account and configuration
@@ -35,7 +42,9 @@
   the installer-created configuration; keeps an account that pre-dated the
   installation and any operator-created file. Data volumes are preserved unless
   `--purge-data` is given. Post-uninstallation checks verify each removal and
-  report preserved volumes and files.
+  report preserved volumes and files. It reads `installation_mode` from the
+  manifest and, for an air-gap installation, reports and preserves the bundle
+  while removing the application image it installed.
 - `upgrade.sh` upgrades an existing deployment from the unpacked new
   release. It preflights the manifest, paths, target version, service account,
   runtime, Compose project, current readiness and free space; takes a mandatory

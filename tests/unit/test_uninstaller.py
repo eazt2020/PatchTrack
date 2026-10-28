@@ -191,3 +191,43 @@ def test_uninstaller_help_is_safe_to_run_without_root():
     assert "--check" in result.stdout
     assert "--purge-data" in result.stdout
     assert "--keep-account" in result.stdout
+
+
+def test_uninstaller_loads_an_airgap_manifest(tmp_path):
+    bundle = tmp_path / "bundles" / "patchtrack-3.0.0"
+    bundle.mkdir(parents=True)
+    path, _, _, _ = write_manifest(
+        tmp_path,
+        installation_mode="airgap",
+        airgap_bundle=str(bundle),
+    )
+
+    manifest = uninstaller.load_manifest(path)
+
+    assert manifest.installation_mode == "airgap"
+    assert manifest.airgap_bundle == bundle
+
+
+def test_uninstaller_treats_a_manifest_without_a_mode_as_online(tmp_path):
+    path, _, _, _ = write_manifest(tmp_path)
+
+    manifest = uninstaller.load_manifest(path)
+
+    assert manifest.installation_mode == "online"
+    assert manifest.airgap_bundle is None
+
+
+def test_uninstaller_rejects_an_unknown_installation_mode(tmp_path):
+    path, _, _, _ = write_manifest(tmp_path, installation_mode="sneakernet")
+
+    with pytest.raises(uninstaller.UninstallError, match="installation_mode"):
+        uninstaller.load_manifest(path)
+
+
+def test_uninstaller_rejects_an_invalid_airgap_bundle_path(tmp_path):
+    path, _, _, _ = write_manifest(
+        tmp_path, installation_mode="airgap", airgap_bundle="bundles/patchtrack"
+    )
+
+    with pytest.raises(uninstaller.UninstallError, match="airgap_bundle"):
+        uninstaller.load_manifest(path)

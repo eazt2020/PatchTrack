@@ -127,8 +127,25 @@ sudo dnf --disablerepo='*' --enablerepo='local-rhel9-appstream' install -y \
 
 ## 7. Install from the bundle
 
-Continue with [install.md](install.md) from step 2, using the extracted
-source directory instead of a downloaded tarball.
+Extract the source archive into a new empty directory and run the guided
+installer with the **bundle directory**, not the extracted source directory:
+
+```bash
+sudo ./install.sh --airgap --bundle-dir /srv/bundles/patchtrack-3.0.0
+sudo ./install.sh --airgap --bundle-dir /srv/bundles/patchtrack-3.0.0 --check
+```
+
+The installer verifies `SHA256SUMS` itself, so the manual checks in steps 3 and
+4 are not required. It checks that the application and PostgreSQL archives are
+present, loads the images that are not already on the host, skips the image
+build when the application image is supplied, does not add a remote Docker CE
+repository, and starts Compose with pulls disabled. See
+[Air-gapped installation](install.md#air-gapped-installation) for the full
+list of changes.
+
+Interactive mode asks the same question; enter the bundle path when prompted.
+The bundle directory is recorded in `install.json` so the uninstaller and the
+operator know which bundle the installation came from.
 
 ## 8. Updates on an air-gapped host
 

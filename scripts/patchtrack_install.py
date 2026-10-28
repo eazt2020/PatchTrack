@@ -64,6 +64,13 @@ DEFAULT_NO_PROXY = (
 DOCKER_PROXY_DROPIN = Path(
     "/etc/systemd/system/docker.service.d/10-patchtrack-proxy.conf"
 )
+AIRGAP_SUMS = "SHA256SUMS"
+AIRGAP_BASE_IMAGE = "registry.access.redhat.com/ubi9/python-312:1-1762230134"
+AIRGAP_POSTGRES_IMAGE = "docker.io/library/postgres:17"
+AIRGAP_GRAFANA_IMAGE = "docker.io/grafana/grafana-oss:13.0.2"
+AIRGAP_BASE_ARCHIVE = "ubi9-python-312.tar"
+AIRGAP_POSTGRES_ARCHIVE = "postgres-17.tar"
+AIRGAP_GRAFANA_ARCHIVE = "grafana-oss-13.0.2.tar"
 
 # Directories the installer must never remove as a whole, even if a malformed
 # rollback record somehow names one of them.
@@ -300,6 +307,136 @@ def validate_proxy(value: str) -> Optional[str]:
     return None
 
 
+def validate_bundle_dir(value: str) -> Optional[str]:
+    if not value:
+        return None
+    return _path_error(value)
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def bundle_archives(version: str) -> dict:
+    return {
+        "app": (f"patchtrack-app-{version}.tar", f"patchtrack:{version}"),
+        "base": (AIRGAP_BASE_ARCHIVE, AIRGAP_BASE_IMAGE),
+        "postgres": (AIRGAP_POSTGRES_ARCHIVE, AIRGAP_POSTGRES_IMAGE),
+        "grafana": (AIRGAP_GRAFANA_ARCHIVE, AIRGAP_GRAFANA_IMAGE),
+    }
+
+
+def verify_bundle(bundle_dir: Path) -> Tuple[bool, str]:
+    """Verify every file listed in the bundle's SHA256SUMS."""
+    sums = bundle_dir / AIRGAP_SUMS
+    if not sums.is_file():
+        return False, f"{sums} is missing; the bundle cannot be verified"
+    result = run_command(
+        ["sha256sum", "-c", AIRGAP_SUMS],
+        cwd=bundle_dir, check=False, capture=True,
+    )
+    # Per-file results go to stdout; warnings and missing-file errors go to
+    # stderr. Prefer naming the file that failed over the generic warning.
+    results = (result.stdout or "").strip().splitlines()
+    errors = (result.stderr or "").strip().splitlines()
+    bad = [line for line in results if not line.rstrip().endswith(": OK")]
+    if result.returncode != 0 or bad:
+        if bad:
+            detail = bad[0]
+        elif errors:
+            detail = errors[-1]
+        else:
+            detail = "checksum verification failed"
+        return False, detail[:300]
+    return True, f"{len(results)} file(s) verified"
+
+
+def bundle_preflight_checks(
+    cfg: Config, plan: RuntimePlan, runtime_ready: bool
+) -> List[Check]:
+    """Checks for an air-gapped host, where network probes are irrelevant."""
+    checks = [Check(
+        "air-gap mode",
+        True,
+        "network access is not required; images come from the bundle or the local runtime",
+    )]
+    runtime = plan.runtime
+    app_present = runtime_ready and image_exists(runtime, cfg.image)
+    postgres_present = runtime_ready and image_exists(runtime, AIRGAP_POSTGRES_IMAGE)
+    base_present = runtime_ready and image_exists(runtime, AIRGAP_BASE_IMAGE)
+
+    if cfg.bundle_dir:
+        bundle = cfg.bundle_dir
+        checks.append(Check(
+            "air-gap bundle",
+            bundle.is_dir(),
+            str(bundle) if bundle.is_dir() else f"{bundle} is not a directory",
+        ))
+        if bundle.is_dir():
+            ok, detail = verify_bundle(bundle)
+            checks.append(Check("bundle checksums", ok, detail))
+            archives = bundle_archives(cfg.version)
+            for label, name in (
+                ("application", archives["app"][0]),
+                ("PostgreSQL", archives["postgres"][0]),
+            ):
+                checks.append(Check(
+                    f"{label} image archive",
+                    (bundle / name).is_file(),
+                    str(bundle / name) if (bundle / name).is_file()
+                    else f"{bundle / name} is missing",
+                ))
+            for label, name in (
+                ("pinned base image", archives["base"][0]),
+                ("Grafana", archives["grafana"][0]),
+                ("source archive", f"patchtrack-{cfg.version}.tar.gz"),
+                ("Python wheels", "patchtrack-wheels"),
+            ):
+                present = (bundle / name).exists()
+                checks.append(Check(
+                    label,
+                    True,
+                    f"present in the bundle" if present else
+                    f"not present in the bundle; only needed for rebuilds or native installs",
+                    required=False,
+                    warning=not present,
+                ))
+    else:
+        checks.append(Check(
+            "preloaded application image",
+            app_present,
+            f"{cfg.image} is loaded" if app_present else
+            f"{cfg.image} is not loaded; pass --bundle-dir or load the bundle first",
+        ))
+        checks.append(Check(
+            "preloaded PostgreSQL image",
+            postgres_present,
+            f"{AIRGAP_POSTGRES_IMAGE} is loaded" if postgres_present else
+            f"{AIRGAP_POSTGRES_IMAGE} is not loaded; pass --bundle-dir or load the bundle first",
+        ))
+
+    if plan.install_packages:
+        repo_check = run_command(
+            ["dnf", "-q", "repolist", "--enabled"], capture=True, check=False
+        ) if command_exists("dnf") else None
+        repos = [
+            line for line in (repo_check.stdout or "").splitlines()[1:]
+            if line.strip()
+        ] if repo_check is not None and repo_check.returncode == 0 else []
+        checks.append(Check(
+            "local package repository",
+            bool(repos),
+            f"{len(repos)} enabled repository/repositories; confirm they are local, "
+            "because air-gap mode does not add a remote Docker repository"
+            if repos else
+            "no enabled dnf repository can supply the container runtime",
+        ))
+    return checks
+
+
 def validate_no_proxy(value: str) -> Optional[str]:
     if not value:
         return None
@@ -434,6 +571,8 @@ class Config:
     create_admin: bool = True
     proxy_url: str = field(default="", repr=False)
     no_proxy: str = DEFAULT_NO_PROXY
+    airgap: bool = False
+    bundle_dir: Optional[Path] = None
     runtime: str = "auto"
     min_disk_gb: int = 20
     min_memory_gb: int = 4
@@ -816,6 +955,18 @@ def collect_preflight(cfg: Config, runtime: RuntimeInfo, plan: RuntimePlan) -> L
             "existing compose project", not present, detail,
         ))
 
+    if cfg.airgap:
+        checks.extend(bundle_preflight_checks(cfg, plan, ready))
+        if cfg.proxy_url:
+            checks.append(Check(
+                "proxy in air-gap mode",
+                True,
+                "configured, but no registry or package download is expected",
+                required=False,
+                warning=True,
+            ))
+        return checks
+
     if cfg.proxy_url:
         reachable, detail = proxy_reachable(cfg.proxy_url)
         checks.append(Check("HTTP proxy", reachable, f"{display_proxy(cfg.proxy_url)}: {detail}"))
@@ -1118,7 +1269,7 @@ class ContainerImage(RollbackAction):
     def __init__(self, runtime: str, image: str):
         self.runtime = runtime
         self.image = image
-        self.description = f"built container image: {image}"
+        self.description = f"container image: {image}"
 
     def rollback(self) -> None:
         if not image_exists(self.runtime, self.image):
@@ -1454,6 +1605,8 @@ class Installer:
         self.completed = False
         self.created_user = False
         self.created_group = False
+        self.prebuilt_image = False
+        self.image_loaded = False
         self._data_dir = Path("/var/lib/docker" if runtime.runtime == "docker" else "/var/lib/containers")
         self._data_existed = self._data_dir.exists()
 
@@ -1467,7 +1620,7 @@ class Installer:
             raise InstallerError("dnf is required to install the container runtime")
         if self.plan.runtime == "docker":
             repo = Path("/etc/yum.repos.d/docker-ce.repo")
-            if not repo.exists():
+            if not repo.exists() and not self.cfg.airgap:
                 repo_url = (
                     "https://download.docker.com/linux/rhel/docker-ce.repo"
                     if os_release().get("ID") == "rhel"
@@ -1483,6 +1636,11 @@ class Installer:
                 finally:
                     if repo.exists():
                         self.actions.append(CreatedRepoFile(repo))
+            elif not repo.exists():
+                info(
+                    "air-gap mode: using the host's configured dnf repositories; "
+                    "no remote Docker CE repository will be added"
+                )
             dnf_install(
                 self.cfg,
                 ["docker-ce", "docker-ce-cli", "containerd.io", "docker-compose-plugin"],
@@ -1640,6 +1798,8 @@ class Installer:
             "image": self.cfg.image,
             "compose_project": "patchtrack",
             "gateway_url": self.cfg.public_url,
+            "installation_mode": "airgap" if self.cfg.airgap else "online",
+            "airgap_bundle": str(self.cfg.bundle_dir) if self.cfg.airgap and self.cfg.bundle_dir else None,
             "admin_username": self.cfg.admin_username if self.cfg.create_admin else None,
             "verified": False,
         }
@@ -1669,15 +1829,112 @@ class Installer:
 
     # -- containers
 
+    def load_archive(self, archive: Path) -> None:
+        if not archive.is_file():
+            raise InstallerError(f"{archive} is missing from the air-gap bundle")
+        runtime = self.plan.runtime
+        run_command(
+            [runtime, "load", "-i", str(archive)],
+            env=command_environment(self.cfg),
+        )
+
+    def tag_loaded_application(self) -> None:
+        """Make the bundle's application image visible as patchtrack:<version>."""
+        runtime = self.plan.runtime
+        if image_exists(runtime, self.cfg.image):
+            return
+        version = self.cfg.version
+        candidates = (
+            f"docker.io/library/patchtrack:{version}",
+            f"localhost/patchtrack:{version}",
+            f"patchtrack:{version}",
+        )
+        for candidate in candidates:
+            if not image_exists(runtime, candidate):
+                continue
+            target = (
+                f"localhost/patchtrack:{version}"
+                if runtime == "podman" else self.cfg.image
+            )
+            run_command([runtime, "tag", candidate, target])
+            if image_exists(runtime, self.cfg.image):
+                if runtime == "podman" and candidate != target:
+                    # Keep only the tag the manifest and uninstaller use.
+                    run_command(
+                        ["podman", "image", "rm", candidate],
+                        check=False, capture=True,
+                    )
+                info(f"tagged {candidate} as {self.cfg.image}")
+                return
+        raise InstallerError(
+            f"the bundle did not provide {self.cfg.image}; expected one of "
+            + ", ".join(candidates)
+        )
+
+    def prepare_images(self) -> None:
+        if not self.cfg.airgap:
+            return
+        step("Preparing the air-gap images")
+        runtime = self.plan.runtime
+        archives = bundle_archives(self.cfg.version)
+
+        if image_exists(runtime, self.cfg.image):
+            info(f"{self.cfg.image} is already loaded")
+        else:
+            if not self.cfg.bundle_dir:
+                raise InstallerError(
+                    f"{self.cfg.image} is not loaded and no --bundle-dir was given"
+                )
+            archive = self.cfg.bundle_dir / archives["app"][0]
+            self.load_archive(archive)
+            self.image_loaded = True
+            self.actions.append(ContainerImage(runtime, self.cfg.image))
+            self.tag_loaded_application()
+
+        if not image_exists(runtime, AIRGAP_POSTGRES_IMAGE):
+            if not self.cfg.bundle_dir:
+                raise InstallerError(
+                    f"{AIRGAP_POSTGRES_IMAGE} is not loaded and no --bundle-dir was given"
+                )
+            self.load_archive(self.cfg.bundle_dir / archives["postgres"][0])
+            info(f"loaded {AIRGAP_POSTGRES_IMAGE} from the bundle")
+
+        if not image_exists(runtime, self.cfg.image):
+            # The application archive normally supplies the image. If it did
+            # not, the pinned build base is required for a local build.
+            if not self.cfg.bundle_dir:
+                raise InstallerError(f"{self.cfg.image} could not be prepared")
+            if not image_exists(runtime, AIRGAP_BASE_IMAGE):
+                self.load_archive(self.cfg.bundle_dir / archives["base"][0])
+            self.prebuilt_image = False
+        else:
+            self.prebuilt_image = True
+        if self.prebuilt_image:
+            origin = " loaded from the bundle" if self.image_loaded else " already present"
+            info(f"using {self.cfg.image}{origin}")
+        else:
+            info(f"{self.cfg.image} will be built locally")
+
+    def compose_up(self, *targets: str) -> subprocess.CompletedProcess:
+        args = ["up", "-d"]
+        if self.cfg.airgap and self.plan.runtime == "docker":
+            args += ["--pull", "never"]
+        args += list(targets)
+        return compose(self.cfg, self.plan.runtime, *args)
+
     def build_and_start(self) -> None:
-        step("Building the PatchTrack image")
         present, detail = compose_project_present(self.plan.runtime)
         if present:
             raise InstallerError(detail)
 
-        image_existed = image_exists(self.plan.runtime, self.cfg.image)
-        if not image_existed:
-            self.actions.append(ContainerImage(self.plan.runtime, self.cfg.image))
+        if self.prebuilt_image:
+            step("Using the preloaded PatchTrack image")
+            info(f"{self.cfg.image} will not be rebuilt")
+        else:
+            step("Building the PatchTrack image")
+            image_existed = image_exists(self.plan.runtime, self.cfg.image)
+            if not image_existed:
+                self.actions.append(ContainerImage(self.plan.runtime, self.cfg.image))
 
         if self.plan.runtime == "docker":
             config_check = compose(self.cfg, "docker", "config", "--quiet",
@@ -1687,19 +1944,27 @@ class Installer:
                     "compose configuration is invalid: "
                     + ((config_check.stderr or config_check.stdout or "").strip())
                 )
-            compose(self.cfg, "docker", "build")
-        else:
+            if not self.prebuilt_image:
+                compose(self.cfg, "docker", "build")
+        elif not self.prebuilt_image:
+            build = ["podman", "build"]
+            if self.cfg.airgap:
+                build.append("--pull=never")
+            build += ["--format", "docker", "-t", self.cfg.image,
+                      "-f", "deploy/container/Dockerfile", "."]
             run_command(
-                ["podman", "build", "--format", "docker", "-t", self.cfg.image,
-                 "-f", "deploy/container/Dockerfile", "."],
+                build,
                 cwd=self.cfg.install_dir,
                 env=command_environment(self.cfg),
             )
-        info(f"image {self.cfg.image} built")
+        if self.prebuilt_image:
+            info(f"image {self.cfg.image} is ready")
+        else:
+            info(f"image {self.cfg.image} built")
 
         step("Starting PostgreSQL and applying migrations")
         self.actions.append(ComposeProject(self.cfg, self.plan.runtime))
-        compose(self.cfg, self.plan.runtime, "up", "-d", "postgres")
+        self.compose_up("postgres")
         wait_for(
             lambda: compose(
                 self.cfg, self.plan.runtime, "exec", "-T", "postgres",
@@ -1712,7 +1977,7 @@ class Installer:
         info("migrations applied")
 
         step("Starting the PatchTrack services")
-        compose(self.cfg, self.plan.runtime, "up", "-d")
+        self.compose_up()
         info("containers started")
 
     # -- verification
@@ -1849,6 +2114,7 @@ class Installer:
         self.install_packages()
         self.start_runtime()
         self.create_account()
+        self.prepare_images()
         self.install_files()
         self.build_and_start()
         self.verify()
@@ -1896,6 +2162,11 @@ def config_from_env(args: argparse.Namespace) -> Config:
     cfg.tls_hostname = env("PATCHTRACK_INSTALL_TLS_HOSTNAME", cfg.tls_hostname)
     cfg.proxy_url = env("PATCHTRACK_INSTALL_PROXY", cfg.proxy_url)
     cfg.no_proxy = env("PATCHTRACK_INSTALL_NO_PROXY", cfg.no_proxy)
+    cfg.airgap = bool(args.airgap) or env_bool("PATCHTRACK_INSTALL_AIRGAP")
+    bundle = args.bundle_dir or os.environ.get("PATCHTRACK_INSTALL_BUNDLE_DIR", "")
+    if bundle:
+        cfg.bundle_dir = clean_path(bundle)
+        cfg.airgap = True
     cfg.admin_username = env("PATCHTRACK_INSTALL_ADMIN_USERNAME", cfg.admin_username)
     cfg.admin_display_name = env(
         "PATCHTRACK_INSTALL_ADMIN_DISPLAY_NAME", cfg.admin_display_name
@@ -1942,6 +2213,16 @@ def prompt_config(cfg: Config, runtime: RuntimeInfo) -> None:
         cfg.no_proxy = _ask(
             "Hosts that must bypass the proxy", cfg.no_proxy, validate_no_proxy
         )
+    cfg.airgap = _ask_yes_no(
+        "Is this host air-gapped (no internet access)?", cfg.airgap
+    )
+    if cfg.airgap:
+        bundle = _ask(
+            "Air-gap bundle directory (blank if the images are already loaded)",
+            str(cfg.bundle_dir) if cfg.bundle_dir else "",
+            validate_bundle_dir,
+        )
+        cfg.bundle_dir = clean_path(bundle) if bundle else None
     print("    The first administrator is created now so the installation can be verified.")
     cfg.create_admin = _ask_yes_no("Create the first administrator?", True)
     if cfg.create_admin:
@@ -2020,6 +2301,7 @@ def validate_config(cfg: Config) -> List[str]:
         ("TLS hostname", cfg.tls_hostname, validate_hostname),
         ("proxy URL", cfg.proxy_url, validate_proxy),
         ("proxy bypass list", cfg.no_proxy, validate_no_proxy),
+        ("air-gap bundle directory", str(cfg.bundle_dir or ""), validate_bundle_dir),
         ("administrator username", cfg.admin_username, validate_admin_username),
         ("administrator email", cfg.admin_email, validate_email),
     ):
@@ -2049,6 +2331,10 @@ def summary(cfg: Config, plan: RuntimePlan) -> None:
     print(f"    Internet proxy        : {display_proxy(cfg.proxy_url)}")
     if cfg.proxy_url:
         print(f"    Proxy bypass          : {cfg.no_proxy}")
+    if cfg.airgap:
+        print(f"    Air-gap bundle        : {cfg.bundle_dir or 'images already loaded'}")
+    else:
+        print("    Network access        : online")
     print(f"    Administrator         : "
           f"{cfg.admin_username if cfg.create_admin else 'not created (web form at first sign-in)'}")
     print(f"    Public URL            : {cfg.public_url}")
@@ -2074,6 +2360,17 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--runtime", choices=("auto", "docker", "podman"), default=None,
         help="container runtime to use (default: auto)",
+    )
+    parser.add_argument(
+        "--airgap", action="store_true",
+        help=(
+            "air-gapped installation: skip registry checks, load images from "
+            "--bundle-dir and do not add a remote Docker repository"
+        ),
+    )
+    parser.add_argument(
+        "--bundle-dir", default=None, metavar="PATH",
+        help="directory containing the verified air-gap bundle (implies --airgap)",
     )
     parser.add_argument(
         "--allow-permissive", action="store_true",
