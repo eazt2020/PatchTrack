@@ -155,8 +155,8 @@ described in [offline-deployment.md](offline-deployment.md); do not run the
 installer against an unverified bundle.
 
 ```bash
-sudo ./install.sh --airgap --bundle-dir /srv/bundles/patchtrack-3.0.0
-sudo ./install.sh --airgap --bundle-dir /srv/bundles/patchtrack-3.0.0 --check
+sudo ./install.sh --airgap --bundle-dir /srv/bundles/patchtrack-3.0.1
+sudo ./install.sh --airgap --bundle-dir /srv/bundles/patchtrack-3.0.1 --check
 ```
 
 `--bundle-dir` implies `--airgap`. In interactive mode the installer asks
@@ -234,7 +234,7 @@ check is silently dropped — and the gateway's `depends_on: service_healthy`
 conditions then never become satisfied. Either build explicitly:
 
 ```bash
-podman build --format docker -f deploy/container/Dockerfile -t patchtrack:3.0.0 .
+podman build --format docker -f deploy/container/Dockerfile -t patchtrack:3.0.1 .
 podman-compose up -d
 ```
 
@@ -263,7 +263,7 @@ them for container use. Do not relabel them yourself.
 ## 3. Install the application files
 
 ```bash
-sudo tar -xzf patchtrack-3.0.0.tar.gz -C /opt/patchtrack --strip-components=1
+sudo tar -xzf patchtrack-3.0.1.tar.gz -C /opt/patchtrack --strip-components=1
 sudo chown -R patchtrack:patchtrack /opt/patchtrack
 ```
 
