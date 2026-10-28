@@ -21,6 +21,13 @@
   reverses its recorded changes in reverse order, including the Compose
   project, image, files, account, service state and package transactions; it
   refuses to touch an existing deployment.
+- The installer supports hosts whose only outbound route is an HTTP(S) proxy.
+  It asks for the URL (or reads `PATCHTRACK_INSTALL_PROXY`), checks that the
+  proxy is reachable, runs `dnf` and the image build through it, configures a
+  Docker daemon systemd drop-in for image pulls, and adds `HTTP_PROXY`,
+  `HTTPS_PROXY` and `NO_PROXY` to the generated `.env` for the services. The
+  proxy URL's credentials are redacted from all output, and rollback removes
+  the drop-in and restarts Docker.
 - `install.sh --check` runs the same preflight without changing the host.
 
 ### Secret files for bootstrap credentials

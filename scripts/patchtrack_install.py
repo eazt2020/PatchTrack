@@ -41,6 +41,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from http.cookiejar import CookieJar
@@ -56,6 +57,13 @@ DEFAULT_BIND = "0.0.0.0"
 DEFAULT_PORT = 8005
 MIN_PASSWORD = 12
 MAX_PASSWORD = 512
+DEFAULT_NO_PROXY = (
+    "localhost,127.0.0.1,::1,postgres,identity,inventory,compliance,"
+    "reporting,gateway,migrate"
+)
+DOCKER_PROXY_DROPIN = Path(
+    "/etc/systemd/system/docker.service.d/10-patchtrack-proxy.conf"
+)
 
 # Directories the installer must never remove as a whole, even if a malformed
 # rollback record somehow names one of them.
@@ -265,6 +273,86 @@ def validate_email(value: str) -> Optional[str]:
     return None
 
 
+def validate_proxy(value: str) -> Optional[str]:
+    """Accept an empty value (direct access) or an http(s) proxy URL."""
+    if not value:
+        return None
+    if any(character.isspace() or ord(character) < 32 for character in value):
+        return "must not contain whitespace or control characters"
+    if any(character in value for character in "\"'`\\"):
+        return "must not contain quotes, backticks or backslashes"
+    try:
+        parts = urllib.parse.urlsplit(value)
+    except ValueError:
+        return "is not a valid proxy URL"
+    if parts.scheme not in ("http", "https"):
+        return "must start with http:// or https://"
+    if not parts.hostname:
+        return "must include a proxy host name or address"
+    try:
+        port = parts.port
+    except ValueError:
+        return "has an invalid port"
+    if port is not None and not 1 <= port <= 65535:
+        return "has an invalid port"
+    if parts.path not in ("", "/") or parts.query or parts.fragment:
+        return "must be only scheme, credentials, host and optional port"
+    return None
+
+
+def validate_no_proxy(value: str) -> Optional[str]:
+    if not value:
+        return None
+    for token in value.split(","):
+        token = token.strip()
+        if not token:
+            return "must not contain empty entries"
+        if not re.fullmatch(r"[A-Za-z0-9.*_:\[\]/-]+", token):
+            return f"contains an invalid host or domain: {token}"
+    return None
+
+
+def display_proxy(value: str) -> str:
+    """Render a proxy URL without exposing credentials."""
+    if not value:
+        return "direct access"
+    try:
+        parts = urllib.parse.urlsplit(value)
+    except ValueError:
+        return "(invalid proxy URL)"
+    if parts.username is None and parts.password is None:
+        return value
+    host = parts.hostname or "proxy"
+    port = f":{parts.port}" if parts.port else ""
+    return f"{parts.scheme}://***@{host}{port}"
+
+
+def proxy_environment(cfg: "Config") -> dict:
+    if not cfg.proxy_url:
+        return {}
+    value = cfg.proxy_url
+    return {
+        "HTTP_PROXY": value,
+        "HTTPS_PROXY": value,
+        "http_proxy": value,
+        "https_proxy": value,
+        "NO_PROXY": cfg.no_proxy,
+        "no_proxy": cfg.no_proxy,
+    }
+
+
+def command_environment(cfg: "Config") -> Optional[dict]:
+    """The installer's environment, with the proxy applied when configured."""
+    if not cfg.proxy_url:
+        return None
+    environment = os.environ.copy()
+    environment.update(proxy_environment(cfg))
+    # BuildKit forwards the proxy variables into RUN steps without placing the
+    # URL (which may contain credentials) on a command line.
+    environment.setdefault("DOCKER_BUILDKIT", "1")
+    return environment
+
+
 def _ask(label: str, default: str, validator: Callable[[str], Optional[str]]) -> str:
     while True:
         suffix = f" [{default}]" if default else ""
@@ -344,6 +432,8 @@ class Config:
     admin_email: str = ""
     admin_password: str = field(default="", repr=False)
     create_admin: bool = True
+    proxy_url: str = field(default="", repr=False)
+    no_proxy: str = DEFAULT_NO_PROXY
     runtime: str = "auto"
     min_disk_gb: int = 20
     min_memory_gb: int = 4
@@ -578,10 +668,14 @@ def compose_project_present(runtime: str) -> Tuple[bool, str]:
     return False, "no existing PatchTrack compose project"
 
 
-def network_reachable(url: str) -> bool:
+def network_reachable(url: str, proxy_url: str = "") -> bool:
     request = urllib.request.Request(url, method="GET", headers={"User-Agent": "PatchTrack-installer"})
+    handlers = []
+    if proxy_url:
+        handlers.append(urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}))
+    opener = urllib.request.build_opener(*handlers)
     try:
-        with urllib.request.urlopen(request, timeout=8) as response:
+        with opener.open(request, timeout=8) as response:
             response.read(1)
             return True
     except urllib.error.HTTPError as exc:
@@ -590,6 +684,23 @@ def network_reachable(url: str) -> bool:
         return exc.code in (401, 403)
     except (urllib.error.URLError, TimeoutError, OSError):
         return False
+
+
+def proxy_reachable(proxy_url: str) -> Tuple[bool, str]:
+    """Check that the proxy accepts a TCP connection."""
+    try:
+        parts = urllib.parse.urlsplit(proxy_url)
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+    except ValueError:
+        return False, "the proxy URL is invalid"
+    host = parts.hostname
+    if not host:
+        return False, "the proxy URL has no host"
+    try:
+        with socket.create_connection((host, port), timeout=5):
+            return True, f"{host}:{port} accepts connections"
+    except OSError as exc:
+        return False, f"cannot connect to {host}:{port}: {exc}"
 
 
 def collect_preflight(cfg: Config, runtime: RuntimeInfo, plan: RuntimePlan) -> List[Check]:
@@ -705,6 +816,16 @@ def collect_preflight(cfg: Config, runtime: RuntimeInfo, plan: RuntimePlan) -> L
             "existing compose project", not present, detail,
         ))
 
+    if cfg.proxy_url:
+        reachable, detail = proxy_reachable(cfg.proxy_url)
+        checks.append(Check("HTTP proxy", reachable, f"{display_proxy(cfg.proxy_url)}: {detail}"))
+        checks.append(Check(
+            "proxy bypass list",
+            validate_no_proxy(cfg.no_proxy) is None,
+            cfg.no_proxy or "empty (all destinations use the proxy)",
+            required=False,
+        ))
+
     network_checks = [
         ("container image registry", "https://registry-1.docker.io/v2/"),
         ("base image registry", "https://registry.access.redhat.com/v2/"),
@@ -712,13 +833,15 @@ def collect_preflight(cfg: Config, runtime: RuntimeInfo, plan: RuntimePlan) -> L
     ]
     if plan.install_packages:
         network_checks.append(("Docker package repository", "https://download.docker.com/linux/"))
+    route = " through the proxy" if cfg.proxy_url else ""
     for label, url in network_checks:
-        reachable = network_reachable(url)
+        reachable = network_reachable(url, cfg.proxy_url)
         checks.append(Check(
             label,
             True,
-            "reachable" if reachable else
-            "not reachable right now; the build may fail unless images and packages are mirrored or cached",
+            f"reachable{route}" if reachable else
+            f"not reachable{route} right now; the build may fail unless images and "
+            "packages are mirrored or cached",
             required=False,
             warning=not reachable,
         ))
@@ -870,6 +993,48 @@ class DockerServiceState(RollbackAction):
             if result.returncode != 0:
                 raise InstallerError(
                     "could not disable Docker: " + (result.stderr or "").strip()
+                )
+
+
+def docker_proxy_unit(cfg: Config) -> str:
+    """The systemd drop-in that lets the Docker daemon pull through the proxy."""
+    environment = proxy_environment(cfg)
+    definitions = []
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"):
+        # '%' starts a systemd specifier even inside a quoted Environment value.
+        value = environment[name].replace("%", "%%")
+        definitions.append(f'"{name}={value}"')
+    return "[Service]\nEnvironment=" + " ".join(definitions) + "\n"
+
+
+class DockerProxyConfig(RollbackAction):
+    """Remove the proxy drop-in and restart Docker when rolling back."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.description = f"Docker proxy configuration: {path}"
+
+    def rollback(self) -> None:
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
+        if not command_exists("systemctl"):
+            raise InstallerError(
+                "systemctl is unavailable; remove the Docker proxy drop-in and restart Docker manually"
+            )
+        reload_result = run_command(["systemctl", "daemon-reload"], check=False, capture=True)
+        if reload_result.returncode != 0:
+            raise InstallerError(
+                "could not reload systemd: " + (reload_result.stderr or "").strip()
+            )
+        active = run_command(["systemctl", "is-active", "docker"], capture=True, check=False)
+        if active.returncode == 0 and active.stdout.strip() == "active":
+            restart = run_command(["systemctl", "restart", "docker"], check=False, capture=True)
+            if restart.returncode != 0:
+                raise InstallerError(
+                    "could not restart Docker after removing its proxy configuration: "
+                    + (restart.stderr or "").strip()
                 )
 
 
@@ -1099,11 +1264,16 @@ def rpm_packages() -> set:
     return {line.strip() for line in result.stdout.splitlines() if line.strip()}
 
 
-def dnf_install(packages: Sequence[str], actions: List[RollbackAction]) -> None:
+def dnf_install(
+    cfg: Config, packages: Sequence[str], actions: List[RollbackAction]
+) -> None:
     before_txn = latest_dnf_transaction()
     before_packages = rpm_packages()
     try:
-        run_command(["dnf", "-y", "install"] + list(packages))
+        run_command(
+            ["dnf", "-y", "install"] + list(packages),
+            env=command_environment(cfg),
+        )
     finally:
         after_txn = latest_dnf_transaction()
         added = rpm_packages() - before_packages
@@ -1126,7 +1296,10 @@ def compose(
         "-f", "docker-compose.yml",
         "-f", "docker-compose.secrets.yml",
     ] + list(args)
-    return run_command(command, cwd=cfg.install_dir, check=check, capture=capture)
+    return run_command(
+        command, cwd=cfg.install_dir, check=check, capture=capture,
+        env=command_environment(cfg),
+    )
 
 
 def image_exists(runtime: str, image: str) -> bool:
@@ -1171,7 +1344,7 @@ PATCHTRACK_SOLARIS_INBOX=/var/lib/patchtrack/solaris-inbox
 
 PATCHTRACK_FORWARDED_IPS=127.0.0.1
 PATCHTRACK_INTERNAL_FORWARDED_IPS=172.16.0.0/12
-
+{proxy_block}
 # Grafana is optional and is not started by the installer. Set these and create
 # the read-only role before enabling the dashboards profile.
 PATCHTRACK_GF_DB_HOST=postgres
@@ -1185,6 +1358,26 @@ GF_SERVER_ROOT_URL=http://127.0.0.1:3000
 """
 
 
+def env_proxy_block(cfg: Config) -> str:
+    if not cfg.proxy_url:
+        return ""
+    # Single quotes stop Compose from interpolating '$' characters in a
+    # password. The services and the compose network bypass the proxy.
+    value = cfg.proxy_url
+    no_proxy = cfg.no_proxy
+    return (
+        "# Outbound proxy for integrations and SMTP. Internal compose services and\n"
+        "# loopback bypass it through NO_PROXY. This file is mode 0640 root:<group>;\n"
+        "# use a proxy without credentials, or a credential the host may store here.\n"
+        f"HTTP_PROXY='{value}'\n"
+        f"HTTPS_PROXY='{value}'\n"
+        f"NO_PROXY='{no_proxy}'\n"
+        f"http_proxy='{value}'\n"
+        f"https_proxy='{value}'\n"
+        f"no_proxy='{no_proxy}'\n"
+    )
+
+
 def build_env(cfg: Config, group: str) -> str:
     return ENV_TEMPLATE.format(
         date=_dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1194,6 +1387,7 @@ def build_env(cfg: Config, group: str) -> str:
         bind=cfg.bind_address,
         port=cfg.gateway_port,
         hostname=cfg.tls_hostname,
+        proxy_block=env_proxy_block(cfg),
     )
 
 
@@ -1274,18 +1468,22 @@ class Installer:
                     else "https://download.docker.com/linux/centos/docker-ce.repo"
                 )
                 info("Adding the Docker CE package repository")
-                dnf_install(["dnf-plugins-core"], self.actions)
+                dnf_install(self.cfg, ["dnf-plugins-core"], self.actions)
                 try:
-                    run_command(["dnf", "config-manager", "--add-repo", repo_url])
+                    run_command(
+                        ["dnf", "config-manager", "--add-repo", repo_url],
+                        env=command_environment(self.cfg),
+                    )
                 finally:
                     if repo.exists():
                         self.actions.append(CreatedRepoFile(repo))
             dnf_install(
+                self.cfg,
                 ["docker-ce", "docker-ce-cli", "containerd.io", "docker-compose-plugin"],
                 self.actions,
             )
         else:
-            dnf_install(["podman", "podman-compose"], self.actions)
+            dnf_install(self.cfg, ["podman", "podman-compose"], self.actions)
         info(f"{self.plan.label} installed")
 
     def start_runtime(self) -> None:
@@ -1317,7 +1515,46 @@ class Installer:
             lambda: run_command(["docker", "info"], capture=True, check=False).returncode == 0,
             timeout=60, interval=2, label="the Docker daemon",
         )
+        self.configure_docker_proxy()
         info("Docker is ready")
+
+    def configure_docker_proxy(self) -> None:
+        """Let the daemon pull base images when the host uses a proxy."""
+        if self.plan.runtime != "docker" or not self.cfg.proxy_url:
+            return
+        current = run_command(
+            ["systemctl", "show", "docker", "--property=Environment"],
+            capture=True, check=False,
+        )
+        if current.returncode == 0 and re.search(
+            r"(?i)\bhttps?_proxy=", current.stdout
+        ):
+            info("Docker daemon already has a proxy configured; leaving it unchanged")
+            return
+        path = DOCKER_PROXY_DROPIN
+        if path.exists() or path.is_symlink():
+            warn(
+                f"{path} already exists; leaving it unchanged. Verify that it points "
+                f"at {display_proxy(self.cfg.proxy_url)} before the image build."
+            )
+            return
+        info("Configuring the Docker daemon to use " + display_proxy(self.cfg.proxy_url))
+        prepare_directory(
+            path.parent, self.actions, mode=0o755, gid=0,
+            label="Docker service configuration directory",
+        )
+        write_file(
+            path, docker_proxy_unit(self.cfg), self.actions, mode=0o644,
+            description="created Docker proxy configuration",
+        )
+        self.actions.append(DockerProxyConfig(path))
+        run_command(["systemctl", "daemon-reload"])
+        info("restarting Docker to apply the proxy configuration")
+        run_command(["systemctl", "restart", "docker"])
+        wait_for(
+            lambda: run_command(["docker", "info"], capture=True, check=False).returncode == 0,
+            timeout=60, interval=2, label="the Docker daemon with the proxy configuration",
+        )
 
     # -- account and files
 
@@ -1435,6 +1672,7 @@ class Installer:
                 ["podman", "build", "--format", "docker", "-t", self.cfg.image,
                  "-f", "deploy/container/Dockerfile", "."],
                 cwd=self.cfg.install_dir,
+                env=command_environment(self.cfg),
             )
         info(f"image {self.cfg.image} built")
 
@@ -1635,6 +1873,8 @@ def config_from_env(args: argparse.Namespace) -> Config:
     except ValueError:
         cfg.gateway_port = -1
     cfg.tls_hostname = env("PATCHTRACK_INSTALL_TLS_HOSTNAME", cfg.tls_hostname)
+    cfg.proxy_url = env("PATCHTRACK_INSTALL_PROXY", cfg.proxy_url)
+    cfg.no_proxy = env("PATCHTRACK_INSTALL_NO_PROXY", cfg.no_proxy)
     cfg.admin_username = env("PATCHTRACK_INSTALL_ADMIN_USERNAME", cfg.admin_username)
     cfg.admin_display_name = env(
         "PATCHTRACK_INSTALL_ADMIN_DISPLAY_NAME", cfg.admin_display_name
@@ -1673,6 +1913,14 @@ def prompt_config(cfg: Config, runtime: RuntimeInfo) -> None:
     cfg.tls_hostname = _ask(
         "Hostname or IP for the generated certificate", cfg.tls_hostname, validate_hostname
     )
+    cfg.proxy_url = _ask(
+        "HTTP(S) proxy for package and image downloads (optional, blank for direct access)",
+        cfg.proxy_url, validate_proxy,
+    )
+    if cfg.proxy_url:
+        cfg.no_proxy = _ask(
+            "Hosts that must bypass the proxy", cfg.no_proxy, validate_no_proxy
+        )
     print("    The first administrator is created now so the installation can be verified.")
     cfg.create_admin = _ask_yes_no("Create the first administrator?", True)
     if cfg.create_admin:
@@ -1749,6 +1997,8 @@ def validate_config(cfg: Config) -> List[str]:
         ("bind address", cfg.bind_address, validate_bind),
         ("gateway port", str(cfg.gateway_port), validate_port),
         ("TLS hostname", cfg.tls_hostname, validate_hostname),
+        ("proxy URL", cfg.proxy_url, validate_proxy),
+        ("proxy bypass list", cfg.no_proxy, validate_no_proxy),
         ("administrator username", cfg.admin_username, validate_admin_username),
         ("administrator email", cfg.admin_email, validate_email),
     ):
@@ -1775,6 +2025,9 @@ def summary(cfg: Config, plan: RuntimePlan) -> None:
     print(f"    Runtime               : {plan.label}")
     print(f"    Gateway               : {cfg.bind_address}:{cfg.gateway_port} (HTTPS)")
     print(f"    Certificate for       : {cfg.tls_hostname}")
+    print(f"    Internet proxy        : {display_proxy(cfg.proxy_url)}")
+    if cfg.proxy_url:
+        print(f"    Proxy bypass          : {cfg.no_proxy}")
     print(f"    Administrator         : "
           f"{cfg.admin_username if cfg.create_admin else 'not created (web form at first sign-in)'}")
     print(f"    Public URL            : {cfg.public_url}")

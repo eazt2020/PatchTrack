@@ -40,7 +40,8 @@ reported and without the next sync undoing it.
 - **Installation** — `install.sh` guides a fresh deployment through its
   parameters, checks every dependency first, verifies HTTPS, migrations, all
   services and the first administrator afterwards, and automatically reverses
-  its own changes if any step fails.
+  its own changes if any step fails. It can route packages, images and service
+  traffic through an HTTP(S) proxy when the host has no direct internet access.
 - **Transport and secrets** — HTTPS from first start with a generated
   certificate, replacement with the organisation's own certificate in
   Settings, and optional file-backed bootstrap secrets for Docker, Podman or
@@ -196,7 +197,7 @@ PATCHTRACK_TEST_DATABASE_URL=postgresql+psycopg://patchtrack@/patchtrack_test?ho
   /opt/patchtrack-venv/bin/python -m pytest tests/integration
 ```
 
-The suite currently contains 545 tests: 409 unit tests and 136 database
+The suite currently contains 550 tests: 414 unit tests and 136 database
 integration tests. Integration tests create and drop their own scratch
 database; never point them at a database holding real data.
 

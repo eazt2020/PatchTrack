@@ -85,6 +85,71 @@ def test_generated_environment_contains_no_bootstrap_secret():
     assert "PATCHTRACK_TLS_ENABLED=true" in text
 
 
+def test_installer_validates_the_proxy_and_bypass_list():
+    assert installer.validate_proxy("") is None
+    assert installer.validate_proxy("http://proxy.example.com:3128") is None
+    assert installer.validate_proxy("https://user:pass@proxy.example.com") is None
+    assert installer.validate_proxy("socks5://proxy.example.com:1080") is not None
+    assert installer.validate_proxy("http://") is not None
+    assert installer.validate_proxy("http://proxy.example.com/path") is not None
+    assert installer.validate_proxy("http://proxy.example.com:0") is not None
+    assert installer.validate_proxy("http://proxy example.com") is not None
+    assert installer.validate_proxy('http://proxy/"quoted"') is not None
+
+    assert installer.validate_no_proxy("") is None
+    assert installer.validate_no_proxy("localhost,127.0.0.1,*.example.com") is None
+    assert installer.validate_no_proxy("localhost,,postgres") is not None
+    assert installer.validate_no_proxy("local host") is not None
+
+
+def test_proxy_display_never_shows_credentials():
+    assert installer.display_proxy("") == "direct access"
+    assert installer.display_proxy("http://proxy.example.com:3128") == (
+        "http://proxy.example.com:3128"
+    )
+    hidden = installer.display_proxy("http://user:secret@proxy.example.com:8080")
+    assert hidden == "http://***@proxy.example.com:8080"
+    assert "secret" not in hidden
+
+
+def test_generated_environment_applies_the_proxy_to_the_services():
+    cfg = installer.Config(
+        proxy_url="http://user:secret@proxy.example.com:3128",
+        no_proxy="localhost,127.0.0.1,postgres",
+    )
+    text = installer.build_env(cfg, "patchtrack")
+
+    assert "HTTP_PROXY='http://user:secret@proxy.example.com:3128'" in text
+    assert "HTTPS_PROXY='http://user:secret@proxy.example.com:3128'" in text
+    assert "NO_PROXY='localhost,127.0.0.1,postgres'" in text
+    # Bootstrap secrets remain file-backed.
+    assert "PATCHTRACK_JWT_SECRET=\n" in text
+    assert "PATCHTRACK_DATABASE_URL=\n" in text
+
+    assert "HTTP_PROXY" not in installer.build_env(installer.Config(), "patchtrack")
+
+
+def test_docker_proxy_unit_escapes_systemd_expansion():
+    cfg = installer.Config(proxy_url="http://user:p%41ss@proxy.example.com:3128")
+    unit = installer.docker_proxy_unit(cfg)
+
+    assert unit.startswith("[Service]\nEnvironment=")
+    assert "HTTP_PROXY=http://user:p%%41ss@proxy.example.com:3128" in unit
+    assert '"NO_PROXY=' in unit
+
+
+def test_command_environment_is_unchanged_without_a_proxy(monkeypatch):
+    monkeypatch.setenv("PATCHTRACK_INSTALL_TEST", "kept")
+    assert installer.command_environment(installer.Config()) is None
+
+    cfg = installer.Config(proxy_url="http://proxy.example.com:3128")
+    environment = installer.command_environment(cfg)
+    assert environment["PATCHTRACK_INSTALL_TEST"] == "kept"
+    assert environment["HTTPS_PROXY"] == "http://proxy.example.com:3128"
+    assert environment["http_proxy"] == "http://proxy.example.com:3128"
+    assert environment["DOCKER_BUILDKIT"] == "1"
+
+
 def test_probe_uses_loopback_when_the_gateway_is_published_on_all_interfaces():
     cfg = installer.Config(bind_address="0.0.0.0", gateway_port=8443)
     assert cfg.probe_host == "127.0.0.1"

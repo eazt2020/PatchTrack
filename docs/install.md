@@ -30,6 +30,8 @@ It asks for:
 | Gateway bind address | `0.0.0.0` | Use `127.0.0.1` when a reverse proxy is in front |
 | HTTPS port | `8005` | Published on the bind address; 8001–8004 stay internal |
 | Certificate name | Host FQDN or IP | Used in the generated self-signed certificate |
+| HTTP(S) proxy | Blank (direct) | For hosts whose outbound access is through a proxy; see [Hosts behind an HTTP proxy](#hosts-behind-an-http-proxy) |
+| Proxy bypass list | Loopback and compose service names | Shown only when a proxy is set |
 | First administrator | Create | Username, display name, optional email and password; the password is read without echo |
 
 Before changing anything it checks root access, RHEL/Rocky 9 and architecture,
@@ -81,8 +83,9 @@ web form for the operator. Useful variables are
 `PATCHTRACK_INSTALL_SERVICE_USER`, `PATCHTRACK_INSTALL_BIND_ADDRESS`,
 `PATCHTRACK_INSTALL_GATEWAY_PORT`, `PATCHTRACK_INSTALL_TLS_HOSTNAME`,
 `PATCHTRACK_INSTALL_ADMIN_USERNAME`, `PATCHTRACK_INSTALL_ADMIN_DISPLAY_NAME`,
-`PATCHTRACK_INSTALL_ADMIN_EMAIL`, `PATCHTRACK_INSTALL_RUNTIME` and the
-preflight minimums `PATCHTRACK_INSTALL_MIN_DISK_GB` and
+`PATCHTRACK_INSTALL_ADMIN_EMAIL`, `PATCHTRACK_INSTALL_RUNTIME`,
+`PATCHTRACK_INSTALL_PROXY`, `PATCHTRACK_INSTALL_NO_PROXY` and the preflight
+minimums `PATCHTRACK_INSTALL_MIN_DISK_GB` and
 `PATCHTRACK_INSTALL_MIN_MEMORY_GB`.
 
 ```bash
@@ -94,6 +97,48 @@ sudo PATCHTRACK_INSTALL_BIND_ADDRESS=0.0.0.0 \
 `--runtime docker|podman` selects a runtime explicitly. `--allow-permissive`
 and `--allow-unsupported-os` exist only for documented exceptions and are not
 part of a supported production installation.
+
+### Hosts behind an HTTP proxy
+
+If the host can reach package mirrors and image registries only through an
+HTTP(S) proxy, enter it when prompted (interactive) or set
+`PATCHTRACK_INSTALL_PROXY` (non-interactive). Leave it blank for direct access.
+
+```bash
+sudo PATCHTRACK_INSTALL_PROXY=http://proxy.example.com:3128 \
+  ./install.sh --yes
+```
+
+The installer then:
+
+- runs `dnf` with `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` in its
+  environment, so repository metadata and packages are fetched through the
+  proxy;
+- writes `/etc/systemd/system/docker.service.d/10-patchtrack-proxy.conf` and
+  restarts the Docker daemon, because the daemon (not the CLI) pulls the base
+  and service images. An existing daemon proxy or drop-in is left unchanged
+  with a warning. Podman needs no daemon file: the variables are passed to
+  `podman build` and `podman-compose`;
+- passes the proxy to BuildKit for `RUN` steps, without putting the URL on a
+  command line;
+- writes `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` (and the lowercase
+  spellings) into `/etc/patchtrack/.env`, so the services can reach external
+  systems such as an internet-facing SMTP relay. The default bypass list is
+  `localhost,127.0.0.1,::1` plus the compose service names, so database and
+  gateway fan-out traffic never goes to the proxy.
+
+Preflight connects to the proxy's TCP port and repeats the registry and
+package-index probes through it. A proxy URL may contain credentials; the
+summary and all installer output redact them, but the full URL is stored in
+`.env` (mode 0640, owned by `root:patchtrack`). Prefer a proxy that
+authenticates by network or host, or accept that the credential is readable by
+the PatchTrack group.
+
+If integrations or the relay are themselves reached through the proxy, adjust
+the bypass list with `PATCHTRACK_INSTALL_NO_PROXY` (interactive: the "Hosts that
+must bypass the proxy" prompt). When rolling back, the installer removes the
+drop-in, reloads systemd and restarts Docker, restoring the previous daemon
+configuration.
 
 ## Manual installation
 
@@ -202,6 +247,35 @@ of `.env` by using file-backed secrets. `docker-compose.secrets.yml` mounts
 [security.md](security.md#secret-files) for the file layout and the systemd
 equivalent. Use it from the start, or migrate to it after the stack is
 verified and then remove the plain values from `.env`.
+
+If this host reaches the internet through a proxy, add the proxy to the same
+file so the services inherit it. Keep loopback and the compose service names
+in the bypass list:
+
+```bash
+HTTP_PROXY=http://proxy.example.com:3128
+HTTPS_PROXY=http://proxy.example.com:3128
+NO_PROXY=localhost,127.0.0.1,::1,postgres,identity,inventory,compliance,reporting,gateway,migrate
+```
+
+Configure `dnf` and the Docker daemon as well, because neither reads `.env`:
+
+```bash
+# Package manager (or set proxy= in /etc/dnf/dnf.conf)
+sudo dnf --setopt=proxy=http://proxy.example.com:3128 install -y dnf-plugins-core
+
+# Docker daemon: needed for image pulls during build and compose up
+sudo install -d -m 0755 /etc/systemd/system/docker.service.d
+sudo tee /etc/systemd/system/docker.service.d/10-patchtrack-proxy.conf >/dev/null <<'EOF'
+[Service]
+Environment="HTTP_PROXY=http://proxy.example.com:3128" "HTTPS_PROXY=http://proxy.example.com:3128" "NO_PROXY=localhost,127.0.0.1,::1"
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart docker
+```
+
+With Podman, export `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` in the shell
+that runs `podman build` and `podman-compose`; no daemon file is required.
 
 ## 5. Start the database and apply migrations
 
