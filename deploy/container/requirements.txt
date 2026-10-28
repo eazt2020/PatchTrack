@@ -1,0 +1,28 @@
+# Runtime dependencies for every PatchTrack service.
+#
+# Pinned exactly: an offline install must be reproducible, and an upgrade is a
+# deliberate change. Development-only packages (pytest, playwright, linters) are
+# in requirements-dev.txt and are NOT installed in the image.
+
+argon2-cffi==23.1.0
+# Encrypts the SMTP password saved from the Settings screen. The key is derived
+# from PATCHTRACK_SECRETS_KEY (or the JWT secret when that is unset).
+cryptography==43.0.3
+# Required by pydantic's EmailStr, which the identity service uses for the
+# email fields on user create/update.
+email-validator==2.2.0
+fastapi==0.115.6
+httpx==0.28.1
+Jinja2==3.1.5
+psycopg[binary,pool]==3.2.3
+PyJWT==2.10.1
+pydantic==2.10.4
+pydantic-settings==2.7.0
+python-dotenv==1.2.4
+PyYAML==6.0.2
+reportlab==4.2.5
+SQLAlchemy==2.0.36
+# Imported directly by the gateway (run_in_threadpool and Request); fastapi
+# depends on it, but the image scan requires every direct import to be listed.
+starlette==0.41.3
+uvicorn[standard]==0.34.0

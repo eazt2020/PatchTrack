@@ -1,0 +1,238 @@
+# PatchTrack — Docker Compose deployment (RHEL 9 / Rocky 9, SELinux enforcing).
+#
+#   cp .env.example .env    # then edit; chmod 600 .env
+#   docker compose up -d --build
+#
+# Everything stateful is on a named volume, so a container can be replaced
+# without losing data. Grafana is optional: the application and its API work
+# when the grafana service is stopped or fails to start.
+#
+# SELinux: the :Z suffix on the report and inbox bind mounts relabels them for
+# the container. Do not disable SELinux. On hosts where the docker daemon is
+# not permitted to manage labels (podman instead), those mounts already work
+# because podman applies :Z semantics by default.
+
+name: patchtrack
+
+x-service-defaults: &service-defaults
+  image: patchtrack:${PATCHTRACK_VERSION:-3.0.0}
+  build:
+    context: .
+    dockerfile: deploy/container/Dockerfile
+  restart: unless-stopped
+  env_file: .env
+  depends_on:
+    postgres:
+      condition: service_healthy
+  read_only: true
+  tmpfs:
+    - /tmp:mode=1777,size=64m
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "5"
+
+services:
+  postgres:
+    # The default pulls anonymously. Red Hat's own image is
+    # registry.redhat.io/rhel9/postgresql-17, which requires a subscription and
+    # a terms acceptance; to use it set POSTGRES_IMAGE and POSTGRES_DATA_DIR
+    # (see docs/configuration.md).
+    image: ${POSTGRES_IMAGE:-docker.io/library/postgres:17}
+    restart: unless-stopped
+    environment:
+      # Both spellings are set so either image works: the official image reads
+      # POSTGRES_*, Red Hat's reads POSTGRESQL_*. Each ignores the other's.
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRESQL_USER: ${POSTGRES_USER}
+      POSTGRESQL_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRESQL_DATABASE: ${POSTGRES_DB}
+    volumes:
+      # The data directory differs between the two images (official
+      # /var/lib/postgresql/data, Red Hat /var/lib/pgsql/data).
+      - pgdata:${POSTGRES_DATA_DIR:-/var/lib/postgresql/data}:Z
+    healthcheck:
+      # -h 127.0.0.1 forces TCP so the check exercises the same path the
+      # services use, not a socket-only shortcut.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  # One-shot: applies migrations, then exits. Every other service waits for it
+  # to complete successfully, so no two services race on the same DDL.
+  migrate:
+    <<: *service-defaults
+    restart: "no"
+    command: ["python", "-m", "patchtrack_common.migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # The four backend services are reached only by the gateway over the compose
+  # network and publish no ports. They must therefore trust that network's
+  # addresses in X-Forwarded-For, or every audit record would carry the
+  # gateway's container address instead of the operator's.
+  identity:
+    <<: *service-defaults
+    environment:
+      PATCHTRACK_SERVICE: identity
+      PORT: "8000"
+      PATCHTRACK_FORWARDED_IPS: ${PATCHTRACK_INTERNAL_FORWARDED_IPS:-172.16.0.0/12}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  inventory:
+    <<: *service-defaults
+    environment:
+      PATCHTRACK_SERVICE: inventory
+      PORT: "8000"
+      PATCHTRACK_FORWARDED_IPS: ${PATCHTRACK_INTERNAL_FORWARDED_IPS:-172.16.0.0/12}
+    volumes:
+      - solaris-inbox:/var/lib/patchtrack/solaris-inbox:Z
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  compliance:
+    <<: *service-defaults
+    environment:
+      PATCHTRACK_SERVICE: compliance
+      PORT: "8000"
+      PATCHTRACK_FORWARDED_IPS: ${PATCHTRACK_INTERNAL_FORWARDED_IPS:-172.16.0.0/12}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  reporting:
+    <<: *service-defaults
+    environment:
+      PATCHTRACK_SERVICE: reporting
+      PORT: "8000"
+      PATCHTRACK_FORWARDED_IPS: ${PATCHTRACK_INTERNAL_FORWARDED_IPS:-172.16.0.0/12}
+    volumes:
+      # Reports outlive every container. A dedicated volume (not a bind mount)
+      # keeps them safe from host path changes and backup/restore is a single
+      # volume archive.
+      - reports:/var/lib/patchtrack/reports:Z
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  gateway:
+    <<: *service-defaults
+    environment:
+      PATCHTRACK_SERVICE: gateway
+      PORT: "8000"
+      # The only service that calls another. Without these the defaults
+      # (http://127.0.0.1:800x) point at the gateway's own loopback and every
+      # proxied request fails with a connection error. The hostnames are the
+      # compose service names, which the project network resolves.
+      PATCHTRACK_IDENTITY_URL: http://identity:8000
+      PATCHTRACK_INVENTORY_URL: http://inventory:8000
+      PATCHTRACK_COMPLIANCE_URL: http://compliance:8000
+      PATCHTRACK_REPORTING_URL: http://reporting:8000
+    ports:
+      - "${PATCHTRACK_BIND_ADDRESS:-127.0.0.1}:${PATCHTRACK_GATEWAY_PORT:-8005}:8000"
+    volumes:
+      # The self-signed certificate generated on first start, and any
+      # certificate an administrator uploads in Settings, must outlive the
+      # container. The key is written 0600 on the volume.
+      - tls:/var/lib/patchtrack/tls:Z
+    depends_on:
+      identity:
+        condition: service_healthy
+      inventory:
+        condition: service_healthy
+      compliance:
+        condition: service_healthy
+      reporting:
+        condition: service_healthy
+
+  prometheus:
+    # Optional metrics scraper. Start with: docker compose --profile monitoring up -d
+    image: ${PROMETHEUS_IMAGE:-docker.io/prom/prometheus:v3.15.1}
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --web.enable-lifecycle=false
+    volumes:
+      - ./deploy/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro,Z
+      - ./deploy/monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro,Z
+      - prometheus-data:/prometheus:Z
+    ports:
+      - "${PATCHTRACK_BIND_ADDRESS:-127.0.0.1}:${PATCHTRACK_PROMETHEUS_PORT:-9090}:9090"
+    depends_on:
+      identity:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  grafana:
+    # Grafana 13 is the current supported line; 10.2 is end-of-life.
+    image: ${GRAFANA_IMAGE:-docker.io/grafana/grafana-oss:13.0.2}
+    restart: unless-stopped
+    profiles: ["dashboards"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_ADMIN_PASSWORD}
+      GF_SERVER_ROOT_URL: ${GF_SERVER_ROOT_URL:-http://127.0.0.1:3000}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_INSTALL_PLUGINS: ""
+      PATCHTRACK_GF_DB_HOST: ${PATCHTRACK_GF_DB_HOST}
+      PATCHTRACK_GF_DB_PORT: ${PATCHTRACK_GF_DB_PORT}
+      PATCHTRACK_GF_DB_NAME: ${PATCHTRACK_GF_DB_NAME}
+      PATCHTRACK_GF_DB_USER: ${PATCHTRACK_GF_DB_USER}
+      PATCHTRACK_GF_DB_PASSWORD: ${PATCHTRACK_GF_DB_PASSWORD}
+      PATCHTRACK_GF_DB_SSLMODE: ${PATCHTRACK_GF_DB_SSLMODE}
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro,Z
+      - ./deploy/grafana/dashboards:/etc/grafana/dashboards:ro,Z
+      - grafana-data:/var/lib/grafana:Z
+    ports:
+      - "${PATCHTRACK_BIND_ADDRESS:-127.0.0.1}:${PATCHTRACK_GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  reports:
+  solaris-inbox:
+  grafana-data:
+  prometheus-data:
+  tls:

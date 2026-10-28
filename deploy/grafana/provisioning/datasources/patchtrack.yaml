@@ -1,0 +1,28 @@
+# Grafana datasource provisioning.
+#
+# The dashboard reads the same tables the application writes, through a
+# dedicated READ-ONLY role. Credentials are supplied as environment
+# variables at container start (see .env.example); nothing is committed.
+# TLS to PostgreSQL is governed by PATCHTRACK_GF_DB_SSLMODE — never set to
+# "disable" in production to work around a certificate problem.
+apiVersion: 1
+
+datasources:
+  - name: PatchTrack
+    uid: patchtrack-postgres
+    type: postgres
+    access: proxy
+    url: ${PATCHTRACK_GF_DB_HOST}:${PATCHTRACK_GF_DB_PORT}
+    database: ${PATCHTRACK_GF_DB_NAME}
+    user: ${PATCHTRACK_GF_DB_USER}
+    secureJsonData:
+      password: ${PATCHTRACK_GF_DB_PASSWORD}
+    jsonData:
+      sslmode: ${PATCHTRACK_GF_DB_SSLMODE}
+      postgresVersion: 1300
+      timescaledb: false
+      maxOpenConns: 4
+      maxIdleConns: 2
+      connMaxLifetime: 14400
+    isDefault: true
+    editable: false

@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Sign in — PatchTrack</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<div class="login-wrap">
+  <section class="login-hero">
+    <div class="brand" style="border:0;padding:0">
+      <div class="brand-mark">PT</div>
+      <div>
+        <div class="brand-name" style="font-size:16px">PatchTrack</div>
+        <div class="brand-sub">Enterprise patch compliance</div>
+      </div>
+    </div>
+    <h1>One reliable view of enterprise patch compliance.</h1>
+    <p>PatchTrack consolidates server inventory from ManagedEngine AssetExplorer and
+       patch assessments from Red Hat Satellite, Microsoft Configuration Manager and the
+       approved Solaris collection process — applying documented compliance rules and
+       preserving the evidence behind every reported number.</p>
+    <div class="login-points">
+      <div class="login-point"><span class="ico">✓</span><span>Unknown and stale records are never counted as compliant.</span></div>
+      <div class="login-point"><span class="ico">✓</span><span>Monthly and quarterly PDF reports, on demand or scheduled.</span></div>
+      <div class="login-point"><span class="ico">✓</span><span>Immutable daily snapshots and a complete audit trail.</span></div>
+    </div>
+  </section>
+
+  <section class="login-panel">
+    <form class="login-form" id="login-form" autocomplete="on">
+      <div>
+        <h2 id="form-title">Sign in</h2>
+        <p class="muted" id="form-hint">Use your PatchTrack account.</p>
+      </div>
+      <div class="login-error" id="error" hidden></div>
+      <div class="field">
+        <label for="username">Username</label>
+        <input id="username" name="username" type="text" required
+               autocomplete="username" autocapitalize="none" spellcheck="false">
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" required
+               autocomplete="current-password">
+      </div>
+      <div class="field" id="display-name-field" hidden>
+        <label for="display_name">Full name</label>
+        <input id="display_name" name="display_name" type="text" autocomplete="name">
+      </div>
+      <button class="btn btn-primary" id="submit" type="submit" style="justify-content:center">Sign in</button>
+      <p class="small muted" style="margin:2px 0 0">
+        Sessions are protected by an HttpOnly cookie. Accounts lock after five
+        consecutive failed attempts.
+      </p>
+    </form>
+  </section>
+</div>
+<script type="module" src="/static/login.js"></script>
+</body>
+</html>

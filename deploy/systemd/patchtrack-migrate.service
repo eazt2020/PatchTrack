@@ -1,0 +1,38 @@
+# One-shot schema migration for the native installation.
+#
+# Runs before every patchtrack@ instance and exits; a failure leaves the
+# services down rather than half-migrated. Safe to run repeatedly: the
+# migration runner records each file's SHA-256 and refuses to re-run or to
+# accept a modified applied migration.
+#
+# Install alongside patchtrack@.service as
+# /etc/systemd/system/patchtrack-migrate.service.
+[Unit]
+Description=PatchTrack database migrations
+Documentation=file:/opt/patchtrack/docs/upgrade-rollback.md
+After=network-online.target postgresql-13.service
+Wants=network-online.target
+Before=patchtrack@identity.service patchtrack@inventory.service \
+    patchtrack@compliance.service patchtrack@reporting.service \
+    patchtrack@gateway.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=patchtrack
+Group=patchtrack
+EnvironmentFile=/etc/patchtrack/.env
+Environment=PYTHONPATH=/opt/patchtrack/services/common:/opt/patchtrack/services
+WorkingDirectory=/opt/patchtrack
+ExecStart=/opt/patchtrack-venv/bin/python -m patchtrack_common.migrate
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/patchtrack
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,36 @@
+# Deployment secrets — never commit a filled-in environment file.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.jks
+
+# Local runtime state: the development PostgreSQL cluster, Grafana's own
+# database, service logs, generated reports and screenshots. None of this is
+# application source, and some of it holds live session data.
+.runtime/
+.pytest_cache/
+.pytest-markers
+*.log
+
+# Generated report artifacts
+*.pdf
+!docs/**/*.pdf
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+dist/
