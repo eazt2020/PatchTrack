@@ -202,6 +202,13 @@ def load_manifest(path: Path) -> Manifest:
         problem = base._path_error(str(bundle))
         if problem:
             raise UninstallError(f"airgap_bundle {problem}")
+        if base.paths_overlap(bundle, install_dir) or base.paths_overlap(
+            bundle, config_dir
+        ):
+            raise UninstallError(
+                "airgap_bundle in install.json must not overlap the application "
+                "or configuration directory"
+            )
     return Manifest(
         path=path,
         config_dir=config_dir,

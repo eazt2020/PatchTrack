@@ -169,19 +169,25 @@ Air-gap mode changes the preflight and the installation:
 
 - it does not probe registries, the package index, the proxy or any outbound
   endpoint;
-- it requires `SHA256SUMS` in the bundle and runs `sha256sum -c SHA256SUMS`.
-  Every file must verify before anything is changed. It then requires the
-  application and PostgreSQL archives; a missing pinned base, Grafana, source
-  archive or wheel directory is only a warning;
+- it requires `SHA256SUMS` in the bundle and runs
+  `sha256sum -c --ignore-missing SHA256SUMS`. The application and PostgreSQL
+  archives must be listed and every listed file that is present must verify
+  before anything is changed. A removed optional pinned base, Grafana, source
+  archive or wheel directory is only a warning; a removed required archive
+  fails the separate presence check;
 - if packages must be installed it requires an enabled `dnf` repository and
   reminds you to confirm that repository is local. It never adds the remote
   Docker CE repository;
 - before installing files it loads the application and PostgreSQL images from
-  the bundle when they are not already present. When the application image is
-  supplied, it is used as-is instead of being rebuilt; the pinned base image is
-  loaded only if a local build is still required;
-- Docker Compose starts with `--pull never`; a Podman build uses
-  `--pull=never`.
+  the bundle, so a stale local image with the same tag cannot replace the
+  verified archive. The supplied application image is used as-is instead of
+  being rebuilt;
+- Docker Compose starts with `--pull never`.
+
+The bundle must not be inside, or contain, the application or configuration
+directory; the installer and uninstaller both refuse that layout because
+uninstalling the application would otherwise delete the only copy of the
+bundle.
 
 The bundle directory is recorded in `/etc/patchtrack/install.json` as
 `airgap_bundle` with `installation_mode: airgap`. The bundle itself is not

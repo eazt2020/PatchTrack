@@ -65,9 +65,7 @@ DOCKER_PROXY_DROPIN = Path(
     "/etc/systemd/system/docker.service.d/10-patchtrack-proxy.conf"
 )
 AIRGAP_SUMS = "SHA256SUMS"
-AIRGAP_BASE_IMAGE = "registry.access.redhat.com/ubi9/python-312:1-1762230134"
 AIRGAP_POSTGRES_IMAGE = "docker.io/library/postgres:17"
-AIRGAP_GRAFANA_IMAGE = "docker.io/grafana/grafana-oss:13.0.2"
 AIRGAP_BASE_ARCHIVE = "ubi9-python-312.tar"
 AIRGAP_POSTGRES_ARCHIVE = "postgres-17.tar"
 AIRGAP_GRAFANA_ARCHIVE = "grafana-oss-13.0.2.tar"
@@ -322,20 +320,45 @@ def env_bool(name: str, default: bool = False) -> bool:
 
 def bundle_archives(version: str) -> dict:
     return {
-        "app": (f"patchtrack-app-{version}.tar", f"patchtrack:{version}"),
-        "base": (AIRGAP_BASE_ARCHIVE, AIRGAP_BASE_IMAGE),
-        "postgres": (AIRGAP_POSTGRES_ARCHIVE, AIRGAP_POSTGRES_IMAGE),
-        "grafana": (AIRGAP_GRAFANA_ARCHIVE, AIRGAP_GRAFANA_IMAGE),
+        "app": f"patchtrack-app-{version}.tar",
+        "base": AIRGAP_BASE_ARCHIVE,
+        "postgres": AIRGAP_POSTGRES_ARCHIVE,
+        "grafana": AIRGAP_GRAFANA_ARCHIVE,
     }
 
 
-def verify_bundle(bundle_dir: Path) -> Tuple[bool, str]:
-    """Verify every file listed in the bundle's SHA256SUMS."""
+def _sums_entries(sums: Path) -> set:
+    """The file names listed in a SHA256SUMS file."""
+    entries = set()
+    try:
+        lines = sums.read_text().splitlines()
+    except OSError:
+        return entries
+    for line in lines:
+        parts = line.strip().split(None, 1)
+        if len(parts) == 2:
+            name = parts[1].lstrip("*")
+            entries.add(name[2:] if name.startswith("./") else name)
+    return entries
+
+
+def verify_bundle(bundle_dir: Path, required: Sequence[str] = ()) -> Tuple[bool, str]:
+    """Verify the bundle's SHA256SUMS, including the required archives.
+
+    ``--ignore-missing`` keeps an optional artifact that the operator removed
+    from failing the checksum check; its presence is checked separately.
+    Required archives must be listed so an empty or partial manifest cannot
+    vouch for nothing.
+    """
     sums = bundle_dir / AIRGAP_SUMS
     if not sums.is_file():
         return False, f"{sums} is missing; the bundle cannot be verified"
+    listed = _sums_entries(sums)
+    absent = [name for name in required if name not in listed]
+    if absent:
+        return False, f"{absent[0]} is not listed in {AIRGAP_SUMS}"
     result = run_command(
-        ["sha256sum", "-c", AIRGAP_SUMS],
+        ["sha256sum", "-c", "--ignore-missing", AIRGAP_SUMS],
         cwd=bundle_dir, check=False, capture=True,
     )
     # Per-file results go to stdout; warnings and missing-file errors go to
@@ -364,24 +387,22 @@ def bundle_preflight_checks(
         "network access is not required; images come from the bundle or the local runtime",
     )]
     runtime = plan.runtime
-    app_present = runtime_ready and image_exists(runtime, cfg.image)
-    postgres_present = runtime_ready and image_exists(runtime, AIRGAP_POSTGRES_IMAGE)
-    base_present = runtime_ready and image_exists(runtime, AIRGAP_BASE_IMAGE)
 
     if cfg.bundle_dir:
         bundle = cfg.bundle_dir
+        archives = bundle_archives(cfg.version)
+        required = (archives["app"], archives["postgres"])
         checks.append(Check(
             "air-gap bundle",
             bundle.is_dir(),
             str(bundle) if bundle.is_dir() else f"{bundle} is not a directory",
         ))
         if bundle.is_dir():
-            ok, detail = verify_bundle(bundle)
+            ok, detail = verify_bundle(bundle, required)
             checks.append(Check("bundle checksums", ok, detail))
-            archives = bundle_archives(cfg.version)
             for label, name in (
-                ("application", archives["app"][0]),
-                ("PostgreSQL", archives["postgres"][0]),
+                ("application", archives["app"]),
+                ("PostgreSQL", archives["postgres"]),
             ):
                 checks.append(Check(
                     f"{label} image archive",
@@ -390,8 +411,8 @@ def bundle_preflight_checks(
                     else f"{bundle / name} is missing",
                 ))
             for label, name in (
-                ("pinned base image", archives["base"][0]),
-                ("Grafana", archives["grafana"][0]),
+                ("pinned base image", archives["base"]),
+                ("Grafana", archives["grafana"]),
                 ("source archive", f"patchtrack-{cfg.version}.tar.gz"),
                 ("Python wheels", "patchtrack-wheels"),
             ):
@@ -405,6 +426,10 @@ def bundle_preflight_checks(
                     warning=not present,
                 ))
     else:
+        app_present = runtime_ready and image_exists(runtime, cfg.image)
+        postgres_present = runtime_ready and image_exists(
+            runtime, AIRGAP_POSTGRES_IMAGE
+        )
         checks.append(Check(
             "preloaded application image",
             app_present,
@@ -1878,42 +1903,32 @@ class Installer:
         runtime = self.plan.runtime
         archives = bundle_archives(self.cfg.version)
 
-        if image_exists(runtime, self.cfg.image):
-            info(f"{self.cfg.image} is already loaded")
-        else:
-            if not self.cfg.bundle_dir:
-                raise InstallerError(
-                    f"{self.cfg.image} is not loaded and no --bundle-dir was given"
-                )
-            archive = self.cfg.bundle_dir / archives["app"][0]
-            self.load_archive(archive)
+        if self.cfg.bundle_dir:
+            # The bundle is the verified source of both images. Loading it
+            # replaces a stale image that happens to carry the same tag.
+            existed = image_exists(runtime, self.cfg.image)
+            self.load_archive(self.cfg.bundle_dir / archives["app"])
             self.image_loaded = True
-            self.actions.append(ContainerImage(runtime, self.cfg.image))
+            if not existed:
+                self.actions.append(ContainerImage(runtime, self.cfg.image))
             self.tag_loaded_application()
 
-        if not image_exists(runtime, AIRGAP_POSTGRES_IMAGE):
-            if not self.cfg.bundle_dir:
-                raise InstallerError(
-                    f"{AIRGAP_POSTGRES_IMAGE} is not loaded and no --bundle-dir was given"
-                )
-            self.load_archive(self.cfg.bundle_dir / archives["postgres"][0])
+            self.load_archive(self.cfg.bundle_dir / archives["postgres"])
             info(f"loaded {AIRGAP_POSTGRES_IMAGE} from the bundle")
+        else:
+            for label, image in (
+                ("application", self.cfg.image),
+                ("PostgreSQL", AIRGAP_POSTGRES_IMAGE),
+            ):
+                if not image_exists(runtime, image):
+                    raise InstallerError(
+                        f"{image} is not loaded and no --bundle-dir was given"
+                    )
+                info(f"{image} is already loaded ({label})")
 
-        if not image_exists(runtime, self.cfg.image):
-            # The application archive normally supplies the image. If it did
-            # not, the pinned build base is required for a local build.
-            if not self.cfg.bundle_dir:
-                raise InstallerError(f"{self.cfg.image} could not be prepared")
-            if not image_exists(runtime, AIRGAP_BASE_IMAGE):
-                self.load_archive(self.cfg.bundle_dir / archives["base"][0])
-            self.prebuilt_image = False
-        else:
-            self.prebuilt_image = True
-        if self.prebuilt_image:
-            origin = " loaded from the bundle" if self.image_loaded else " already present"
-            info(f"using {self.cfg.image}{origin}")
-        else:
-            info(f"{self.cfg.image} will be built locally")
+        self.prebuilt_image = True
+        info(f"using {self.cfg.image} loaded from the air-gap bundle"
+             if self.image_loaded else f"using {self.cfg.image} already present")
 
     def compose_up(self, *targets: str) -> subprocess.CompletedProcess:
         args = ["up", "-d"]
@@ -1947,13 +1962,9 @@ class Installer:
             if not self.prebuilt_image:
                 compose(self.cfg, "docker", "build")
         elif not self.prebuilt_image:
-            build = ["podman", "build"]
-            if self.cfg.airgap:
-                build.append("--pull=never")
-            build += ["--format", "docker", "-t", self.cfg.image,
-                      "-f", "deploy/container/Dockerfile", "."]
             run_command(
-                build,
+                ["podman", "build", "--format", "docker", "-t", self.cfg.image,
+                 "-f", "deploy/container/Dockerfile", "."],
                 cwd=self.cfg.install_dir,
                 env=command_environment(self.cfg),
             )
@@ -2223,6 +2234,8 @@ def prompt_config(cfg: Config, runtime: RuntimeInfo) -> None:
             validate_bundle_dir,
         )
         cfg.bundle_dir = clean_path(bundle) if bundle else None
+    else:
+        cfg.bundle_dir = None
     print("    The first administrator is created now so the installation can be verified.")
     cfg.create_admin = _ask_yes_no("Create the first administrator?", True)
     if cfg.create_admin:
@@ -2308,6 +2321,14 @@ def validate_config(cfg: Config) -> List[str]:
         problem = validator(value)
         if problem:
             problems.append(f"{label} {problem}")
+    if cfg.bundle_dir and (
+        paths_overlap(cfg.bundle_dir, cfg.install_dir)
+        or paths_overlap(cfg.bundle_dir, cfg.config_dir)
+    ):
+        problems.append(
+            "air-gap bundle directory must not overlap the application or "
+            "configuration directory"
+        )
     if cfg.create_admin and not (MIN_PASSWORD <= len(cfg.admin_password) <= MAX_PASSWORD):
         problems.append(
             f"administrator password must be {MIN_PASSWORD}-{MAX_PASSWORD} characters"
