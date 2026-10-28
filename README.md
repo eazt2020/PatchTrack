@@ -21,6 +21,29 @@ cannot introduce a second spelling of an existing value. Renaming a value there
 propagates to every server holding it, without rewriting what the source system
 reported and without the next sync undoing it.
 
+## Capabilities
+
+- **Compliance view** — dashboard KPIs, monthly/quarterly/yearly trends,
+  recorded snapshots for past periods, server and remediation registers with
+  search, filtering, sorting and CSV export, inventory overrides and
+  verification evidence.
+- **Reporting** — branded PDF reports on monthly or quarterly schedules.
+  Scheduled reports can be emailed through an SMTP relay configured in
+  Settings; the password is write-only and encrypted at rest.
+- **Scheduling** — collection, daily snapshot, audit purge, report tick and
+  report-retention jobs run inside the services and are listed at
+  **Reporting → Schedules → System jobs**, where an administrator can change an
+  interval or disable a job. No cron entry or systemd timer is involved.
+- **Administration** — users and roles, policy versions, integrations,
+  reconciliation, audit trail, report branding, retention windows, placement
+  lists and the deployment timezone in the UI.
+- **Transport and secrets** — HTTPS from first start with a generated
+  certificate, replacement with the organisation's own certificate in
+  Settings, and optional file-backed bootstrap secrets for Docker, Podman or
+  systemd deployments.
+- **Operations** — Grafana dashboards are optional; the application, API and
+  reports work with Grafana stopped.
+
 ## What is in this repository
 
 | Path | Contents |
@@ -29,13 +52,14 @@ reported and without the next sync undoing it.
 | `services/inventory` | Asset and patch ingestion, reconciliation (8002) |
 | `services/compliance` | Evaluation engine, snapshots, findings (8003) |
 | `services/reporting` | PDF generation, schedules, email delivery (8004) |
-| `services/gateway` | Web UI, session/CSRF handling, API fan-out (8005) |
-| `services/common` | Config, database helpers, security, migrations |
+| `services/gateway` | Web UI, session/CSRF handling, API fan-out and TLS termination (8005) |
+| `services/common` | Config, file-backed secrets, database and scheduler helpers, security, TLS, migrations |
 | `deploy/postgres` | SQL migrations and the Grafana read-only role |
 | `deploy/container` | Service image, entrypoint and pinned requirements |
+| `docker-compose.secrets.yml` | Opt-in Compose override for file-backed bootstrap secrets |
 | `deploy/grafana` | Provisioned datasource and dashboard |
 | `deploy/systemd` | Native (non-container) service units |
-| `scripts` | Development launcher, demo data, dashboard generator, manual job runner |
+| `scripts` | HTTPS development launcher, demo data, dashboard generator, manual job runner |
 | `tests` | Unit tests, database integration tests, browser smoke test |
 | `docs` | Requirements, design, operations and user documentation |
 
@@ -101,6 +125,27 @@ cp .env.example .env      # then fill it in; chmod 600
 docker compose up -d --build
 ```
 
+Open `https://<host>:8005`. The gateway terminates TLS itself. On first start
+it generates a self-signed certificate in the `tls` volume, so the sign-in page
+is never served over plain HTTP; accept the browser warning until an
+administrator installs the organisation's certificate at **Settings → HTTPS
+certificate**. Set `PATCHTRACK_TLS_ENABLED=false` when a reverse proxy
+terminates TLS instead; see
+[TLS configuration](docs/configuration.md#8-tls-termination) and
+[TLS troubleshooting](docs/troubleshooting.md#the-browser-warns-the-certificate-is-not-trusted).
+
+To keep the bootstrap credentials out of `.env`, use the opt-in secrets
+override after creating the required files:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.secrets.yml up -d
+```
+
+It mounts the database URL, JWT secret, service token and PostgreSQL password
+from `/etc/patchtrack/secrets/`; see
+[secret files](docs/security.md#secret-files) for the layout and the systemd
+equivalent.
+
 Grafana is an optional profile (`--profile dashboards`). The application,
 API and reports work with Grafana stopped.
 
@@ -137,8 +182,9 @@ PATCHTRACK_TEST_DATABASE_URL=postgresql+psycopg://patchtrack@/patchtrack_test?ho
   /opt/patchtrack-venv/bin/python -m pytest tests/integration
 ```
 
-Integration tests create and drop their own scratch database; never point them
-at a database holding real data.
+The suite currently contains 533 tests: 397 unit tests and 136 database
+integration tests. Integration tests create and drop their own scratch
+database; never point them at a database holding real data.
 
 Browser smoke test (needs Playwright and Chromium, development only):
 
@@ -146,3 +192,8 @@ Browser smoke test (needs Playwright and Chromium, development only):
 PATCHTRACK_URL=https://127.0.0.1:8005 PATCHTRACK_USER=admin \
 PATCHTRACK_PASSWORD=... python tests/ui/smoke.py
 ```
+
+It ignores certificate errors so it can run against the development stack's
+self-signed certificate. Point it at an `http://` URL with
+`PATCHTRACK_TLS_ENABLED=false scripts/dev-run.sh restart` to test a plain-HTTP
+stack instead.
