@@ -5,6 +5,102 @@ Docker or Podman with Compose. Nothing in this procedure requires disabling
 SELinux, and nothing requires outbound internet access at run time (see
 [offline-deployment.md](offline-deployment.md) for an air-gapped host).
 
+## Guided installation (recommended)
+
+The guided installer performs the whole procedure below, asks only for the
+deployment-specific values, and verifies the result. Run it from the unpacked
+release directory as root:
+
+```bash
+sudo ./install.sh
+```
+
+The source tree and the application directory must be different: the installer
+copies the tree it is run from. If the archive was unpacked directly into
+`/opt/patchtrack`, choose another application directory or use the manual
+procedure below.
+
+It asks for:
+
+| Input | Default | Notes |
+|-------|---------|-------|
+| Application directory | `/opt/patchtrack` | Must be absent or empty; an existing deployment is never overwritten |
+| Configuration directory | `/etc/patchtrack` | Holds `.env`, `install.json` and the secret files |
+| Service account | `patchtrack` | Created if missing; reused if it already exists |
+| Gateway bind address | `0.0.0.0` | Use `127.0.0.1` when a reverse proxy is in front |
+| HTTPS port | `8005` | Published on the bind address; 8001–8004 stay internal |
+| Certificate name | Host FQDN or IP | Used in the generated self-signed certificate |
+| First administrator | Create | Username, display name, optional email and password; the password is read without echo |
+
+Before changing anything it checks root access, RHEL/Rocky 9 and architecture,
+SELinux, CPU, memory, free disk, `dnf`, `systemctl`, account tools, the selected
+port, the target directories and existing Compose resources. Image registries
+and the package index are probed and reported as warnings, because a mirrored
+or preloaded host can work without direct access.
+
+It then:
+
+- installs Docker Engine with Compose v2 through `dnf` if no runtime is
+  available and you approve it (or uses an existing Docker/Podman);
+- creates the service account and directories, copies the application, and
+  generates the database password, JWT secret, service token and complete
+  database URL;
+- writes the bootstrap values as file-backed secrets under
+  `/etc/patchtrack/secrets` and blank placeholders in `.env`, so Compose is
+  always run with `docker-compose.secrets.yml`;
+- builds the image, starts PostgreSQL, applies migrations, starts all five
+  services and waits for `/readyz`;
+- creates the first administrator through the one-time bootstrap endpoint and
+  confirms an authenticated session with the forced password-change flag set.
+
+If any step fails, the installer reverses the actions it recorded, newest
+first: containers, volumes and the built image, application files, the account
+it created, a Docker service it started, package transactions it made, and
+container data only if that path did not exist beforehand. An existing
+directory, user, repository file or container project is never removed. The
+rollback reports anything it could not reverse rather than claiming success.
+
+Run the dependency checks alone, without changing the host:
+
+```bash
+sudo ./install.sh --check
+```
+
+The installer does not open a firewall port. Permit TCP/8005 (or the port you
+chose) in the host firewall before users connect. It also does not enable the
+optional Grafana dashboard; see [Optional: start the Grafana
+dashboard](#12-optional-start-the-grafana-dashboard).
+
+### Non-interactive use
+
+`--yes` accepts the defaults and reads parameters from `PATCHTRACK_INSTALL_*`
+environment variables. It creates the first administrator only when
+`PATCHTRACK_INSTALL_ADMIN_PASSWORD` is set; otherwise it leaves the one-time
+web form for the operator. Useful variables are
+`PATCHTRACK_INSTALL_DIR`, `PATCHTRACK_INSTALL_CONFIG_DIR`,
+`PATCHTRACK_INSTALL_SERVICE_USER`, `PATCHTRACK_INSTALL_BIND_ADDRESS`,
+`PATCHTRACK_INSTALL_GATEWAY_PORT`, `PATCHTRACK_INSTALL_TLS_HOSTNAME`,
+`PATCHTRACK_INSTALL_ADMIN_USERNAME`, `PATCHTRACK_INSTALL_ADMIN_DISPLAY_NAME`,
+`PATCHTRACK_INSTALL_ADMIN_EMAIL`, `PATCHTRACK_INSTALL_RUNTIME` and the
+preflight minimums `PATCHTRACK_INSTALL_MIN_DISK_GB` and
+`PATCHTRACK_INSTALL_MIN_MEMORY_GB`.
+
+```bash
+sudo PATCHTRACK_INSTALL_BIND_ADDRESS=0.0.0.0 \
+  PATCHTRACK_INSTALL_TLS_HOSTNAME=patchtrack.example.com \
+  ./install.sh --yes
+```
+
+`--runtime docker|podman` selects a runtime explicitly. `--allow-permissive`
+and `--allow-unsupported-os` exist only for documented exceptions and are not
+part of a supported production installation.
+
+## Manual installation
+
+The numbered procedure below is the same deployment performed step by step.
+Use it when the organisation requires a reviewed command sequence, a custom
+runtime, or an external PostgreSQL service.
+
 ## 1. Preconditions
 
 | Item | Requirement |

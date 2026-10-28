@@ -110,8 +110,11 @@ See [roles.md](roles.md) for the human-facing description.
   reads the raw header: services take the address from `request.client`,
   which uvicorn rewrites only for trusted peers, and a value that is not a
   valid address is recorded as NULL rather than failing the request.
-- Database connections use `sslmode=require` or better. `verify-full` is the
-  documented production setting; `disable` is never a supported value.
+- Database connections to the bundled PostgreSQL use `sslmode=prefer` over the
+  private Compose bridge; the database publishes no host port and the official
+  image does not enable server TLS by default. An external PostgreSQL service
+  must use `sslmode=require` or better, with `verify-full` as the documented
+  production setting. `disable` is never a supported value.
 - Grafana to PostgreSQL uses `PATCHTRACK_GF_DB_SSLMODE` (default `verify-full`).
 
 ### Integration TLS

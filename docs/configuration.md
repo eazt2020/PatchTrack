@@ -42,7 +42,7 @@ snapshots or reports.
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `PATCHTRACK_DATABASE_URL` | **required** | `postgresql+psycopg://user:password@host:5432/patchtrack?sslmode=require` |
+| `PATCHTRACK_DATABASE_URL` | **required** | `postgresql+psycopg://user:password@host:5432/patchtrack?sslmode=prefer` for the bundled database; `sslmode=require` or `verify-full` for an external one |
 | `PATCHTRACK_DB_POOL_SIZE` | 5 | Per service |
 | `PATCHTRACK_DB_POOL_MAX_OVERFLOW` | 5 | Burst above the pool |
 | `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | — | Used by the bundled postgres container only |
@@ -51,9 +51,13 @@ snapshots or reports.
 | `PROMETHEUS_IMAGE` | `docker.io/prom/prometheus:v3.15.1` | Scraper image for the optional `monitoring` profile |
 | `PATCHTRACK_PROMETHEUS_PORT` | `9090` | Loopback port for the bundled Prometheus |
 
-The services refuse to start without `PATCHTRACK_DATABASE_URL`. Use
-`sslmode=require` at minimum and `verify-full` where the server certificate is
-verifiable. Never `disable`.
+The services refuse to start without `PATCHTRACK_DATABASE_URL`. The bundled
+`postgres` image does not enable server TLS by default, and it publishes no
+host port: the database is reachable only over the private Compose bridge, so
+the bundled URL uses `sslmode=prefer`. That negotiates TLS if the image is
+later configured to offer it, and otherwise uses the isolated bridge. An
+external PostgreSQL service must use `sslmode=require` at minimum and
+`verify-full` where the server certificate is verifiable. Never `disable`.
 
 **Sizing.** Five services × (pool 5 + overflow 5) = up to 50 connections.
 PostgreSQL's default `max_connections` is 100, which leaves headroom for

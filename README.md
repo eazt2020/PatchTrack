@@ -37,6 +37,10 @@ reported and without the next sync undoing it.
 - **Administration** — users and roles, policy versions, integrations,
   reconciliation, audit trail, report branding, retention windows, placement
   lists and the deployment timezone in the UI.
+- **Installation** — `install.sh` guides a fresh deployment through its
+  parameters, checks every dependency first, verifies HTTPS, migrations, all
+  services and the first administrator afterwards, and automatically reverses
+  its own changes if any step fails.
 - **Transport and secrets** — HTTPS from first start with a generated
   certificate, replacement with the organisation's own certificate in
   Settings, and optional file-backed bootstrap secrets for Docker, Podman or
@@ -48,6 +52,7 @@ reported and without the next sync undoing it.
 
 | Path | Contents |
 |------|----------|
+| `install.sh` | Guided production installer with preflight, verification and automatic rollback |
 | `services/identity` | Users, roles, sessions, audit trail (port 8001) |
 | `services/inventory` | Asset and patch ingestion, reconciliation (8002) |
 | `services/compliance` | Evaluation engine, snapshots, findings (8003) |
@@ -117,8 +122,17 @@ consistent observations to display. Every snapshot records
 ## Deployment
 
 Production deployment uses Docker Compose on RHEL 9 or Rocky 9 with SELinux
-enforcing. See [docs/install.md](docs/install.md) and
+enforcing. The guided installer is the recommended path: it checks the host
+and dependencies, installs a missing runtime with your approval, generates the
+secrets, starts and verifies the stack, and rolls back its own changes on
+failure. See [docs/install.md](docs/install.md) and
 [docs/configuration.md](docs/configuration.md).
+
+```bash
+sudo ./install.sh          # guided; sudo ./install.sh --check for preflight only
+```
+
+The equivalent manual procedure remains available:
 
 ```bash
 cp .env.example .env      # then fill it in; chmod 600
@@ -182,7 +196,7 @@ PATCHTRACK_TEST_DATABASE_URL=postgresql+psycopg://patchtrack@/patchtrack_test?ho
   /opt/patchtrack-venv/bin/python -m pytest tests/integration
 ```
 
-The suite currently contains 533 tests: 397 unit tests and 136 database
+The suite currently contains 545 tests: 409 unit tests and 136 database
 integration tests. Integration tests create and drop their own scratch
 database; never point them at a database holding real data.
 

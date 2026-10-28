@@ -35,7 +35,7 @@ check that verifies it. Status meanings:
 | C-1 No universal default credentials | No seeded users; bootstrap refuses when a user exists; `.env.example` contains only `CHANGE_ME` placeholders | migration 002 has no `INSERT`; `identity /bootstrap/status`; `gateway /api/session/bootstrap` |
 | C-2 Do not record secrets | `audit.scrub` denylist; no request bodies stored | `test_security.py`; `audit.py` |
 | C-3 No production credentials in source control | `.env` gitignored; `secret_ref` accepts references only | `secrets.validate_reference`; `test_secrets.py` |
-| C-4 Never disable TLS verification | `verify_tls` defaults true; plain HTTP requires an explicit, audited opt-out; `sslmode` requires TLS | `inventory /integrations/{key}`; `test_secrets.py` |
+| C-4 Never disable TLS verification | `verify_tls` defaults true; plain HTTP requires an explicit, audited opt-out; external `sslmode` requires TLS | `inventory /integrations/{key}`; `test_secrets.py` |
 | C-5 SELinux not required to be disabled | `:Z` mounts; no `setenforce` anywhere; troubleshooting documents the correct fix | `docker-compose.yml`; `troubleshooting.md` |
 | C-6 No assumed SSH collection | No SSH client import anywhere; Solaris is a file drop | `connectors/solaris.py`; code search |
 | C-7 No silent wrong association | `sync.match_asset` returns `(None, "ambiguous")`; conflicts table | `test_reconciliation.py` ambiguity test |
