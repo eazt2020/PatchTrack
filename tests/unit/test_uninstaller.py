@@ -231,3 +231,15 @@ def test_uninstaller_rejects_an_invalid_airgap_bundle_path(tmp_path):
 
     with pytest.raises(uninstaller.UninstallError, match="airgap_bundle"):
         uninstaller.load_manifest(path)
+
+
+def test_uninstaller_refuses_a_bundle_inside_the_application_directory(tmp_path):
+    install = tmp_path / "opt" / "patchtrack"
+    path, _, _, _ = write_manifest(
+        tmp_path,
+        installation_mode="airgap",
+        airgap_bundle=str(install / "bundle"),
+    )
+
+    with pytest.raises(uninstaller.UninstallError, match="must not overlap"):
+        uninstaller.load_manifest(path)

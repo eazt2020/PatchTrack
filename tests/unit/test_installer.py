@@ -361,10 +361,10 @@ def test_airgap_preflight_checks_the_bundle_and_skips_registry_probes(tmp_path):
     version = installer.Config().version
     archives = installer.bundle_archives(version)
     for key in ("app", "base", "postgres", "grafana"):
-        (tmp_path / archives[key][0]).write_bytes(key.encode())
+        (tmp_path / archives[key]).write_bytes(key.encode())
     sums = []
     for title in ("app", "base", "postgres", "grafana"):
-        name = archives[title][0]
+        name = archives[title]
         digest = hashlib.sha256((tmp_path / name).read_bytes()).hexdigest()
         sums.append(f"{digest}  {name}")
     (tmp_path / installer.AIRGAP_SUMS).write_text("\n".join(sums) + "\n")
@@ -414,7 +414,6 @@ def test_airgap_installer_loads_images_and_skips_the_build(tmp_path, monkeypatch
             f"patchtrack-app-{version}.tar":
                 f"docker.io/library/patchtrack:{version}",
             installer.AIRGAP_POSTGRES_ARCHIVE: installer.AIRGAP_POSTGRES_IMAGE,
-            installer.AIRGAP_BASE_ARCHIVE: installer.AIRGAP_BASE_IMAGE,
         }[archive.name])
 
     def fake_run(args, **kwargs):
@@ -435,4 +434,60 @@ def test_airgap_installer_loads_images_and_skips_the_build(tmp_path, monkeypatch
     assert f"localhost/patchtrack:{version}" in state
     assert f"docker.io/library/patchtrack:{version}" not in state
     assert installer.AIRGAP_POSTGRES_IMAGE in state
-    assert installer.AIRGAP_BASE_IMAGE not in state
+
+
+def test_airgap_bundle_must_list_its_required_archives(tmp_path):
+    import hashlib
+
+    archive = tmp_path / "patchtrack-app-3.0.0.tar"
+    archive.write_bytes(b"application image")
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    (tmp_path / installer.AIRGAP_SUMS).write_text(
+        f"{digest}  {archive.name}\n"
+    )
+
+    ok, detail = installer.verify_bundle(
+        tmp_path, required=(archive.name, installer.AIRGAP_POSTGRES_ARCHIVE)
+    )
+
+    assert ok is False
+    assert installer.AIRGAP_POSTGRES_ARCHIVE in detail
+
+
+def test_airgap_bundle_tolerates_a_removed_optional_archive(tmp_path):
+    import hashlib
+
+    names = ("patchtrack-app-3.0.0.tar", installer.AIRGAP_POSTGRES_ARCHIVE)
+    sums = []
+    for name in names:
+        (tmp_path / name).write_bytes(name.encode())
+        digest = hashlib.sha256((tmp_path / name).read_bytes()).hexdigest()
+        sums.append(f"{digest}  {name}")
+    (tmp_path / installer.AIRGAP_GRAFANA_ARCHIVE).write_bytes(b"grafana")
+    digest = hashlib.sha256(
+        (tmp_path / installer.AIRGAP_GRAFANA_ARCHIVE).read_bytes()
+    ).hexdigest()
+    sums.append(f"{digest}  {installer.AIRGAP_GRAFANA_ARCHIVE}")
+    (tmp_path / installer.AIRGAP_SUMS).write_text("\n".join(sums) + "\n")
+    (tmp_path / installer.AIRGAP_GRAFANA_ARCHIVE).unlink()
+
+    ok, detail = installer.verify_bundle(tmp_path, required=names)
+
+    assert ok is True
+    assert "2 file(s) verified" in detail
+
+
+def test_airgap_bundle_must_not_overlap_the_install_directories(tmp_path):
+    install_dir = tmp_path / "opt" / "patchtrack"
+    config_dir = tmp_path / "etc" / "patchtrack"
+    bundle = install_dir / "bundle"
+    cfg = installer.Config(
+        install_dir=install_dir,
+        config_dir=config_dir,
+        airgap=True,
+        bundle_dir=bundle,
+    )
+
+    problems = installer.validate_config(cfg)
+
+    assert any("bundle directory must not overlap" in problem for problem in problems)
