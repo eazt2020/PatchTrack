@@ -7,6 +7,9 @@
   edited; a new one is added.
 - An upgrade is: back up → load the new image → run migrations → start → verify.
 - A rollback is: restore the backup → run the previous image.
+- `upgrade.sh` performs those steps from the unpacked new release, including
+  the backup and automatic rollback; the manual commands below remain the
+  reference for what it does.
 
 A schema change that cannot be undone by restoring a backup is not allowed in
 a release. Every migration in this repository is additive (`CREATE TABLE IF NOT
@@ -31,7 +34,71 @@ docker compose exec -T postgres psql -U patchtrack -d patchtrack -c \
   "SELECT version FROM shared.schema_migrations ORDER BY version;"
 ```
 
-## 3. Upgrade
+## 3. Guided upgrade
+
+Run the new release's `upgrade.sh` as root from the directory where you
+unpacked it. Do **not** unpack it over `/opt/patchtrack`; the script compares
+the source and target paths and refuses to continue if they overlap.
+
+```bash
+sudo ./upgrade.sh --version 3.1.0 --check   # preflight only
+sudo ./upgrade.sh --version 3.1.0           # asks for confirmation
+sudo ./upgrade.sh --version 3.1.0 --yes     # non-interactive
+```
+
+`--version` defaults to `PATCHTRACK_UPGRADE_VERSION`, then
+`PATCHTRACK_VERSION`. The target must differ from the installed version and
+must not be older; a downgrade needs a database restore, not an upgrade.
+
+The prechecks read `/etc/patchtrack/install.json`, so they know the runtime,
+image, account and directories the installation created. They require root, a
+healthy current installation (all four services ready), a running PostgreSQL
+container, the service account, the container runtime, free space and a source
+tree that looks like a PatchTrack release. They also refuse existing
+`patchtrack.upgrade-new` or `patchtrack.upgrade-old` staging directories, so a
+previous interrupted run must be inspected before trying again.
+
+The backup is mandatory and is written to
+`/var/lib/patchtrack/upgrades/upgrade-<timestamp>/`:
+
+| Item | Contents |
+|------|----------|
+| `app/` | Previous application tree |
+| `config/` | `.env`, `install.json`, secrets and any operator files |
+| `database.dump` | PostgreSQL custom-format dump taken with `pg_dump -Fc` |
+| `upgrade.json` | From/to version, image, paths and creation time |
+
+Backups are never deleted automatically. The dump contains the whole
+`patchtrack` database; the database password stays in the existing secret
+files and is not passed on a command line.
+
+The upgrade then stages the new tree beside the current one, swaps it into
+place, changes `PATCHTRACK_VERSION`, builds `patchtrack:<version>`, stops the
+five application services (PostgreSQL stays up), runs the `migrate` service
+and starts the stack. It verifies `/readyz`, `/healthz`, the sign-in page and
+the migration table, then records the version in `install.json` and removes
+the previous tree. The previous image is kept on the host.
+
+If any step after staging fails, the script stops the new services, restores
+the previous tree, `.env` and `install.json`, and restores the database when
+migrations had started. It renames the failed database to
+`patchtrack_failed_upgrade_<timestamp>`, creates a fresh `patchtrack` database
+and restores into it from `database.dump`, so tables introduced by the failed
+release cannot survive the rollback and the failed state remains available for
+investigation. It then rebuilds the previous image if it is missing, starts the
+previous version and waits for it to become ready. If the rollback itself
+cannot complete, it prints the exact backup paths and database names for manual
+recovery and leaves them in place. It never claims success when a check
+failed.
+
+Post-upgrade checks use the gateway directly on the bind address and port
+recorded in `.env`; like the installer, they skip proxy settings and accept
+the generated certificate. They do not create or sign in an administrator.
+
+## 4. Manual upgrade
+
+Use this when upgrading without the script, for example from a signed bundle
+that predates `upgrade.sh`.
 
 ```bash
 cd /opt/patchtrack
@@ -60,7 +127,7 @@ If a migration fails, the runner aborts the transaction and leaves the schema
 unchanged. Fix the cause (a privilege problem, a lock) and re-run; do not edit
 the migration file.
 
-## 4. Verify the upgrade
+## 5. Verify the upgrade
 
 | Check | How |
 |-------|-----|
@@ -78,7 +145,7 @@ change means the upgrade altered evaluation semantics; that belongs in the
 release notes and in a policy version, not in a silent code change. Stop and
 investigate.
 
-## 5. Rollback
+## 6. Rollback
 
 ```bash
 cd /opt/patchtrack
@@ -121,20 +188,20 @@ evidence for the vendor.
      TO STDOUT WITH (FORMAT csv, HEADER)" > /var/backups/patchtrack/audit-post-upgrade.csv
   ```
 
-## 6. Rolling back a single service
+## 7. Rolling back a single service
 
 Because all five services share one image and one database schema, rolling back
 one service independently is only safe for gateway and identity (no schema
 ownership conflict). For inventory/compliance/reporting, roll back the whole
 set or not at all.
 
-## 7. Configuration changes that accompany an upgrade
+## 8. Configuration changes that accompany an upgrade
 
 An upgrade may add a required environment variable. The release notes list
 them; the pattern is always "add it with a safe default" so an operator who
 misses it gets a working system, not a silent behaviour change.
 
-## 8. Version numbering
+## 9. Version numbering
 
 `MAJOR.MINOR.PATCH`:
 

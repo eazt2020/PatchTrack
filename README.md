@@ -44,7 +44,9 @@ reported and without the next sync undoing it.
   traffic through an HTTP(S) proxy when the host has no direct internet access.
   `uninstall.sh` prechecks the installed deployment, removes only what the
   installation created, preserves data volumes unless `--purge-data` is given,
-  and verifies the result.
+  and verifies the result. `upgrade.sh` backs up the tree, configuration and
+  database, stages a new release, applies migrations, verifies the stack and
+  restores everything automatically if any step fails.
 - **Transport and secrets** — HTTPS from first start with a generated
   certificate, replacement with the organisation's own certificate in
   Settings, and optional file-backed bootstrap secrets for Docker, Podman or
@@ -58,6 +60,7 @@ reported and without the next sync undoing it.
 |------|----------|
 | `install.sh` | Guided production installer with preflight, verification and automatic rollback |
 | `uninstall.sh` | Guided uninstaller with preflight, data-preserving removal and post-uninstallation checks |
+| `upgrade.sh` | Guided upgrade with preflight, mandatory backup, staged replacement, verification and automatic rollback |
 | `services/identity` | Users, roles, sessions, audit trail (port 8001) |
 | `services/inventory` | Asset and patch ingestion, reconciliation (8002) |
 | `services/compliance` | Evaluation engine, snapshots, findings (8003) |
@@ -201,7 +204,7 @@ PATCHTRACK_TEST_DATABASE_URL=postgresql+psycopg://patchtrack@/patchtrack_test?ho
   /opt/patchtrack-venv/bin/python -m pytest tests/integration
 ```
 
-The suite currently contains 561 tests: 425 unit tests and 136 database
+The suite currently contains 570 tests: 434 unit tests and 136 database
 integration tests. Integration tests create and drop their own scratch
 database; never point them at a database holding real data.
 

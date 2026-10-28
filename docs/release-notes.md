@@ -36,6 +36,17 @@
   installation and any operator-created file. Data volumes are preserved unless
   `--purge-data` is given. Post-uninstallation checks verify each removal and
   report preserved volumes and files.
+- `upgrade.sh` upgrades an existing deployment from the unpacked new
+  release. It preflights the manifest, paths, target version, service account,
+  runtime, Compose project, current readiness and free space; takes a mandatory
+  backup of the application tree, configuration and a PostgreSQL dump; stages
+  and swaps in the new tree; updates `PATCHTRACK_VERSION`; builds the new image;
+  stops writes, runs migrations and starts the stack; then verifies `/readyz`,
+  `/healthz`, the sign-in page and the migration table. On any failure it
+  restores the previous tree, `.env`, manifest and database dump, starts the
+  previous version and verifies it. The backup is retained under
+  `/var/lib/patchtrack/upgrades`, and downgrades are refused because they need
+  a restore rather than an upgrade.
 
 ### Secret files for bootstrap credentials
 

@@ -70,7 +70,9 @@ sudo ./install.sh --check
 
 To remove an installation later, use the
 [guided uninstallation](#guided-uninstallation-recommended); it preserves data
-volumes unless you explicitly ask to delete them.
+volumes unless you explicitly ask to delete them. To move to a newer release,
+run the new release's `upgrade.sh`; see
+[Guided upgrade](upgrade-rollback.md#3-guided-upgrade).
 
 The installer does not open a firewall port. Permit TCP/8005 (or the port you
 chose) in the host firewall before users connect. It also does not enable the
