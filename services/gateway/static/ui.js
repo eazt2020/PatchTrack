@@ -146,8 +146,60 @@ export function spinnerRows(rows = 4) {
       h("div", { class: "skeleton", style: { height: "46px" } })));
 }
 
+/* ------------------------------------------------------------------ CSV export */
+/* A table cell is either raw data (`key`) or a rendered node. CSV wants the
+ * text a person sees, except where the cell is only an action button: an
+ * "Edit" button is not a column of data. `export: false` opts a column out
+ * explicitly. */
+function csvCell(column, row) {
+  if (column.export === false) return null;
+  let value = column.key !== undefined ? row[column.key] : undefined;
+  if (value === undefined && column.render) value = column.render(row);
+  if (value instanceof Node) {
+    if (value.matches?.("button, input, select, textarea")
+        || value.querySelector?.("button, input, select, textarea")) return null;
+    // A link or pill renders its label; that label is the value.
+    value = value.textContent;
+  }
+  if (value === null || value === undefined) return "";
+  return String(value).replace(/\s+/g, " ").trim();
+}
+
+function csvText(columns, rows) {
+  // Action-only columns are dropped entirely, header included, rather than
+  // exported as a nameless column of empty cells.
+  const exported = columns.filter((col) => col.export !== false);
+  const escape = (value) =>
+    /[",\n\r]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+  const lines = [exported.map((col) => escape(col.label)).join(",")];
+  for (const row of rows) {
+    lines.push(exported.map((col) => {
+      const value = csvCell(col, row);
+      return value === null ? "" : escape(value);
+    }).join(","));
+  }
+  return lines.join("\r\n");
+}
+
+function csvFilename(button, fallback) {
+  const title = button.closest(".card")?.querySelector(".card-title")?.textContent;
+  const slug = (title || fallback).toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return `${slug || fallback}-${new Date().toISOString().slice(0, 10)}.csv`;
+}
+
+function downloadCsv(name, columns, rows) {
+  // The BOM keeps Excel from mangling non-ASCII names in the register.
+  const blob = new Blob(["﻿", csvText(columns, rows)],
+    { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const anchor = h("a", { href: url, download: name });
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
 export function table(columns, rows, options = {}) {
-  const { empty = "No records found.", rowKey } = options;
+  const { empty = "No records found.", rowKey, export: allowExport = true } = options;
   const thead = h("thead", {}, h("tr", {},
     ...columns.map((col) => h("th", {
       class: col.numeric ? "num" : "",
@@ -174,20 +226,63 @@ export function table(columns, rows, options = {}) {
     }
     tbody.appendChild(tr);
   }
-  return h("div", { class: "table-wrap" },
+  const wrap = h("div", { class: "table-wrap" });
+  // Every table is a list a reader may need outside the console. A server-paged
+  // register supplies `exportRows` so the file contains every matching row, not
+  // just the page on screen.
+  if (allowExport && ((rows && rows.length) || options.exportRows)) {
+    const button = h("button", {
+      type: "button", class: "btn btn-sm table-export",
+      title: "Download this list as CSV",
+    }, "Export CSV");
+    button.addEventListener("click", async () => {
+      const label = button.textContent;
+      button.disabled = true;
+      button.textContent = "Exporting…";
+      try {
+        const data = options.exportRows ? await options.exportRows() : rows;
+        downloadCsv(options.exportName || csvFilename(button, "patchtrack-list"),
+          columns, data || []);
+        button.textContent = label;
+      } catch {
+        button.textContent = "Export failed";
+        setTimeout(() => { button.textContent = label; }, 2000);
+      } finally {
+        button.disabled = false;
+      }
+    });
+    wrap.appendChild(h("div", { class: "table-tools" }, button));
+  }
+  wrap.appendChild(
     h("table", { class: `data ${options.compact ? "compact" : ""}`.trim() }, thead, tbody));
+  return wrap;
 }
 
 export function select({ label, value, options, onChange, allLabel = "All" }) {
   const id = `sel-${Math.random().toString(36).slice(2, 9)}`;
   const element = h("select", { id, onchange: (e) => onChange(e.target.value) });
   if (allLabel) element.appendChild(h("option", { value: "" }, allLabel));
+  // An option may name a `group`; consecutive options with the same group are
+  // collected into one <optgroup>, which keeps long pickers navigable without
+  // changing how the caller describes them.
+  const groups = new Map();
   for (const option of options || []) {
     const optValue = typeof option === "string" ? option : option.value;
     const optLabel = typeof option === "string" ? option : option.label;
     const opt = h("option", { value: optValue }, optLabel);
     if (String(value ?? "") === String(optValue)) opt.selected = true;
-    element.appendChild(opt);
+    const group = typeof option === "object" ? option.group : null;
+    if (!group) {
+      element.appendChild(opt);
+      continue;
+    }
+    let parent = groups.get(group);
+    if (!parent) {
+      parent = h("optgroup", { label: group });
+      groups.set(group, parent);
+      element.appendChild(parent);
+    }
+    parent.appendChild(opt);
   }
   return h("div", { class: "field" },
     h("label", { for: id }, label), element);

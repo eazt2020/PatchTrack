@@ -141,11 +141,23 @@ daily_snapshot() {
   return "$STEP_SKIPPED"
 }
 
+audit_retention() {
+  # The window itself lives in the database (Settings → Audit trail
+  # retention), so this job only applies it. It runs once a day; each run
+  # deletes events older than the configured cutoff.
+  if due audit-purge "$(( 24 * 3600 ))"; then
+    if post identity /jobs/audit-purge; then stamp audit-purge; return 0; fi
+    return 1
+  fi
+  return "$STEP_SKIPPED"
+}
+
 step "sync assetexplorer" collection assetexplorer "${PATCHTRACK_SYNC_ASSETEXPLORER_INTERVAL:-21600}"
 step "sync satellite"     collection satellite     "${PATCHTRACK_SYNC_SATELLITE_INTERVAL:-21600}"
 step "sync sccm"          collection sccm          "${PATCHTRACK_SYNC_SCCM_INTERVAL:-86400}"
 step "sync solaris"       collection solaris       "${PATCHTRACK_SYNC_SOLARIS_INTERVAL:-604800}"
 step "daily snapshot"     daily_snapshot
+step "audit retention"    audit_retention
 step "report tick"        post reporting /jobs/tick
 
 exit "$FAILED"

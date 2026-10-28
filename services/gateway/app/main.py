@@ -121,6 +121,14 @@ async def security_middleware(request: Request, call_next):
                     return _set_security(JSONResponse(
                         {"detail": "CSRF validation failed"}, status_code=403))
     response = await call_next(request)
+    if not request.url.path.startswith("/api/"):
+        # The console is a module SPA: app.js is fetched once and its render
+        # functions stay in memory for the life of the tab. Without this,
+        # browsers apply heuristic freshness (10% of the file's age) and keep
+        # serving a stale module after a deploy, so a normal reload would not
+        # pick up a changed screen. Revalidation is cheap: ETag/Last-Modified
+        # still answer 304 when nothing changed.
+        response.headers.setdefault("Cache-Control", "no-cache")
     return _set_security(response)
 
 

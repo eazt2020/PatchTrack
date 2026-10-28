@@ -98,13 +98,18 @@ def list_assets(
 ) -> dict[str, Any]:
     clauses = ["1=1"]
     params: dict[str, Any] = {}
+    # The stats tiles summarise the register the filters select, not just the
+    # page on screen. The compliance-state filter is deliberately left out:
+    # narrowing the list to "Non-compliant" should not zero the Compliant tile.
+    stats_clauses = ["1=1"]
+    stats_params: dict[str, Any] = {}
     if search:
         # Search spans the columns the register displays: identity, placement,
         # ownership and lifecycle all answer the same box. Compliance state is
         # matched as a whole term, not a substring: "Compliant" must not drag
         # in every "Non-compliant" server. Use the Status filter for exact
         # states.
-        clauses.append(
+        search_clause = (
             "(a.hostname ILIKE :search OR a.fqdn ILIKE :search "
             "OR host(a.ip_address) LIKE :search OR a.assetexplorer_id = :exact "
             "OR a.os_name ILIKE :search OR a.os_version ILIKE :search "
@@ -114,9 +119,15 @@ def list_assets(
             "OR a.department ILIKE :search OR a.location ILIKE :search "
             "OR c.state = :state_search)"
         )
-        params["search"] = f"%{search}%"
-        params["exact"] = search
-        params["state_search"] = search.strip().lower().replace(" ", "_").replace("-", "_")
+        search_params = {
+            "search": f"%{search}%",
+            "exact": search,
+            "state_search": search.strip().lower().replace(" ", "_").replace("-", "_"),
+        }
+        clauses.append(search_clause)
+        stats_clauses.append(search_clause)
+        params.update(search_params)
+        stats_params.update(search_params)
     for column, value in (
         ("os_family", os_family), ("os_version", os_version),
         ("environment", environment), ("business_group", business_group),
@@ -124,8 +135,11 @@ def list_assets(
         ("lifecycle_status", lifecycle_status),
     ):
         if value:
-            clauses.append(f"{ASSET_FILTER_COLUMNS[column]} = :{column}")
+            clause = f"{ASSET_FILTER_COLUMNS[column]} = :{column}"
+            clauses.append(clause)
+            stats_clauses.append(clause)
             params[column] = value
+            stats_params[column] = value
     if compliance_state:
         if compliance_state == "unknown":
             clauses.append("(c.state = 'unknown' OR c.state IS NULL)")
@@ -133,9 +147,13 @@ def list_assets(
             clauses.append("c.state = :compliance_state")
             params["compliance_state"] = compliance_state
     if in_scope is not None:
-        clauses.append("a.in_scope = :in_scope")
+        clause = "a.in_scope = :in_scope"
+        clauses.append(clause)
+        stats_clauses.append(clause)
         params["in_scope"] = in_scope
+        stats_params["in_scope"] = in_scope
     where = " AND ".join(clauses)
+    stats_where = " AND ".join(stats_clauses)
 
     sort_column = ASSET_FILTER_COLUMNS.get(sort, "a.hostname")
     if sort == "hostname":
@@ -151,11 +169,25 @@ def list_assets(
         "LIMIT :limit OFFSET :offset",
         **params, limit=page_size, offset=(page - 1) * page_size,
     )
+    stats = fetch_one(
+        "SELECT count(*) AS total, "
+        "count(*) FILTER (WHERE c.state = 'excluded') AS excluded, "
+        "count(*) FILTER (WHERE c.state = 'compliant') AS compliant, "
+        "count(*) FILTER (WHERE c.state = 'non_compliant') AS non_compliant, "
+        "count(*) FILTER (WHERE c.state = 'unknown') AS unknown, "
+        "count(*) FILTER (WHERE c.state = 'stale') AS stale, "
+        "count(*) FILTER (WHERE c.state IS NULL) AS not_assessed "
+        "FROM inventory.asset_effective a "
+        "LEFT JOIN compliance.asset_compliance c ON c.asset_id = a.id "
+        f"WHERE {stats_where}",
+        **stats_params,
+    ) or {}
     return {
         "items": rows,
         "total": total["n"] if total else 0,
         "page": page,
         "page_size": page_size,
+        "stats": stats,
     }
 
 

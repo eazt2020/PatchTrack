@@ -30,6 +30,11 @@ start() {
   export PATCHTRACK_JWT_SECRET PATCHTRACK_SERVICE_TOKEN
   export PATCHTRACK_DATABASE_URL="$DB_URL"
   export PATCHTRACK_ENVIRONMENT=development
+  # This launcher serves plain HTTP and may be bound to a LAN address rather
+  # than loopback. The default 'auto' would mark the session cookie Secure and
+  # the browser would discard it after a correct sign-in. 'never' is refused
+  # outside development, which is the only environment this script starts.
+  export PATCHTRACK_SESSION_COOKIE_SECURE="${PATCHTRACK_SESSION_COOKIE_SECURE:-never}"
   export PATCHTRACK_LOG_LEVEL=INFO
   export PATCHTRACK_REPORT_DIR="$RUN/reports"
   export PATCHTRACK_SOLARIS_INBOX="$RUN/solaris-inbox"

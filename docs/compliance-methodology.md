@@ -176,6 +176,13 @@ set and the capture time.
 - Monthly and quarterly snapshots are captured on demand or by the reporting
   schedule, with `period_start` set to the first day of the period.
 - `compliance_pct` is computed at capture. It is never recomputed later.
+- Group rows are recorded for `os_family`, `os_version`, `environment`,
+  `business_group`, `application_group` and `severity`. The dashboard's
+  historical view reads the latest daily snapshot inside the chosen month,
+  quarter or year, so the figures it shows are exactly the captured ones. A
+  snapshot captured before a dimension was recorded (older deployments have no
+  `os_family` rows) leaves that panel empty and says so; the current inventory
+  is never used to fill the gap.
 
 ## 8. Reproducing a reported figure
 

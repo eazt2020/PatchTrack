@@ -49,7 +49,14 @@ First release.
 - **Dashboard.** A vanilla-ES-module SPA served by the gateway, plus a
   provisioned Grafana dashboard reading the same tables through a read-only
   role. The application works with Grafana stopped. The executive view offers a
-  monthly (12 points), quarterly (8) or yearly (5) basis derived from the
+  **Period** control that switches the tiles and breakdowns between the live
+  estate and any past month, quarter or year with a recorded snapshot. A
+  historical view is built from the latest immutable daily snapshot captured
+  inside that period, names the snapshot and the number of daily snapshots it
+  rests on, never re-evaluates today's estate under a past label, and refuses a
+  dimension filter (a snapshot stores group totals, not server rows). Empty
+  periods are not offered. The same view offers a monthly (12 points),
+  quarterly (8) or yearly (5) trend basis derived from the
   immutable daily snapshots — each point is the average of the snapshots in
   that calendar period, with the sample count shown — an optional
   auto-refresh (30 s, 1 min, 5 min; pauses while the tab is hidden or a dialog
@@ -67,9 +74,17 @@ First release.
   the term and a whitelisted sort key to the API, whose SQL matches the same
   set of columns, so the whole result set is filtered and ordered, not just the
   25 rows on screen.
+- **Audit retention.** The retention window is set in **Settings → Audit trail
+  retention** (30–36,500 days, default 2,555) and stored in
+  `shared.app_settings`, so a change needs no restart. A daily job deletes
+  events older than the cutoff through `shared.purge_audit_events()`; the
+  function enforces the range itself and takes no cutoff argument. Everything
+  else about the trail remains append-only, and both the setting change and
+  each purge are audited.
 - **Access control.** Four roles enforced by the backend on every route;
   Argon2id passwords; account lockout; HttpOnly session cookie; CSRF
-  double-submit; strict CSP; append-only audit trail.
+  double-submit; strict CSP; append-only audit trail with configurable
+  retention.
 
 ### Deployment
 
@@ -102,8 +117,9 @@ First release.
 | `009_placement_options` | Environment / business-service picker values, seeded from the values already present in the inventory |
 | `010_placement_aliases` | Previous names of a placement value, resolved on read by `inventory.asset_effective`, so a Settings rename reaches every reader and survives the next sync |
 | `011_placement_backfill` | Adds any in-use value an earlier rename left out of the list; invents nothing |
+| `012_audit_retention` | Configurable audit retention: the purge function, a retention-only exception in the immutability trigger, and an enforced 30–36,500 day range |
 
-Fresh installation: all twelve apply in order.
+Fresh installation: all thirteen apply in order.
 
 ### Fixes found and corrected during development
 

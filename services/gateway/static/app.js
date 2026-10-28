@@ -59,6 +59,10 @@ const state = {
     refreshSeconds: REFRESH_CHOICES.some(
       (c) => c.value === stored("patchtrack.refresh", "60"))
       ? stored("patchtrack.refresh", "60") : "60",
+    // "" means Live. Any other value is a period key ("2026-10", "2026-Q4",
+    // "2026") and is validated against the recorded snapshots on every render,
+    // so a key for a period that no longer exists falls back to Live.
+    period: stored("patchtrack.period", ""),
   },
   kiosk: stored("patchtrack.kiosk", "0") === "1",
 };
@@ -186,6 +190,11 @@ function filterBar(onChange, options = {}) {
       },
     }));
   }
+  if (options.note) {
+    bar.appendChild(h("span", {
+      class: "muted", style: { alignSelf: "center", fontSize: "12px" },
+    }, options.note));
+  }
   if (options.extra) bar.appendChild(options.extra);
   if (Object.values(state.filters).some(Boolean)) {
     bar.appendChild(h("button", {
@@ -208,18 +217,19 @@ function filterQuery() {
   return params.toString();
 }
 
-function segmented(label, choices, value, onChange) {
-  const group = h("div", { class: "segmented", role: "group", "aria-label": label });
-  for (const choice of choices) {
-    group.appendChild(h("button", {
-      type: "button",
-      class: choice.value === value ? "active" : "",
-      "aria-pressed": choice.value === value ? "true" : "false",
-      onclick: () => onChange(choice.value),
-    }, choice.label));
+/* Server-paged registers show 25 rows at a time. An export must cover every
+ * row the filters select, so this walks the pages with the largest page size
+ * the service allows and stops at the total it reports. */
+async function allPages(path, baseQuery) {
+  const query = new URLSearchParams(baseQuery);
+  query.set("page_size", "200");
+  const rows = [];
+  for (let page = 1; ; page += 1) {
+    query.set("page", String(page));
+    const data = await api(`${path}?${query.toString()}`);
+    rows.push(...(data.items || []));
+    if (!data.items?.length || rows.length >= (data.total || 0)) return rows;
   }
-  return h("div", { class: "field" },
-    h("span", { class: "field-label" }, label), group);
 }
 
 /* --------------------------------------------------------------- list tools */
@@ -317,6 +327,7 @@ function applyList(rows, st, facets, sorts) {
 
 function listPanel(key, {
   title, subtitle, columns, rows, empty = "No records found.",
+  exportable = true,
   searchLabel = "Search", searchPlaceholder = "Search every column…",
   facets = [], sorts = [], extra = null, note = null,
 }) {
@@ -383,7 +394,7 @@ function listPanel(key, {
     direction.textContent = st.dir === "asc" ? "↑ Ascending" : "↓ Descending";
     direction.setAttribute("aria-label",
       `Sort ${st.dir === "asc" ? "ascending" : "descending"}; click to reverse`);
-    body.replaceChildren(table(columns, shown, { compact: true, empty }));
+    body.replaceChildren(table(columns, shown, { compact: true, empty, export: exportable }));
     const noun = source.length === 1 ? "row" : "rows";
     count.textContent = shown.length === source.length
       ? `${fmtNumber(source.length)} ${noun}`
@@ -520,6 +531,59 @@ function freshnessLine(freshness) {
     `Patch data: ${fmtRelative(freshness?.patch_synced_at)}`);
 }
 
+/* The timeframe picker is the single control for both questions: which point
+ * in time the tiles describe, and how the trend is grouped. A recorded period
+ * implies its own granularity; Live has three explicit variants so the trend
+ * basis is never a hidden second setting. */
+const BASIS_BY_KIND = { month: "monthly", quarter: "quarterly", year: "yearly" };
+const PERIOD_GROUP_LABELS = {
+  month: "Recorded months", quarter: "Recorded quarters", year: "Recorded years",
+};
+
+function timeframeOptions(periods) {
+  return [
+    ...BASIS_CHOICES.map((choice) => ({
+      value: `live:${choice.value}`,
+      label: `Live · ${choice.label.toLowerCase()} trend`,
+    })),
+    ...periods.map((period) => ({
+      value: period.key,
+      label: period.label,
+      group: PERIOD_GROUP_LABELS[period.kind] || "Recorded periods",
+    })),
+  ];
+}
+
+/* A historical view is a frozen record, so the line above the tiles names the
+ * record rather than the age of the latest collection. */
+function periodLine(period) {
+  const samples = fmtNumber(period.samples);
+  return h("span", {},
+    `Period: ${period.label} · snapshot captured ${fmtDate(period.captured_at, true)} · `,
+    `${samples} daily snapshot${Number(period.samples) === 1 ? "" : "s"} in the period`);
+}
+
+function periodNote(period, dimensions) {
+  const hasOs = (dimensions || []).includes("os_family");
+  return card("About this period",
+    `${period.label} · snapshot ${String(period.snapshot_id).slice(0, 8)}`,
+    h("div", { class: "stack", style: { maxWidth: "860px" } },
+      h("p", { class: "muted" },
+        "These tiles are not today's estate: they are the immutable daily ",
+        "snapshot captured inside the period, shown as recorded. Historical ",
+        "figures are never recalculated after the fact."),
+      h("p", { class: "muted" },
+        "The trend chart averages every daily snapshot recorded in the period, ",
+        "while these tiles show the latest one; the two can therefore differ."),
+      h("p", { class: "muted" },
+        "Dimension filters apply to the live estate only, because a snapshot ",
+        "stores group totals rather than server rows. Choose Live to filter."),
+      hasOs ? null : h("p", { class: "muted" },
+        "This snapshot predates the operating-system family breakdown, so that ",
+        "panel has no recorded data. It is left empty rather than filled from ",
+        "the current inventory.")));
+}
+
 function kpiRow(summary) {
   const k = summary.kpis;
   const target = k.target_pct;
@@ -528,8 +592,10 @@ function kpiRow(summary) {
   return h("div", { class: "grid grid-kpi" },
     statTile({
       label: "Total servers (in scope)",
-      value: fmtNumber(k.total_servers),
-      sub: k.excluded ? `${fmtNumber(k.excluded)} excluded` : "",
+      value: fmtNumber(k.in_scope),
+      sub: k.excluded
+        ? `${fmtNumber(k.excluded)} excluded of ${fmtNumber(k.total_servers)}`
+        : "",
       foot: "Active lifecycle, in compliance scope",
       accent: "#3987e5",
     }),
@@ -622,15 +688,40 @@ async function renderDashboard({ silent = false } = {}) {
   // A timed refresh must not blank a working dashboard while it fetches: the
   // new content replaces the old one only after every request has succeeded.
   if (!silent) mount(view, spinnerRows(3));
-  const basis = state.dashboard.basis;
-  const points = BASIS_POINTS[basis];
-  const noun = BASIS_NOUNS[basis];
-  const [dims] = await Promise.all([loadDimensions(), api("me").then((me) => {
+  const [dims, periodData] = await Promise.all([loadDimensions(), api(
+    "compliance/snapshot-periods").catch(() => ({ periods: [] })), api("me").then((me) => {
     state.user = { ...state.user, ...me };
   })]);
-  const query = filterQuery();
+  // A stored period is only honoured while a snapshot still backs it; an
+  // unavailable key falls back to Live instead of rendering an empty screen.
+  const periods = periodData.periods || [];
+  let period = state.dashboard.period;
+  if (period && !periods.some((p) => p.key === period)) {
+    period = "";
+    state.dashboard.period = "";
+    remember("patchtrack.period", "");
+  }
+  // A recorded period dictates the trend granularity: a month view compares
+  // months, a quarter view compares quarters. Live keeps whichever basis the
+  // reader last chose for it.
+  const recordedPeriod = periods.find((p) => p.key === period);
+  const basis = recordedPeriod
+    ? (BASIS_BY_KIND[recordedPeriod.kind] || state.dashboard.basis)
+    : state.dashboard.basis;
+  const points = BASIS_POINTS[basis];
+  const noun = BASIS_NOUNS[basis];
+  const periodMode = Boolean(period);
+  if (periodMode) {
+    // Dimension filters are not applicable to a snapshot; clearing them here
+    // means switching back to Live cannot surprise the reader with a filter
+    // set they could not see.
+    for (const key of Object.keys(state.filters)) state.filters[key] = "";
+  }
+  const query = periodMode ? "" : filterQuery();
   const [summary, trend] = await Promise.all([
-    api(`compliance/summary${query ? `?${query}` : ""}`),
+    api(periodMode
+      ? `compliance/summary?period=${encodeURIComponent(period)}`
+      : `compliance/summary${query ? `?${query}` : ""}`),
     api(`compliance/trends?period=${basis}&points=${points}`),
   ]);
   const refreshSeconds = Number(state.dashboard.refreshSeconds) || 0;
@@ -639,7 +730,12 @@ async function renderDashboard({ silent = false } = {}) {
       REFRESH_CHOICES.find((c) => c.value === String(refreshSeconds))?.label || `${refreshSeconds}s`}`
     : `Updated ${new Date().toLocaleTimeString()} · auto-refresh off`;
   // freshnessLine builds a node, so it is mounted rather than stringified.
-  pageContext.replaceChildren(freshnessLine(summary.freshness));
+  // In period mode the provenance of the frozen snapshot replaces it: the age
+  // of today's collection is not evidence about a past month.
+  pageContext.replaceChildren(
+    periodMode && summary.period
+      ? periodLine(summary.period)
+      : freshnessLine(summary.freshness));
 
   // One point per month/quarter/year, each the average of the daily snapshots
   // recorded in that period. The API sends the sample count so the table can
@@ -708,28 +804,30 @@ async function renderDashboard({ silent = false } = {}) {
     { label: "Servers (avg)", numeric: true, render: (r) => fmtNumber(r.total) },
     { label: "Snapshots", numeric: true, render: (r) => fmtNumber(r.samples) },
   ], series.slice().reverse(), {
-    compact: true,
+    compact: true, export: false,
     empty: `No daily snapshots in the last ${points} ${noun}.`,
   });
 
-  const severityBody = h("div");
-  severityBars(severityBody,
-    (summary.severity || []).map((s) => ({ severity: s.severity, count: s.count })));
-
-  const recent = await api(
+  // The server list is a live view. In period mode it would contradict the
+  // snapshot above it, so it is not fetched or shown at all.
+  const recent = periodMode ? { items: [] } : await api(
     `compliance/servers?state=non_compliant&page_size=6${query ? `&${query}` : ""}`
   ).catch(() => ({ items: [] }));
+  // This panel now shares its row with the period table, so it shows the
+  // identifying and actionable columns only; address, OS and last-checked
+  // detail remain one click away through "View all".
   const recentTable = table([
     { label: "Hostname", render: (r) => h("a", {
       href: "#", onclick: (e) => { e.preventDefault(); openServer(r.id); },
     }, r.hostname) },
-    { label: "IP address", key: "ip_address", mono: true },
-    { label: "OS", render: (r) => `${r.os_name} ${r.os_version}`.trim() },
     { label: "Environment", key: "environment" },
     { label: "Business service", key: "business_group" },
     { label: "Missing patches", numeric: true, render: (r) => fmtNumber(r.total_patches) },
     { label: "Last checked", render: (r) => fmtDate(r.last_assessed_at, true) },
-  ], recent.items, { compact: true, empty: "No non-compliant servers match these filters." });
+  ], recent.items, {
+    compact: true, export: false,
+    empty: "No non-compliant servers match these filters.",
+  });
 
   const topBusiness = (summary.by_business_group || [])
     .slice()
@@ -742,13 +840,35 @@ async function renderDashboard({ silent = false } = {}) {
       render: (r) => h("span", { style: { color: "#ff9a9a" } }, fmtNumber(r.non_compliant)) },
     { label: "%", numeric: true,
       render: (r) => (r.in_scope ? fmtPct((r.non_compliant / r.in_scope) * 100) : "—") },
-  ], topBusiness, { compact: true });
+  ], topBusiness, { compact: true, export: false });
 
   const controls = h("div", { class: "dashboard-controls" },
-    segmented("Basis", BASIS_CHOICES, basis, (value) => {
-      state.dashboard.basis = value;
-      remember("patchtrack.basis", value);
-      renderDashboard();
+    select({
+      label: "Timeframe",
+      value: period || `live:${basis}`,
+      options: timeframeOptions(periods),
+      allLabel: null,
+      onChange: (value) => {
+        if (value.startsWith("live:")) {
+          state.dashboard.period = "";
+          state.dashboard.basis = value.slice("live:".length);
+          remember("patchtrack.period", "");
+          remember("patchtrack.basis", state.dashboard.basis);
+        } else {
+          const chosen = periods.find((p) => p.key === value);
+          state.dashboard.period = value;
+          if (chosen) {
+            state.dashboard.basis = BASIS_BY_KIND[chosen.kind] || state.dashboard.basis;
+            remember("patchtrack.basis", state.dashboard.basis);
+          }
+          remember("patchtrack.period", value);
+          // A snapshot has no server rows, so a dimension filter cannot be
+          // carried into a historical view. Clear it here rather than leaving
+          // an invisible filter behind for the next return to Live.
+          for (const key of Object.keys(state.filters)) state.filters[key] = "";
+        }
+        renderDashboard();
+      },
     }),
     select({
       label: "Auto-refresh",
@@ -768,12 +888,32 @@ async function renderDashboard({ silent = false } = {}) {
     yearly: "Yearly compliance",
   }[basis];
 
+  // A snapshot has no server rows to drill into, so the live list is replaced
+  // by a note that says what the reader is looking at and what is unavailable.
+  const bottomRow = periodMode
+    ? periodNote(summary.period, summary.dimensions)
+    : card("Recent non-compliant servers", "Highest outstanding patch counts",
+        recentTable,
+        h("a", { class: "card-link", href: "#/servers" }, "View all →"));
+
   mount(view,
-    filterBar(renderDashboard, { extra: controls }),
+    filterBar(renderDashboard, {
+      extra: controls,
+      note: periodMode
+        ? "Historical snapshot — dimension filters apply to Live only"
+        : "",
+      skip: periodMode
+        ? ["environment", "business_group", "application_group", "os_family",
+           "patch_source"]
+        : [],
+    }),
     h("div", { class: "stack", style: { marginTop: "14px" } },
       kpiRow(summary),
       h("div", { class: "grid grid-3" },
-        statusChartCard("Compliance by operating system", "Server counts by OS family",
+        statusChartCard("Compliance by operating system",
+          periodMode && !(summary.by_os || []).length
+            ? "Not recorded on this snapshot"
+            : "Server counts by OS family",
           (summary.by_os || []).map((row) => ({
             ...row, group: OS_FAMILY_LABELS[row.group] || row.group,
           }))),
@@ -781,26 +921,27 @@ async function renderDashboard({ silent = false } = {}) {
           summary.by_environment || []),
         statusChartCard("Compliance by business service", "Server counts by business service",
           summary.by_business_group || [], "rows")),
-      h("div", { class: "grid grid-2-1" },
-        card("Patch status distribution", `${fmtNumber(summary.kpis.total_servers)} servers in population`,
-          h("div", { class: "row", style: { justifyContent: "center", gap: "26px" } },
-            donutBody, donutLegend)),
-        card("Outstanding remediation", "Findings by severity",
-          severityBody)),
-      h("div", { class: "grid grid-2" },
+      h("div", { class: "grid grid-3" },
+        card("Patch status distribution",
+          `${fmtNumber(summary.kpis.in_scope)} servers judged${
+            summary.kpis.excluded ? ` · ${fmtNumber(summary.kpis.excluded)} excluded` : ""}`,
+          h("div", {
+            class: "row",
+            style: { justifyContent: "center", gap: "18px", flexWrap: "wrap" },
+          }, donutBody, donutLegend)),
         card(periodTitle,
           `Last ${points} ${noun} · average of daily snapshots · target ${
             fmtPct(summary.kpis.target_pct, 0)}`,
           trendBody),
+        card("Top non-compliance by business service",
+          periodMode ? `As recorded in ${summary.period.label}`
+            : "Largest gaps by count",
+          topTable)),
+      h("div", { class: "grid grid-2" },
         card("Period summary",
           `Same observations as the chart · change is against the previous ${basis.slice(0, -2)}`,
-          periodTable)),
-      h("div", { class: "grid grid-2-1" },
-        card("Recent non-compliant servers", "Highest outstanding patch counts",
-          recentTable,
-          h("a", { class: "card-link", href: "#/servers" }, "View all →")),
-        card("Top non-compliance by business service", "Largest gaps by count",
-          topTable)),
+          periodTable),
+        bottomRow),
     ));
   startDashboardRefresh(refreshSeconds);
 }
@@ -883,7 +1024,10 @@ async function renderServers(params) {
     { label: "Critical", numeric: true, render: (r) => fmtNumber(r.critical_count) },
     { label: "Patches", numeric: true, render: (r) => fmtNumber(r.total_patches) },
     { label: "Last assessed", render: (r) => fmtDate(r.last_assessed_at, true) },
-  ], data.items, { compact: true });
+  ], data.items, {
+    compact: true,
+    exportRows: () => allPages("compliance/servers", query),
+  });
 
   const stateBar = h("div", { class: "row", style: { marginBottom: "12px" } },
     ...[
@@ -1282,6 +1426,67 @@ async function renderTrends() {
 }
 
 /* ------------------------------------------------------------------ inventory */
+/* Inventory-wide totals for the register on screen. They follow the same
+ * filters as the list (so a narrowed register reports on what is selected),
+ * but the Status filter is excluded upstream: selecting "Non-compliant" must
+ * not make the Compliant tile read zero. */
+function inventoryStatsPanel(stats) {
+  const total = stats?.total || 0;
+  const excluded = stats?.excluded || 0;
+  const population = Math.max(0, total - excluded);
+  const compliant = stats?.compliant || 0;
+  const nonCompliant = stats?.non_compliant || 0;
+  const unknown = stats?.unknown || 0;
+  const stale = stats?.stale || 0;
+  const notAssessed = stats?.not_assessed || 0;
+  const noData = unknown + stale + notAssessed;
+  const pct = (value) => (population ? fmtPct((value / population) * 100) : null);
+  const unknownParts = [
+    unknown ? `${fmtNumber(unknown)} unknown` : "",
+    stale ? `${fmtNumber(stale)} stale` : "",
+    notAssessed ? `${fmtNumber(notAssessed)} not assessed` : "",
+  ].filter(Boolean);
+  return h("div", { class: "grid grid-4" },
+    statTile({
+      label: "Total assets",
+      value: fmtNumber(total),
+      sub: excluded
+        ? `${fmtNumber(excluded)} excluded of ${fmtNumber(total)}` : "",
+      foot: "Every synced asset, in and out of compliance scope",
+      accent: "#3987e5",
+    }),
+    statTile({
+      label: "Compliant",
+      value: fmtNumber(compliant),
+      sub: pct(compliant),
+      delta: pct(compliant),
+      tone: "good",
+      meter: population ? (compliant / population) * 100 : 0,
+      accent: STATUS.compliant,
+      foot: "No outstanding blocking findings",
+    }),
+    statTile({
+      label: "Non-compliant",
+      value: fmtNumber(nonCompliant),
+      delta: pct(nonCompliant),
+      tone: "bad",
+      meter: population ? (nonCompliant / population) * 100 : 0,
+      accent: STATUS.non_compliant,
+      foot: "Blocking findings outstanding",
+    }),
+    statTile({
+      label: "Unknown / no data",
+      value: fmtNumber(noData),
+      sub: unknownParts.join(" · "),
+      delta: pct(noData),
+      tone: "neutral",
+      meter: population ? (noData / population) * 100 : 0,
+      accent: STATUS.unknown,
+      foot: "Never counted as compliant",
+    }),
+  );
+}
+
 async function renderInventory(params) {
   const token = renderToken;
   mount(view, spinnerRows(3));
@@ -1365,6 +1570,7 @@ async function renderInventory(params) {
           h("span", { class: "field-label" }, "Order"), directionButton)),
     }),
     h("div", { class: "stack", style: { marginTop: "14px" } },
+      inventoryStatsPanel(data.stats),
       card("Authoritative inventory", "Synchronised from ManagedEngine AssetExplorer",
         table([
           { label: "Hostname", render: (r) => h("a", {
@@ -1380,14 +1586,17 @@ async function renderInventory(params) {
           { label: "Status", render: (r) => statePill(r.compliance_state) },
           { label: "Inventory sync", render: (r) => fmtRelative(r.last_synced_at) },
           can("inventory:manage") ? {
-            label: "Placement",
+            label: "Placement", export: false,
             render: (r) => h("button", {
               class: "btn btn-sm",
               title: "Override the environment or business service locally",
               onclick: () => editPlacement(r),
             }, "Edit"),
           } : null,
-        ].filter(Boolean), data.items, { compact: true }),
+        ].filter(Boolean), data.items, {
+          compact: true,
+          exportRows: () => allPages("inventory/assets", query),
+        }),
         h("div", { class: "pagination" },
           h("button", {
             class: "btn btn-sm", disabled: page <= 1,
@@ -1534,6 +1743,7 @@ async function renderReports() {
   const history = listPanel("reports", {
     title: "Report history",
     subtitle: `${fmtNumber(reports.total)} reports retained`,
+    exportable: false,
     columns: [
       { label: "Requested", render: (r) => fmtDate(r.requested_at, true) },
       { label: "Type", render: (r) => r.report_type.replaceAll("_", " ") },
@@ -1549,7 +1759,7 @@ async function renderReports() {
         : h("span", { class: "muted" }, "—")) },
       { label: "Requested by", key: "requested_by" },
       {
-        label: "",
+        label: "", export: false,
         render: (r) => (r.status === "completed" && r.download_available
           ? h("button", {
             class: "btn btn-sm",
@@ -1605,7 +1815,7 @@ async function renderSchedules() {
       { label: "Enabled", render: (r) => pill(r.enabled ? "success" : "unknown", r.enabled ? "enabled" : "disabled") },
       { label: "Next run", render: (r) => fmtDate(r.next_run_at, true) },
       { label: "Last result", render: (r) => (r.last_run_status ? pill(r.last_run_status, r.last_run_status) : "—") },
-      { label: "", render: (r) => (manage ? h("div", { class: "row" },
+      { label: "", export: false, render: (r) => (manage ? h("div", { class: "row" },
         h("button", {
           class: "btn btn-sm",
           onclick: async () => {
@@ -1854,7 +2064,7 @@ async function renderPolicies() {
       { label: "Target", render: (r) => fmtPct(r.definition?.target_pct) },
       { label: "Active", render: (r) => (r.is_active ? pill("success", "active") : "—") },
       { label: "Effective", render: (r) => fmtDate(r.effective_from, true) },
-      { label: "", render: (r) => (can("policies:manage") && !r.is_active
+      { label: "", export: false, render: (r) => (can("policies:manage") && !r.is_active
         ? h("button", {
           class: "btn btn-sm",
           onclick: async () => {
@@ -1933,7 +2143,7 @@ async function renderUsers() {
     { label: "Role", render: (r) => h("span", { class: "badge-role" }, r.role.replaceAll("_", " ")) },
     { label: "Status", render: (r) => pill(r.is_active ? "success" : "unknown", r.is_active ? "active" : "disabled") },
     { label: "Last sign-in", render: (r) => fmtDate(r.last_login_at, true) },
-    { label: "", render: (r) => h("div", { class: "row" },
+    { label: "", export: false, render: (r) => h("div", { class: "row" },
       h("button", { class: "btn btn-sm", onclick: () => editUser(r, roleNames) }, "Edit"),
       h("button", {
         class: "btn btn-sm",
@@ -2101,7 +2311,7 @@ async function renderHealth() {
         { name: "gateway", status: gateway.status || "unknown" },
         ...serviceRows,
         { name: "grafana (optional)", status: "separate" },
-      ], { compact: true })),
+      ], { compact: true, export: false })),
     card("Data freshness", "Inventory and patch collection are tracked separately",
       h("dl", { class: "kv" },
         h("dt", {}, "Inventory synchronised"), h("dd", {}, fmtDate(summary?.freshness?.inventory_synced_at, true)),
@@ -2114,7 +2324,7 @@ async function renderHealth() {
       { label: "Health", render: (r) => pill(r.health, r.health.replaceAll("_", " ")) },
       { label: "Last success", render: (r) => fmtDate(r.last_success_at, true) },
       { label: "Last status", render: (r) => (r.last_run ? pill(r.last_run.status, r.last_run.status) : "—") },
-    ], integrations, { compact: true })),
+    ], integrations, { compact: true, export: false })),
     card("Recent collection runs", "Operational history", table([
       { label: "Started", render: (r) => fmtDate(r.started_at, true) },
       { label: "Integration", key: "integration_key" },
@@ -2122,7 +2332,7 @@ async function renderHealth() {
       { label: "Seen", numeric: true, key: "records_seen" },
       { label: "Rejected", numeric: true, key: "records_rejected" },
       { label: "Error", render: (r) => r.error_summary || "—" },
-    ], runs, { compact: true }))));
+    ], runs, { compact: true, export: false }))));
 }
 
 /* ------------------------------------------------------------------ settings */
@@ -2228,7 +2438,7 @@ function placementOptionSection(kind, label, items) {
         { label: "Value", key: "value" },
         { label: "In use", numeric: true, render: (r) => (r.in_use
           ? `${r.in_use} server${r.in_use === 1 ? "" : "s"}` : "—") },
-        { label: "", render: (r) => h("div", { class: "row" },
+        { label: "", export: false, render: (r) => h("div", { class: "row" },
           h("button", {
             class: "btn btn-sm",
             onclick: () => renamePlacementOption(r, label),
@@ -2241,7 +2451,7 @@ function placementOptionSection(kind, label, items) {
               : null,
             onclick: () => removePlacementOption(r, label),
           }, "Delete")) },
-      ], items, { compact: true })
+      ], items, { compact: true, export: false })
       : h("p", { class: "muted small" },
         `No ${label} values configured yet. Until one is added, the placement `
         + "editor offers free text."),
@@ -2255,11 +2465,26 @@ async function renderSettings() {
   mount(view, spinnerRows(3));
   const orgInput = h("input", { id: "org-name", type: "text", placeholder: "Organisation name" });
   const orgStatus = h("div");
+  const retentionInput = h("input", {
+    id: "audit-retention-days",
+    type: "number", min: "30", max: "36500", step: "1",
+  });
+  const retentionStatus = h("div", { class: "muted small" });
   let placement = { environments: [], business_groups: [] };
   try {
     const value = await api("inventory/settings/organization");
     orgInput.value = value?.name || "";
   } catch { /* not configured yet */ }
+  try {
+    const value = await api("identity/settings/audit-retention");
+    retentionInput.min = String(value.min_days);
+    retentionInput.max = String(value.max_days);
+    retentionInput.value = String(value.days);
+    const seen = value.oldest
+      ? `${value.events.toLocaleString()} events, oldest ${new Date(value.oldest).toLocaleString()}`
+      : "No events recorded yet";
+    retentionStatus.textContent = `${seen}. Applied by the daily maintenance job.`;
+  } catch { /* the server default still applies */ }
   try {
     placement = await api("inventory/settings/placement");
   } catch { /* the free-text fallback in the editor still works */ }
@@ -2287,6 +2512,32 @@ async function renderSettings() {
   mount(view, h("div", { class: "stack" },
     flash,
     card("Report branding", "Used in PDF headers and footers", form),
+    card("Audit trail retention",
+      "How long audit events are kept before the maintenance job deletes them. "
+      + "The trail is append-only otherwise: no screen or API can edit or "
+      + "remove an individual event, and a change to this setting is itself "
+      + "audited.",
+      h("div", { class: "stack" },
+        h("div", { class: "row", style: { alignItems: "flex-end" } },
+          h("div", { class: "field", style: { minWidth: "220px" } },
+            h("label", { for: "audit-retention-days" }, "Retention (days)"),
+            retentionInput),
+          h("button", {
+            class: "btn btn-primary",
+            onclick: async () => {
+              retentionStatus.replaceChildren();
+              try {
+                const value = await api("identity/settings/audit-retention", {
+                  method: "PUT", body: { days: Number(retentionInput.value) },
+                });
+                retentionStatus.appendChild(alert("ok",
+                  `Saved — events older than ${value.days} days will be removed.`));
+              } catch (error) {
+                retentionStatus.appendChild(alert("error", error.message));
+              }
+            },
+          }, "Save")),
+        retentionStatus)),
     card("Inventory placement values",
       "The picker offered when an operator corrects environment or business "
       + "service, and the names shown across inventory, compliance, reports and "

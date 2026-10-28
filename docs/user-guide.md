@@ -57,24 +57,53 @@ perfect one.
   placement correction moves the server into its new group on the next render.
   Every group is listed; a long list scrolls rather than hiding the tail.
 - **Patch status distribution** — donut of the four states.
-- **Compliance trend** — the recorded percentage over the chosen basis
-  (monthly, quarterly or yearly), from immutable daily snapshots, with the
-  target line. Monthly is drawn as a line; quarterly and yearly as bars, one
-  bar per period.
+- **Compliance trend** — the recorded percentage over the granularity selected
+  in the Timeframe control (monthly, quarterly or yearly), from immutable daily
+  snapshots, with the target line. Monthly is drawn as a line; quarterly and
+  yearly as bars, one bar per period.
 - **Period summary** — the same observations as a table: compliance, target,
   the change against the previous period, the average server count, and the
   number of daily snapshots the period rests on.
-- **Outstanding findings by severity** — patch counts, which are separate from
-  the server percentage and never combined with it.
 
-**Basis, auto-refresh and wall displays.** The controls to the right of the
-filter bar set how the trend is grouped and how often the page reloads itself:
+Patch counts by severity are on **Compliance → Remediation**. They are separate
+from the server percentage and never combined with it, so the executive view
+keeps the two figures apart rather than blending them into one score.
+
+**Timeframe, auto-refresh and wall displays.** The controls to the right of the
+filter bar choose which point in time the tiles describe, how the trend is
+grouped, and how often the page reloads itself:
 
 | Control | Values | Notes |
 |---------|--------|-------|
-| Basis | Monthly (12 points), Quarterly (8), Yearly (5) | Each point is the average of the daily snapshots recorded in that calendar period. The snapshot count is shown, so a period with little data is visible as such. |
+| Timeframe | Live · monthly trend (12 points), Live · quarterly trend (8), Live · yearly trend (5), then every month, quarter and year with a recorded snapshot in its own group; the picker reaches back five years (60 months, 20 quarters, 5 years) | The single control answers both questions. A Live choice shows today's estate and groups the trend by the granularity named in the option. A recorded month, quarter or year shows the tiles and breakdowns as they were recorded in that period — the latest daily snapshot captured inside it — and groups the trend by that period's own kind (month → monthly, quarter → quarterly, year → yearly). |
 | Auto-refresh | Off, 30 seconds, 1 minute, 5 minutes | Reloads the tiles and charts in place. It pauses while the browser tab is hidden and while a dialog is open, and resumes on the next tick. |
 | TV mode | on / off | Hides the left navigation and lets the content use the whole screen. |
+
+**Historical periods.** Choosing a month, quarter or year replaces the
+freshness line with the provenance of the snapshot it is showing — for example
+"Period: October 2026 · snapshot captured 27 Oct 2026 06:00 · 27 daily snapshots
+in the period". The tiles, composition panels, donut and severity bars are the
+recorded figures, not a recalculation of today's estate, so a past month stays
+the same on every visit. The line above the tiles always names the period and
+the number of snapshots behind it.
+
+Two parts of the screen change in a historical view:
+
+- **Filters are hidden.** A snapshot stores group totals, not server rows, so
+  an environment or business-service filter cannot be applied to it honestly.
+  The API refuses such a combination; choose a **Live** timeframe to filter.
+- **Recent non-compliant servers is replaced** by a note explaining the
+  snapshot, because that list is live and would contradict the frozen tiles
+  above it. The business-service table remains, drawn from the snapshot.
+
+A period appears in the list only after a daily snapshot exists inside it. The
+trend and period-summary table under the tiles are not limited to the selected
+period: they show the whole window for that granularity (12 months, 8 quarters
+or 5 years), so the selected period can be read in context. Choosing a recorded
+period also sets that granularity — Q3 2026 shows the quarterly trend and
+summary. Their figure for a period is the **average of every daily snapshot**
+in it, while the tiles show the latest one, so the two can differ; the note
+beside the tiles states which snapshot they came from.
 
 The choices are remembered per browser, so a wall display keeps them after a
 reload. TV mode is presentation only: it does not change what your role may
@@ -94,7 +123,10 @@ past, not the present.
 
 ## 3. Filters
 
-The filter bar applies to the dashboard, the server list and the findings view:
+The filter bar applies to the dashboard, the server list and the findings view.
+It is a live-estate control: when the dashboard's **Period** is a past month,
+quarter or year, the filter fields are hidden and cleared, because a snapshot
+holds group totals rather than server rows.
 
 | Filter | Values come from |
 |--------|------------------|
@@ -139,6 +171,14 @@ above the table:
   on Non-compliant servers — a filter is always the unambiguous way to ask.
 - The search box keeps the **text and caret** while the paged lists re-fetch, so
   you can keep typing without clicking back into it after each pause.
+- Register tables have an **Export CSV** button above them. It downloads the
+  list as currently filtered and sorted — not merely the rows visible on screen:
+  the paged registers fetch every matching page before writing the file. The
+  file is named after the screen and today's date, uses the same visible values
+  as the table (formatted dates, state labels), omits action-only columns, and
+  is UTF-8 with a BOM so Excel opens it cleanly. The Executive dashboard,
+  Operational health, Settings and Reports do not offer the button: those
+  tables are presentation or operational views rather than registers.
 
 ## 4. Non-compliant servers
 
@@ -305,7 +345,7 @@ day of the month (1–28), an hour, a timezone and a recipient list.
 | Users & roles | Administrator | Accounts, roles, password resets |
 | Audit trail | Administrator | Who did what, when |
 | Operational health | Operations | Integration status and manual collection |
-| Settings | Administrator | Organisation name on reports; environment and business-service lists |
+| Settings | Administrator | Organisation name on reports; environment and business-service lists; audit trail retention |
 
 ### Editing policy
 
@@ -356,6 +396,25 @@ is refused. Both would make one spelling mean two things.
 The list starts as the distinct values already present in the inventory, and
 the AssetExplorer sync never writes to it. If a list is emptied, the placement
 editor falls back to free text rather than blocking the correction.
+
+### Configuring audit trail retention
+
+**Settings → Audit trail retention** sets how many days of audit events are
+kept. The default is 2,555 days (about seven years); the accepted range is 30
+to 36,500 days. The card shows how many events are stored and the date of the
+oldest one.
+
+The change is saved in the database and needs no restart. A daily maintenance
+job deletes events older than the window; it never touches a newer event, and
+the deletion itself is recorded in the trail as `audit.purged`. Apart from
+that job the trail is append-only — there is no screen or API that edits or
+deletes a single event. Every change to the window is audited as
+`settings.updated`, so shortening retention cannot erase the record of who
+shortened it.
+
+Choose a window that matches your organisation's record-keeping obligation.
+Shortening it permanently removes older evidence on the next run; lengthening
+it cannot bring deleted events back.
 
 ## 11. Understanding the numbers
 

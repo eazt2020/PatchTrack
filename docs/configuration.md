@@ -61,6 +61,23 @@ services.
 | `PATCHTRACK_SMTP_STARTTLS` | `true` | Do not turn off; install the relay CA instead |
 | `PATCHTRACK_SMTP_SENDER` | `patchtrack@localhost` | Must be accepted by your relay |
 
+### Dynamic settings (database, no restart)
+
+These are edited in the UI (**Settings**) by an administrator and read by the
+services from `shared.app_settings`, so a change takes effect without
+restarting anything.
+
+| Setting | Default | Notes |
+|---------|---------|-------|
+| Organisation name | empty | PDF report branding |
+| Environment and business-service lists | empty (free text) | Placement editor vocabulary and display names |
+| Audit trail retention | 2555 days | Events older than the window are deleted by the daily job; range 30–36,500 days |
+
+Audit retention is applied by `POST /jobs/audit-purge` on the identity service
+(the hourly tick script runs it once a day). The trail is otherwise
+append-only: the API can set the window, but there is no route that edits or
+deletes an individual event. Changing the window is itself audited.
+
 ## 5. Collection
 
 | Variable | Default | Notes |

@@ -7,7 +7,7 @@ snapshots, remediation visibility and Solaris ingestion.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
@@ -24,7 +24,10 @@ from .engine import (
     aggregate,
     evaluate_asset,
     group_breakdown,
+    parse_period_key,
     period_bounds,
+    period_key,
+    period_label,
     severity_breakdown,
 )
 from .evaluator import (
@@ -107,12 +110,31 @@ def summary(
     application_group: str | None = None,
     patch_source: str | None = None,
     refresh: bool = False,
+    period: str | None = None,
 ) -> dict[str, Any]:
+    """The executive view, live or for one past calendar period.
+
+    With ``period`` the response is built from the immutable daily snapshot
+    captured inside that month, quarter or year — never from a re-evaluation of
+    today's estate wearing a past label. A snapshot stores group totals, not
+    server rows, so a dimension filter cannot be applied to it; asking for both
+    is refused rather than silently ignored.
+    """
     filters = FilterParams(
         os_family=os_family, os_version=os_version, environment=environment,
         business_group=business_group, application_group=application_group,
         patch_source=patch_source,
     ).applied()
+    if period is not None:
+        if filters:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "A historical period cannot be combined with dimension "
+                    "filters; clear the filters or choose Live"
+                ),
+            )
+        return _period_summary(period)
     if refresh:
         refresh_compliance()
     assets, evaluations, policy, version_id = evaluate_all()
@@ -121,6 +143,8 @@ def summary(
     freshness = _freshness()
     return {
         "generated_at": datetime.now(UTC).isoformat(),
+        "mode": "live",
+        "period": None,
         "filters": filters,
         "policy": {
             "name": policy.get("name"),
@@ -146,6 +170,202 @@ def summary(
         ),
         "severity": severity_breakdown(list(selected.values())),
     }
+
+
+def _snapshot_group_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Shape snapshot group rows the way the live summary shapes its panels.
+
+    ``snapshot_groups`` has no ``excluded`` column: group rows already carry
+    the four judged states, so the in-scope denominator is their sum. Nothing
+    is inferred beyond that.
+    """
+    shaped = []
+    for row in rows:
+        in_scope = (
+            row["compliant"] + row["non_compliant"]
+            + row["unknown"] + row["stale"]
+        )
+        shaped.append({
+            "group": row["group_key"],
+            "total_servers": row["total_servers"],
+            "compliant": row["compliant"],
+            "non_compliant": row["non_compliant"],
+            "unknown": row["unknown"],
+            "stale": row["stale"],
+            "in_scope": in_scope,
+            "total_findings": row["finding_count"],
+        })
+    shaped.sort(key=lambda r: (-r["total_servers"], r["group"]))
+    return shaped
+
+
+def _period_summary(value: str) -> dict[str, Any]:
+    """The executive view as it was recorded in one calendar period.
+
+    One immutable daily snapshot is used: the latest captured inside the
+    period. Its identity travels with the response so a reader can open the
+    snapshot ledger and see exactly which record the panels came from. Panels
+    whose dimension was not recorded on that snapshot (older snapshots have no
+    ``os_family`` rows) come back empty and are listed in ``dimensions``; they
+    are never guessed from the current estate.
+    """
+    try:
+        kind, start, end = parse_period_key(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    label = period_label(kind, start)
+    window = {"start": start, "end": end + timedelta(days=1)}
+    snapshot = fetch_one(
+        """
+        SELECT * FROM compliance.snapshots
+        WHERE scope = 'daily' AND period_start >= :start AND period_start < :end
+        ORDER BY period_start DESC, captured_at DESC LIMIT 1
+        """,
+        **window,
+    )
+    if snapshot is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No daily snapshot was recorded in {label}",
+        )
+    sample = fetch_one(
+        """
+        SELECT count(*)::int AS samples FROM compliance.snapshots
+        WHERE scope = 'daily' AND period_start >= :start AND period_start < :end
+        """,
+        **window,
+    )
+    groups = fetch_all(
+        """
+        SELECT dimension, group_key, total_servers, compliant, non_compliant,
+               unknown, stale, finding_count
+        FROM compliance.snapshot_groups
+        WHERE snapshot_id = :id ORDER BY dimension, total_servers DESC
+        """,
+        id=snapshot["id"],
+    )
+    by_dimension: dict[str, list[dict[str, Any]]] = {}
+    for group in groups:
+        by_dimension.setdefault(group["dimension"], []).append(group)
+
+    def panel(dimension: str) -> list[dict[str, Any]]:
+        return _snapshot_group_rows(by_dimension.get(dimension, []))
+
+    severity_order = ("critical", "important", "moderate", "low", "unknown")
+    severity = [
+        {"severity": group["group_key"], "count": group["finding_count"]}
+        for group in sorted(
+            by_dimension.get("severity", []),
+            key=lambda g: severity_order.index(g["group_key"])
+            if g["group_key"] in severity_order else len(severity_order),
+        )
+    ]
+
+    total = snapshot["total_servers"] or 0
+    excluded = snapshot["excluded_servers"] or 0
+    compliance_pct = snapshot["compliance_pct"]
+    target_pct = snapshot["target_pct"]
+    compliance_pct = float(compliance_pct) if compliance_pct is not None else None
+    target_pct = float(target_pct) if target_pct is not None else None
+    in_scope = total - excluded
+    gap_pct = (
+        round(compliance_pct - target_pct, 2)
+        if compliance_pct is not None and target_pct is not None else None
+    )
+    methodology = snapshot["methodology"] or {}
+    if not isinstance(methodology, dict):
+        methodology = {}
+
+    return {
+        "generated_at": datetime.now(UTC).isoformat(),
+        "mode": "period",
+        "filters": {},
+        "policy": {
+            "name": methodology.get("policy_name"),
+            "version_id": snapshot["policy_version_id"],
+            "target_pct": target_pct,
+            "quarterly_target_pct": methodology.get("quarterly_target_pct"),
+            "freshness_hours": methodology.get("freshness_hours"),
+        },
+        "kpis": {
+            "total_servers": total,
+            "compliant": snapshot["compliant_servers"],
+            "non_compliant": snapshot["non_compliant_servers"],
+            "unknown": snapshot["unknown_servers"],
+            "stale": snapshot["stale_servers"],
+            "excluded": excluded,
+            "in_scope": in_scope,
+            "compliance_pct": compliance_pct,
+            "target_pct": target_pct,
+            "gap_pct": gap_pct,
+            "critical_findings": snapshot["critical_findings"],
+            "total_findings": snapshot["total_findings"],
+        },
+        # The freshness of today's collection says nothing about a frozen
+        # period, so it is not attached to this response.
+        "freshness": None,
+        "period": {
+            "key": value,
+            "kind": kind,
+            "label": label,
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "snapshot_id": str(snapshot["id"]),
+            "scope": snapshot["scope"],
+            "captured_at": snapshot["captured_at"],
+            "samples": sample["samples"] if sample else 1,
+            "policy_version_id": snapshot["policy_version_id"],
+        },
+        "by_os": panel("os_family"),
+        "by_environment": panel("environment"),
+        "by_business_group": panel("business_group"),
+        "by_application_group": panel("application_group"),
+        "severity": severity,
+        "dimensions": sorted(by_dimension),
+    }
+
+
+@app.get("/snapshot-periods")
+def snapshot_periods(
+    _: Annotated[Principal, Depends(require_permission("dashboard:view"))],
+) -> dict[str, Any]:
+    """The periods a reader can choose, newest first, from recorded snapshots.
+
+    Only periods with at least one daily snapshot appear: an empty month is
+    not offered, so selecting one cannot produce a misleading blank dashboard.
+    """
+    # Five years of history is the documented retention window for the
+    # dashboard, so the picker must reach back that far for months and
+    # quarters too; stopping at two years made older recorded periods
+    # unreachable even though the trend still averaged them.
+    limits = {"month": 60, "quarter": 20, "year": 5}
+    periods: list[dict[str, Any]] = []
+    for kind in ("month", "quarter", "year"):
+        rows = fetch_all(
+            """
+            SELECT date_trunc(:unit, period_start)::date AS period_start,
+                   count(*)::int AS samples,
+                   max(captured_at) AS as_of
+            FROM compliance.snapshots
+            WHERE scope = 'daily'
+            GROUP BY 1 ORDER BY 1 DESC LIMIT :limit
+            """,
+            unit=kind, limit=limits[kind],
+        )
+        for row in rows:
+            start = row["period_start"]
+            key = period_key(kind, start)
+            _, _, end = parse_period_key(key)
+            periods.append({
+                "kind": kind,
+                "key": key,
+                "label": period_label(kind, start),
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "samples": row["samples"],
+                "as_of": row["as_of"],
+            })
+    return {"periods": periods}
 
 
 def _freshness() -> dict[str, Any]:

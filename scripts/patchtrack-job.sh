@@ -12,6 +12,7 @@
 #   scripts/patchtrack-job.sh daily
 #   scripts/patchtrack-job.sh tick
 #   scripts/patchtrack-job.sh purge
+#   scripts/patchtrack-job.sh audit-purge
 #
 # Two deployments are supported, selected per request:
 #
@@ -192,8 +193,9 @@ case "$ACTION" in
   daily)  post compliance /jobs/daily ;;
   tick)   post reporting  /jobs/tick ;;
   purge)  post reporting  /jobs/purge ;;
+  audit-purge) post identity /jobs/audit-purge ;;
   *)
-    echo "usage: $0 sync <integration> | daily | tick | purge" >&2
+    echo "usage: $0 sync <integration> | daily | tick | purge | audit-purge" >&2
     exit 2
     ;;
 esac

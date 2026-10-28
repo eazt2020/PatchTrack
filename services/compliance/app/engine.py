@@ -22,8 +22,10 @@ never combined into one ambiguous figure.
 
 from __future__ import annotations
 
+import calendar
+import re
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 DEFAULT_POLICY: dict[str, Any] = {
@@ -293,6 +295,73 @@ def period_bounds(
         else datetime(start.year, start.month + 1, 1, tzinfo=UTC)
     )
     return start, end
+
+
+# A dashboard period key names one calendar month, quarter or year. The key is
+# what the API and the browser store: it is unambiguous, stable and readable in
+# a URL, unlike a pair of dates that could be typed inconsistently.
+PERIOD_KEY_PATTERN = re.compile(
+    r"^(?P<year>\d{4})(?:-(?P<month>\d{2})|-Q(?P<quarter>[1-4]))?$"
+)
+
+
+def parse_period_key(value: str) -> tuple[str, date, date]:
+    """Resolve a period key to (kind, first day, last day), both inclusive.
+
+    Accepted forms are ``2026-10`` (month), ``2026-Q4`` (quarter) and ``2026``
+    (year). Anything else is rejected rather than guessed at: a dashboard that
+    silently interpreted ``2026-10`` as a quarter would report the wrong
+    period.
+    """
+    match = PERIOD_KEY_PATTERN.match((value or "").strip())
+    if match is None:
+        raise ValueError("period must look like 2026-10, 2026-Q4 or 2026")
+    year = int(match.group("year"))
+    month = match.group("month")
+    quarter = match.group("quarter")
+    try:
+        if month is not None:
+            number = int(month)
+            if number not in range(1, 13):
+                raise ValueError
+            start = date(year, number, 1)
+            end = date(year, number, calendar.monthrange(year, number)[1])
+            return "month", start, end
+        if quarter is not None:
+            start_month = 3 * int(quarter) - 2
+            end_month = start_month + 2
+            return (
+                "quarter",
+                date(year, start_month, 1),
+                date(year, end_month, calendar.monthrange(year, end_month)[1]),
+            )
+        return "year", date(year, 1, 1), date(year, 12, 31)
+    except ValueError as exc:
+        raise ValueError(
+            "period must look like 2026-10, 2026-Q4 or 2026"
+        ) from exc
+
+
+def period_key(kind: str, start: date) -> str:
+    """The canonical key for the calendar period beginning at ``start``."""
+    if kind == "month":
+        return f"{start.year:04d}-{start.month:02d}"
+    if kind == "quarter":
+        return f"{start.year:04d}-Q{(start.month - 1) // 3 + 1}"
+    if kind == "year":
+        return f"{start.year:04d}"
+    raise ValueError(f"unsupported period kind {kind}")
+
+
+def period_label(kind: str, start: date) -> str:
+    """How a period is named to a reader: October 2026, Q4 2026, 2026."""
+    if kind == "month":
+        return start.strftime("%B %Y")
+    if kind == "quarter":
+        return f"Q{(start.month - 1) // 3 + 1} {start.year}"
+    if kind == "year":
+        return str(start.year)
+    raise ValueError(f"unsupported period kind {kind}")
 
 
 def remediation_due(

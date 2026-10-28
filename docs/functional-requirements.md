@@ -124,11 +124,13 @@ real source system this repository cannot reach.
 
 | ID | Requirement | Implementation |
 |----|-------------|----------------|
-| FR-I1 | Executive dashboard with KPIs, breakdowns, donut, trend, quarterly target, severity | `gateway/static/*`, `/api/compliance/summary` |
-| FR-I8 | The trend is shown on a monthly (12 points), quarterly (8) or yearly (5) basis, each point the average of the daily snapshots in that calendar period with its sample count | `/api/compliance/trends?period=…`, `gateway/static/app.js` |
+| FR-I1 | Executive dashboard with KPIs, breakdowns, donut, trend and quarterly target; the patch-count severity distribution is shown on Remediation, keeping patch counts apart from the server percentage | `gateway/static/*`, `/api/compliance/summary`; severity bars on `/findings` |
+| FR-I8 | The trend is shown on a monthly (12 points), quarterly (8) or yearly (5) basis, each point the average of the daily snapshots in that calendar period with its sample count. A single Timeframe control selects both the live/historical view and the trend basis: Live offers one option per basis, and a recorded period implies its own kind (month → monthly, quarter → quarterly, year → yearly) | `/api/compliance/trends?period=…`, `gateway/static/app.js` |
 | FR-I9 | The dashboard refreshes itself on an operator-selected interval (30 s, 1 min, 5 min) and the navigation can be hidden for a wall display | `startDashboardRefresh`, `setKiosk` in `gateway/static/app.js` |
 | FR-I10 | Every list-styled register supports free-text search across all columns of a row, per-field filtering and sorting with a direction toggle; the shown/total row count is visible when a filter is active. A compliance-state name matches as a whole term, so `Compliant` never also returns `Non-compliant` rows | `listPanel` in `gateway/static/app.js`; multi-column `search` plus `sort`/`direction` on `/compliance/servers` and `/inventory/assets`; exact `c.state = :state_search` and the inventory `compliance_state` Status filter |
 | FR-I11 | The operating-system breakdown groups by platform family (RHEL, Microsoft Windows, Solaris, Other), not version; the environment and business-service breakdowns use the effective (override-aware) values; every group in the result is shown, with a scrolling list when there are many | `/compliance/summary` `by_os` / `by_environment` / `by_business_group`; `group_breakdown`; `statusChartCard` / `stackedRows` in `gateway/static/*` |
+| FR-I12 | The dashboard can show a past month, quarter or year, selectable from the periods that have a recorded snapshot. A historical view is built from the immutable daily snapshot captured in that period (the latest one), never from a re-evaluation of the current estate, and names the snapshot and the number of daily snapshots in the period. An empty period is refused rather than rendered blank, and a dimension filter cannot be combined with a historical period because a snapshot stores group totals, not server rows | `GET /compliance/summary?period=YYYY-MM\|YYYY-QN\|YYYY`, `GET /compliance/snapshot-periods`; `parse_period_key`, `_period_summary`; Timeframe control in `gateway/static/app.js` |
+| FR-I13 | Register list tables offer a CSV export of the list as currently filtered and sorted. Client-filtered registers export the visible subset; server-paged registers fetch every matching page before writing the file. Action-only columns are omitted, values match what the table displays, and the download is UTF-8 with a BOM for spreadsheet compatibility. The Executive dashboard, Operational health, Settings and Reports are deliberately excluded | `table()` in `gateway/static/ui.js`; `allPages()` and `exportRows` in `gateway/static/app.js` |
 | FR-I2 | Filters by OS, environment, business group, application group, patch source | Filter parameters on `/summary` and `/servers` |
 | FR-I3 | A Grafana dashboard is provisioned from version-controlled JSON | `deploy/grafana/` |
 | FR-I4 | Grafana uses the same definitions as the API | SQL mirrors `engine` predicates; documented in [reporting.md](reporting.md) |
@@ -140,10 +142,11 @@ real source system this repository cannot reach.
 
 | ID | Requirement | Implementation |
 |----|-------------|----------------|
-| FR-J1 | Audit events are append-only at the database level | Trigger rejecting `UPDATE`/`DELETE` |
+| FR-J1 | Audit events are append-only at the database level; `UPDATE` is always refused, and `DELETE` is refused except through the retention purge function | `shared.audit_events_immutable()` trigger; `shared.purge_audit_events()` (migration 012) |
 | FR-J2 | Secrets are never written to the audit context | `audit.scrub` with a sensitive-key denylist |
 | FR-J3 | Audit is queryable by actors, type, outcome and time | `identity /audit` |
 | FR-J4 | Audit records carry actor, role, target, outcome, source IP and service | `shared.audit_events` columns |
+| FR-J5 | Audit retention is configurable at runtime by an administrator (30–36,500 days, default 2,555). The window is stored in the database and applied by a daily job; only events older than the cutoff are deleted, the purge is itself audited, and no API can edit or delete an individual event | `GET`/`PUT /settings/audit-retention`, `POST /jobs/audit-purge` in `identity/app/main.py`; `shared.purge_audit_events` in migration 012; Settings → Audit trail retention in `gateway/static/app.js` |
 
 ## Operations (FR-K)
 

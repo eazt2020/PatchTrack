@@ -54,13 +54,24 @@ Cross-schema writes do not exist.
 | source_ip | inet | |
 | service | text | emitting service |
 
-A trigger rejects `UPDATE` and `DELETE` on this table, so a compromised
-application role cannot rewrite history. Indexed on time, actor and event type.
+A trigger rejects `UPDATE` and any ordinary `DELETE` on this table, so a
+compromised application role cannot rewrite history. Indexed on time, actor and
+event type.
+
+Retention is the one sanctioned deletion. `shared.purge_audit_events()` is
+`SECURITY DEFINER`, reads the configured window from `shared.app_settings`,
+sets a transaction-local flag that lets the trigger pass its own `DELETE`, and
+takes no cutoff argument — a caller cannot delete more than the policy allows.
+It enforces the 30–36,500 day range itself, and the trigger's `UPDATE` refusal
+is never relaxed. Each run is recorded as `audit.purged` after the delete, so
+the record of the purge cannot be removed by the same run.
 
 ### `shared.app_settings`
 
-Key/value jsonb. Holds the organisation name used on reports. Secrets are
-**not** stored here, or anywhere else in the database.
+Key/value jsonb. Holds the organisation name used on reports and
+`audit_retention_days` (`{"days": N}`, default 2555 when absent), plus
+whatever runtime configuration must survive restarts. Secrets are **not**
+stored here, or anywhere else in the database.
 
 ## identity
 
@@ -315,13 +326,17 @@ There is no update path. A re-evaluation creates a new row; it never edits one.
 
 ### `compliance.snapshot_groups`
 
-One row per breakdown group per snapshot: dimension (`os_version`,
+One row per breakdown group per snapshot: dimension (`os_family`, `os_version`,
 `environment`, `business_group`, `application_group`, `severity`), group key,
 and the counts. Unique on `(snapshot_id, dimension, group_key)`.
 
 This table is why a report for a past period can be regenerated with the same
 breakdowns even after the estate has changed — the groups are stored, not
-recomputed from current inventory.
+recomputed from current inventory. It is also what the dashboard's month,
+quarter and year view reads: the latest daily snapshot in the period supplies
+the tiles and panels, and a snapshot captured before `os_family` was recorded
+simply has no rows for that dimension. Readers show that panel as not recorded
+rather than filling it from the live inventory.
 
 ### `compliance.solaris_uploads`
 

@@ -52,8 +52,14 @@ Two scripts, one job each versus everything due:
 
 | Script | What it runs | How the request is made |
 |--------|--------------|-------------------------|
-| `scripts/patchtrack-job.sh` | One named job (`sync …`, `daily`, `tick`, `purge`) — the cron shape | Detects the deployment per call: `docker compose exec` (or `podman-compose exec` / `podman exec`, the usual runtime on RHEL and Rocky) into the service's own container where one is running, otherwise a direct request to `127.0.0.1:$PORT`. `PATCHTRACK_MODE=container\|native` overrides the detection; `PATCHTRACK_CONTAINER_CLI=docker\|podman` pins the runtime when both are installed |
+| `scripts/patchtrack-job.sh` | One named job (`sync …`, `daily`, `tick`, `purge`, `audit-purge`) — the cron shape | Detects the deployment per call: `docker compose exec` (or `podman-compose exec` / `podman exec`, the usual runtime on RHEL and Rocky) into the service's own container where one is running, otherwise a direct request to `127.0.0.1:$PORT`. `PATCHTRACK_MODE=container\|native` overrides the detection; `PATCHTRACK_CONTAINER_CLI=docker\|podman` pins the runtime when both are installed |
 | `scripts/patchtrack-tick.sh` | Every job not yet due — the timer shape | Direct request to `127.0.0.1:$PORT` with the token from `/etc/patchtrack/.env`; one hourly run covers every cadence |
+
+The tick script also applies the audit retention window once a day. The window
+itself is configured in **Settings → Audit trail retention** and stored in the
+database; `audit-purge` is only the job that enforces it, and it is safe to run
+manually (`patchtrack-job.sh audit-purge`). Each run reports how many events it
+deleted and records `audit.purged`.
 
 Both exit non-zero when any job reports a failure, so cron mail and systemd
 unit failure states work without extra plumbing.

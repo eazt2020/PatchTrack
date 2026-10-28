@@ -7,8 +7,8 @@ pytest tests.
 
 | Layer | Location | Needs | Count |
 |-------|----------|-------|-------|
-| Unit tests | `tests/unit/` | Nothing but Python | 226 |
-| Database integration tests | `tests/integration/` | PostgreSQL | 43 |
+| Unit tests | `tests/unit/` | Nothing but Python | 259 |
+| Database integration tests | `tests/integration/` | PostgreSQL | 66 |
 | Browser smoke test | `tests/ui/smoke.py` | Playwright + Chromium + a running stack | 1 script, 14 routes |
 | Dashboard verification | manual procedure (§7) | Grafana + PostgreSQL | 15 panels |
 | Deployment verification | manual procedure (§8) | Docker + RHEL/Rocky 9 | full stack |
@@ -16,9 +16,9 @@ pytest tests.
 Run:
 
 ```bash
-/opt/patchtrack-venv/bin/python -m pytest                       # 226 pass, 43 skip without a DB
+/opt/patchtrack-venv/bin/python -m pytest                       # 259 pass, 55 skip without a DB
 PATCHTRACK_TEST_DATABASE_URL='postgresql+psycopg://patchtrack@/patchtrack_test?host=/tmp' \
-  /opt/patchtrack-venv/bin/python -m pytest                     # 269 pass
+  /opt/patchtrack-venv/bin/python -m pytest                     # 314 pass
 ```
 
 `pytest.ini` sets `testpaths = tests`, `--strict-markers` and fails on an
@@ -45,6 +45,8 @@ so the same command works on a build host without PostgreSQL.
 | `test_cookie_policy.py` | 10 | Secure cookies are required for every non-loopback host by default; `always` and `never` behave as documented; an IPv6 loopback literal is recognised; `never` with `PRODUCTION` is refused at startup; an unknown policy value is rejected |
 | `test_server_sort.py` | 6 | The server list resolves a sort key through a fixed column table; an unknown key is a 422 rather than a silently ignored sort; rows with no value sort last in both directions; a hostname/id tie-break keeps paging stable |
 | `test_trend_periods.py` | 13 | Monthly, quarterly and yearly windows start on a real calendar period boundary; shifting back by N periods crosses year boundaries; labels read `Oct 26`, `Q4 2026`, `2026`; the basis table is the single source of truth for unit and default point count |
+| `test_period_keys.py` | 28 | The dashboard's period keys resolve to exact calendar windows: month, quarter and year begin and end on the right days (including 29 February and 31 December); malformed, out-of-range and lower-case quarter keys are rejected rather than rounded; keys and reader labels round-trip |
+| `test_seed_demo.py` | 5 | The five-year demo generator spans 60 months; every day's states add up to the in-scope population and its severity counts add up to the patch total; the monthly, quarterly and yearly series each contain both met and missed periods, plus a visible outage quarter; per-dimension group rows reconcile to the snapshot totals without exceeding any group's population; live hosts are assigned exactly one state |
 | `test_job_scripts.py` | 14 | Both job runners authenticate as the `scheduler` principal with the service token and use no password, cookie or gateway route; the tick script stamps only after success and one failing step does not stop the rest; the single-job script detects container versus native deployment, supports both Docker and Podman container runtimes, and the native path runs the interpreter with `-I` |
 
 The unit tests are where the compliance rules are pinned. Any change to
@@ -57,8 +59,9 @@ The unit tests are where the compliance rules are pinned. Any change to
 `tests/integration/test_password_change.py` — 8 tests,
 `tests/integration/test_rotation_end_to_end.py` — 3 tests,
 `tests/integration/test_asset_overrides.py` — 5 tests, and
-`tests/integration/test_placement_options.py` — 10 tests, and
-`tests/integration/test_dashboard_breakdown.py` — 4 tests, all against a real,
+`tests/integration/test_placement_options.py` — 10 tests,
+`tests/integration/test_dashboard_breakdown.py` — 4 tests, and
+`tests/integration/test_dashboard_periods.py` — 12 tests, all against a real,
 freshly created database.
 
 The fixture creates `patchtrack_test`, applies every migration, and drops it at
@@ -138,6 +141,33 @@ Dashboard breakdowns (`test_dashboard_breakdown.py`):
 - nine business services produce nine group rows — the API never truncates the
   list that the panel draws.
 
+Audit retention (`test_audit_retention.py`):
+
+- the default window is 2,555 days until an administrator stores a value;
+- the window round-trips through `shared.app_settings`, and changing it writes
+  a `settings.updated` event with the new value;
+- a window outside 30–36,500 days is refused at the model and again by the
+  database function, so a row written by another path cannot widen the purge;
+- a purge deletes only events older than the window, keeps newer ones and
+  records `audit.purged` with the retention applied;
+- `UPDATE` and an ordinary `DELETE` are still refused by the trigger outside
+  the purge function.
+
+Historical dashboard periods (`test_dashboard_periods.py`):
+
+- a month view returns the snapshot captured inside the month — its id, its
+  counts and its percentage — not a fresh evaluation of the current estate;
+- the snapshot records the `os_family` panel, so the OS breakdown is available
+  for a period rather than silently empty;
+- quarter and year views resolve to the same recorded snapshot;
+- `/snapshot-periods` lists month, quarter and year keys newest first with the
+  number of daily snapshots behind each;
+- an empty period is a 404, and an invalid key is a 400, never a blank success;
+- a period combined with a dimension filter is refused with 400;
+- an older snapshot without `os_family` rows returns an empty panel and lists
+  the dimensions it does have, rather than filling the gap from live inventory;
+- reading a period twice does not modify the stored snapshot.
+
 ## 4. Browser smoke test
 
 `tests/ui/smoke.py` signs in and visits all 14 routes. It fails on:
@@ -149,13 +179,21 @@ Dashboard breakdowns (`test_dashboard_breakdown.py`):
   A `.chart-empty` placeholder counts as a panel: on a fresh installation
   every chart correctly shows its empty state, and demanding SVG axes there
   would fail a healthy deployment;
-- a basis control that does not offer exactly Monthly/Quarterly/Yearly, does
-  not mark the chosen option `aria-pressed="true"`, or does not swap in the
-  matching trend panel;
+- a Timeframe control that does not start with the three Live options, still
+  shows a separate Basis control, or does not swap in the matching trend panel
+  or persist the choice across a reload;
 - an auto-refresh control missing any of its four documented settings;
+- a Timeframe control that does not list the recorded periods, or a selected
+  period that fails to name its snapshot in the header, leaves the live server
+  list or the dimension filters on screen, or does not return to the live
+  panels when a Live timeframe is chosen;
 - TV mode that does not hide the navigation through the button, `K`, `Esc`
   and the `#/dashboard?tv=1` deep link, or that fails to restore it;
 - any of the eleven registers missing a search box or a Sort by control;
+- a populated register with no Export CSV button, an export whose row count does
+  not match the active filter, a paged register whose export stops at the first
+  page instead of covering the whole matching set, or an Export CSV button on
+  the Executive dashboard, Operational health, Settings or Reports;
 - a search that does not narrow the rows, a count line that does not report the
   filtered subset, clearing the search not restoring every row, or the order
   button not reversing the sort;

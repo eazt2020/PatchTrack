@@ -73,8 +73,15 @@ Optional demo data (synthetic, never production figures):
 
 ```bash
 PATCHTRACK_JWT_SECRET=$(openssl rand -hex 32) \
-  /opt/patchtrack-venv/bin/python scripts/seed-demo.py --assets 120
+  /opt/patchtrack-venv/bin/python scripts/seed-demo.py --reset --assets 100 --years 5
 ```
+
+The default seed is 100 assets and five years of daily snapshots. The history
+follows an explicit month/quarter/year scenario — at every basis some periods
+meet the 95% target and some miss it, and one quarter shows a collection
+outage — so the trend, history views and period picker have varied, internally
+consistent observations to display. Every snapshot records
+`synthetic_history` in its methodology.
 
 ## Deployment
 

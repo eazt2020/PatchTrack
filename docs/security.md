@@ -145,8 +145,16 @@ by the organisation's policy.
 
 ## 7. Audit trail
 
-Append-only, enforced by a database trigger that raises on `UPDATE` and
-`DELETE`. Recorded events include:
+Append-only, enforced by a database trigger that raises on `UPDATE` and on any
+ordinary `DELETE`. The single exception is the retention purge: an
+administrator-configurable window (30–36,500 days, default 2,555) applied by
+`shared.purge_audit_events()`. That function is `SECURITY DEFINER`, takes no
+cutoff argument, sets a transaction-local flag only for its own `DELETE`, and
+re-checks the range itself; every run records `audit.purged`. Changing the
+window is audited as `settings.updated`, so retention cannot be shortened
+without leaving evidence of who did it.
+
+Recorded events include:
 
 - `auth.login` (success and failure, with reason), lockout;
 - every user create/update/password reset;

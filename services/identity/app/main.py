@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
@@ -566,6 +567,115 @@ def list_audit(
         **{k: v for k, v in params.items() if k not in ("limit", "offset")},
     )
     return {"items": rows, "total": total["n"] if total else 0}
+
+
+# --------------------------------------------------------------------------- audit retention
+# The trail is append-only; retention is the one sanctioned deletion. The
+# window lives in shared.app_settings so it can be changed without a restart,
+# and only the purge function in migration 012 acts on it. Keeping the policy
+# in the database also means every instance reads the same value.
+AUDIT_RETENTION_KEY = "audit_retention_days"
+AUDIT_RETENTION_DEFAULT = 2555
+AUDIT_RETENTION_MIN = 30
+AUDIT_RETENTION_MAX = 36500
+
+
+class AuditRetentionUpdate(BaseModel):
+    days: int = Field(ge=AUDIT_RETENTION_MIN, le=AUDIT_RETENTION_MAX)
+
+
+def _stored_retention_days() -> tuple[int, dict[str, Any] | None]:
+    row = fetch_one(
+        "SELECT value, updated_at, updated_by FROM shared.app_settings "
+        "WHERE key = :key",
+        key=AUDIT_RETENTION_KEY,
+    )
+    if row is None:
+        return AUDIT_RETENTION_DEFAULT, None
+    value = row["value"]
+    if isinstance(value, str):
+        value = json.loads(value)
+    stored = value.get("days") if isinstance(value, dict) else value
+    try:
+        days = int(stored)
+    except (TypeError, ValueError):
+        days = AUDIT_RETENTION_DEFAULT
+    return days, row
+
+
+@app.get("/settings/audit-retention")
+def get_audit_retention(
+    _: Annotated[Principal, Depends(require_permission("settings:manage"))],
+) -> dict[str, Any]:
+    days, row = _stored_retention_days()
+    events = fetch_one(
+        "SELECT count(*) AS total, min(occurred_at) AS oldest "
+        "FROM shared.audit_events"
+    ) or {}
+    return {
+        "days": days,
+        "min_days": AUDIT_RETENTION_MIN,
+        "max_days": AUDIT_RETENTION_MAX,
+        "updated_at": row["updated_at"] if row else None,
+        "updated_by": row["updated_by"] if row else None,
+        "events": events.get("total", 0),
+        "oldest": events.get("oldest"),
+    }
+
+
+@app.put("/settings/audit-retention")
+def set_audit_retention(
+    payload: AuditRetentionUpdate,
+    request: Request,
+    principal: Annotated[Principal, Depends(require_permission("settings:manage"))],
+) -> dict[str, Any]:
+    """Change the retention window; the next purge run applies it."""
+    value = json.dumps({"days": payload.days})
+    execute(
+        """
+        INSERT INTO shared.app_settings (key, value, updated_at, updated_by)
+        VALUES (:key, CAST(:v AS jsonb), now(), :by)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value,
+            updated_at = now(), updated_by = EXCLUDED.updated_by
+        """,
+        key=AUDIT_RETENTION_KEY, v=value, by=principal.username,
+    )
+    record_audit(
+        event_type="settings.updated", outcome="success", principal=principal,
+        target_type="setting", target_id=AUDIT_RETENTION_KEY,
+        context={"days": payload.days}, source_ip=_client_ip(request), service=APP,
+    )
+    return {"days": payload.days}
+
+
+@app.post("/jobs/audit-purge")
+def purge_audit_trail(
+    principal: Annotated[Principal, Depends(require_permission("settings:manage"))],
+) -> dict[str, Any]:
+    """Apply the retention window. Safe to run repeatedly; it is the scheduler
+    that decides how often. The purge itself is audited after the delete, so
+    the record of it cannot be removed by the same run."""
+    row = fetch_one("SELECT shared.purge_audit_events() AS result")
+    result = (row or {}).get("result") or {}
+    if isinstance(result, str):
+        result = json.loads(result)
+    record_audit(
+        event_type="audit.purged", outcome="success", principal=principal,
+        target_type="audit_trail", target_id="shared.audit_events",
+        context={
+            "purged": result.get("purged", 0),
+            "retention_days": result.get("retention_days"),
+            "cutoff": result.get("cutoff"),
+            "trigger": "scheduler",
+        },
+        service=APP,
+    )
+    return {
+        "status": "ok",
+        "purged": result.get("purged", 0),
+        "retention_days": result.get("retention_days"),
+        "cutoff": result.get("cutoff"),
+    }
 
 
 @app.get("/bootstrap/status")

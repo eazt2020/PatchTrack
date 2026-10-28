@@ -222,7 +222,10 @@ def create_snapshot(
             ).first()[0]
         )
         rows = []
-        for dimension in ("os_version", "environment",
+        # os_family is recorded alongside os_version: the executive panel asks
+        # "which platform is behind", a question that cannot be answered from
+        # the version rows after the fact.
+        for dimension in ("os_family", "os_version", "environment",
                           "business_group", "application_group"):
             for entry in group_breakdown(evaluations_list, assets, dimension):
                 rows.append(

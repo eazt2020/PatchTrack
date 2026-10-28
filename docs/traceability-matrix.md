@@ -24,7 +24,7 @@ check that verifies it. Status meanings:
 | BR-9 Delivery isolation | `reporting/app/mailer.py`, `service.deliver_report`, `reporting.delivery_attempts` | Code review; SMTP path not exercised | Implemented, environment-dependent |
 | BR-10 Dashboard | `gateway/static/*`; `deploy/grafana/*` | `tests/ui/smoke.py`; dashboard verification procedure | Implemented, procedure-verified |
 | BR-11 Roles | `patchtrack_common/security.py`; `require_permission` on every route | `test_security.py` | Implemented + tested |
-| BR-12 Audit | `patchtrack_common/audit.py`; `shared.audit_events` + trigger | `test_reconciliation.py` append-only test | Implemented + tested |
+| BR-12 Audit | `patchtrack_common/audit.py`; `shared.audit_events` + trigger; configurable retention in `shared.app_settings` | `test_reconciliation.py` append-only test; `test_audit_retention.py` for the window, purge and range guard | Implemented + tested |
 | BR-13 Integrations explicit | migration 006 (disabled rows); `inventory /integrations` | Schema review; `test_secrets.py` | Implemented + tested |
 | BR-14 Portability | `deploy/container/*` (UBI9), `docker-compose.yml` | Not executed here (no Docker) | Implemented, environment-dependent |
 
@@ -40,7 +40,7 @@ check that verifies it. Status meanings:
 | C-6 No assumed SSH collection | No SSH client import anywhere; Solaris is a file drop | `connectors/solaris.py`; code search |
 | C-7 No silent wrong association | `sync.match_asset` returns `(None, "ambiguous")`; conflicts table | `test_reconciliation.py` ambiguity test |
 | C-8 No silent report replacement | `generate_report` returns early when completed; partial unique index; retry renders the same snapshot | `test_report_pdf.py` determinism; `reporting/reports` constraints |
-| C-9 No static or fabricated data | The SPA calls live APIs; demo data is opt-in, synthetic and marked `raw.demo_data`; empty states render as `n/a` | `test_report_pdf.py` empty population; `scripts/seed-demo.py` docstring |
+| C-9 No static or fabricated data | The SPA calls live APIs; demo data is opt-in, synthetic and marked `raw.demo_data`; generated snapshots also record `synthetic_history` in their methodology; empty states render as `n/a` | `test_report_pdf.py` empty population; `scripts/seed-demo.py` docstring; `test_seed_demo.py` |
 | C-10 Failed email does not invalidate a report | `deliver_report` writes only `delivery_attempts`; report status untouched | `mailer.send_report_email` returns `(status, detail)`; code review |
 | C-11 No fabricated attributes | Connectors store empty/`UNKNOWN` for missing fields; no inference | `connectors/*.normalise`; `test_engine.py` |
 | C-12 Unknown/stale never compliant | `engine.evaluate_asset` rules 2–3 keep them out of `compliant` and in the denominator | `test_engine.py` |
@@ -57,8 +57,8 @@ check that verifies it. Status meanings:
 | FR-F1..F14 evaluation | same | 14/14 | F13 pinned by `test_period_parity.py` |
 | FR-G1..G5 snapshots | same | 5/5 | G1 idempotency via partial unique index |
 | FR-H1..H14 reporting | same | 14/14 | H10 pinned by `test_scheduler.py` |
-| FR-I1..I11 dashboard/API | same | 11/11 | I5 verified by stopping Grafana; I8/I9/I10 exercised in the browser smoke test; I11 pinned by `test_dashboard_breakdown.py` |
-| FR-J1..J4 audit | same | 4/4 | J1 enforced by a trigger |
+| FR-I1..I13 dashboard/API | same | 13/13 | I5 verified by stopping Grafana; I8/I9/I10 exercised in the browser smoke test; I11 pinned by `test_dashboard_breakdown.py`; I12 pinned by `test_period_keys.py` and `test_dashboard_periods.py`; I13 CSV export covered by the smoke test |
+| FR-J1..J5 audit | same | 5/5 | J1 enforced by a trigger (retention purge only); J5 pinned by `test_audit_retention.py` |
 | FR-K1..K5 operations | same | 4/5 | K5 offline bundle documented; the bundling script itself is operator-authored (§ below) |
 
 ## Section 22 artefacts

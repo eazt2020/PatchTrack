@@ -15,7 +15,10 @@ Not part of the pytest suite: it needs a browser and a running stack.
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import os
+import re
 import sys
 
 from playwright.sync_api import sync_playwright
@@ -129,37 +132,89 @@ def main() -> int:
             print(f"ok  dashboard OS panel labels platform families "
                   f"({', '.join(os_labels) or 'empty'})")
 
-        # --- basis: monthly / quarterly / yearly -----------------------------
-        basis = page.locator('.segmented[aria-label="Basis"] button')
-        labels = [basis.nth(i).text_content().strip() for i in range(basis.count())]
-        if labels != ["Monthly", "Quarterly", "Yearly"]:
-            fail(f"dashboard: basis control is {labels}, expected monthly/quarterly/yearly")
-        for label, title in (("Quarterly", "Quarterly compliance"),
-                             ("Yearly", "Yearly compliance"),
-                             ("Monthly", "Monthly compliance trend")):
-            console_errors.clear()
-            page.locator('.segmented[aria-label="Basis"] button', has_text=label).first.click()
-            page.wait_for_timeout(900)
-            pressed = page.locator(
-                '.segmented[aria-label="Basis"] button[aria-pressed="true"]').text_content()
-            if pressed.strip() != label:
-                fail(f"dashboard: after choosing {label} the active basis is {pressed!r}")
-            if title not in (page.text_content("#view") or ""):
-                fail(f"dashboard: {label} basis did not render its '{title}' panel")
-            if console_errors:
-                fail(f"dashboard: {label} basis console errors — {' | '.join(console_errors)}")
-        # The choice is per browser so a wall display keeps it across a reload.
-        page.reload(wait_until="networkidle")
-        page.wait_for_timeout(800)
-        kept = page.locator(
-            '.segmented[aria-label="Basis"] button[aria-pressed="true"]').text_content()
-        if kept.strip() != "Monthly":
-            fail(f"dashboard: the basis choice did not survive a reload (got {kept!r})")
-        print("ok  dashboard basis control switches monthly/quarterly/yearly "
-              "and the choice persists across a reload")
+        # --- timeframe: one control for liveness and trend granularity --------
+        timeframe = page.locator(
+            '.dashboard-controls .field', has_text="Timeframe").locator("select")
+        if timeframe.count() != 1:
+            fail(f"dashboard: expected one Timeframe control, found {timeframe.count()}")
+            period_options: list[str] = []
+        else:
+            period_options = [o.strip() for o in
+                              timeframe.first.locator("option").all_text_contents()]
+            expected_live = ["Live · monthly trend", "Live · quarterly trend",
+                             "Live · yearly trend"]
+            if period_options[:3] != expected_live:
+                fail(f"dashboard: Timeframe must start with {expected_live}, "
+                     f"got {period_options[:3]}")
+            if page.locator(
+                    '.dashboard-controls .segmented[aria-label="Basis"]').count():
+                fail("dashboard: the separate Basis control is still present")
 
+            for value, title in (("live:quarterly", "Quarterly compliance"),
+                                 ("live:yearly", "Yearly compliance"),
+                                 ("live:monthly", "Monthly compliance trend")):
+                console_errors.clear()
+                timeframe.select_option(value)
+                page.wait_for_timeout(900)
+                if timeframe.first.input_value() != value:
+                    fail(f"dashboard: after choosing {value} the active timeframe is "
+                         f"{timeframe.first.input_value()!r}")
+                if title not in (page.text_content("#view") or ""):
+                    fail(f"dashboard: {value} did not render its '{title}' panel")
+                if console_errors:
+                    fail(f"dashboard: {value} console errors — "
+                         + " | ".join(console_errors))
+
+            # The choice is per browser so a wall display keeps it across a reload.
+            timeframe.select_option("live:quarterly")
+            page.wait_for_timeout(400)
+            page.reload(wait_until="networkidle")
+            page.wait_for_timeout(800)
+            timeframe = page.locator(
+                '.dashboard-controls .field', has_text="Timeframe").locator("select")
+            kept = timeframe.first.input_value()
+            if kept != "live:quarterly":
+                fail(f"dashboard: the timeframe choice did not survive a reload "
+                     f"(got {kept!r})")
+            print("ok  dashboard timeframe control switches live monthly/quarterly/"
+                  "yearly trends and the choice persists across a reload")
+
+            # --- recorded period inside the same control ----------------------
+            periods = page.evaluate(
+                """async () => {
+                    const response = await fetch('/api/compliance/snapshot-periods',
+                                                 {credentials: 'same-origin'});
+                    return response.ok ? (await response.json()).periods : [];
+                }""")
+            if periods:
+                chosen = periods[0]
+                console_errors.clear()
+                timeframe.select_option(chosen["key"])
+                page.wait_for_timeout(900)
+                context = page.text_content("#page-context") or ""
+                body = page.text_content("#view") or ""
+                if chosen["label"] not in context:
+                    fail(f"dashboard: period view did not name {chosen['label']} "
+                         f"(context was {context!r})")
+                if "Recent non-compliant servers" in body:
+                    fail("dashboard: the live server list is still shown in a period view")
+                if page.locator(
+                        '.filterbar .field', has_text="Environment").count() != 0:
+                    fail("dashboard: dimension filters are still offered in a period view")
+                if console_errors:
+                    fail("dashboard: period view console errors — "
+                         + " | ".join(console_errors))
+                timeframe.select_option("live:monthly")
+                page.wait_for_timeout(900)
+                if "Recent non-compliant servers" not in (page.text_content("#view") or ""):
+                    fail("dashboard: returning to Live did not restore the live panels")
+                print(f"ok  dashboard timeframe offers {len(period_options) - 3} "
+                      f"recorded periods and switches to {chosen['label']} and back")
+            else:
+                print("ok  dashboard timeframe present; no snapshots recorded yet")
         # --- auto-refresh ----------------------------------------------------
-        refresh = page.locator(".dashboard-controls select")
+        refresh = page.locator(
+            '.dashboard-controls .field', has_text="Auto-refresh").locator("select")
         options: list[str] = []
         if refresh.count() != 1:
             fail(f"dashboard: expected one auto-refresh control, found {refresh.count()}")
@@ -215,9 +270,58 @@ def main() -> int:
                 fail(f"{route}: no search box on the list")
             if page.get_by_label("Sort by").count() == 0:
                 fail(f"{route}: no Sort by control on the list")
+            if (route != "reports"
+                    and page.locator("table.data tbody tr").count()
+                    and page.locator("table.data td[colspan]").count() == 0
+                    and page.locator(".table-export").count() == 0):
+                fail(f"{route}: a populated list has no Export CSV button")
             if console_errors:
                 fail(f"{route}: console errors — {' | '.join(console_errors)}")
         print(f"ok  {len(list_routes)} registers expose filter and sort controls")
+
+        # --- CSV export covers the filtered list, not just the visible page ---
+        page.goto(f"{BASE}/#/findings", wait_until="networkidle")
+        page.wait_for_timeout(400)
+        page.locator("#view input[type=search]").fill("critical")
+        page.wait_for_timeout(500)
+        count_text = page.locator(".list-count").text_content() or ""
+        with page.expect_download() as download_info:
+            page.locator(".table-export").first.click()
+        exported = list(csv.reader(io.StringIO(
+            open(download_info.value.path(), encoding="utf-8-sig").read())))
+        match = re.search(r"Showing ([\d,]+)", count_text)
+        if match:
+            expected = int(match.group(1).replace(",", ""))
+            if len(exported) - 1 != expected:
+                fail(f"findings: CSV has {len(exported) - 1} rows, "
+                     f"the filtered list shows {expected}")
+        # The register remembers its search; clear it so later checks start
+        # from the unfiltered list.
+        page.locator("#view input[type=search]").fill("")
+        page.wait_for_timeout(400)
+        # A server-paged register must export every matching row, not one page.
+        page.goto(f"{BASE}/#/inventory", wait_until="networkidle")
+        page.wait_for_timeout(400)
+        pager = page.locator(".pagination .muted").first.text_content() or ""
+        total = re.search(r"([\d,]+) assets", pager)
+        with page.expect_download() as download_info:
+            page.locator(".table-export").first.click()
+        exported = list(csv.reader(io.StringIO(
+            open(download_info.value.path(), encoding="utf-8-sig").read())))
+        if total:
+            expected = int(total.group(1).replace(",", ""))
+            if len(exported) - 1 != expected:
+                fail(f"inventory: CSV has {len(exported) - 1} rows, "
+                     f"the register holds {expected}")
+        print("ok  CSV export follows the active filters and spans every page")
+
+        # Presentation and operations views are deliberately not exportable.
+        for route in ("dashboard", "health", "settings", "reports"):
+            page.goto(f"{BASE}/#/{route}", wait_until="networkidle")
+            page.wait_for_timeout(400)
+            if page.locator(".table-export").count():
+                fail(f"{route}: an Export CSV button is still present")
+        print("ok  dashboard, operational health, settings and reports have no CSV export")
 
         # Filtering narrows the rendered rows and says so, rather than silently
         # showing a subset.
@@ -271,9 +375,14 @@ def main() -> int:
         page.locator("#view input[type=search]").first.fill("Core Banking")
         page.wait_for_timeout(1000)
         column_total = (page.text_content("#view .right.muted") or "").strip()
-        if column_total == total_after or column_total.startswith("0 "):
+        matched_rows = page.locator("#view tbody tr")
+        matched_business = (
+            (matched_rows.first.locator("td").nth(4).text_content() or "").strip()
+            if matched_rows.count() else ""
+        )
+        if column_total.startswith("0 ") or "Core Banking" not in matched_business:
             fail(f"servers: a term in the business-service column did not match "
-                 f"({column_total!r})")
+                 f"({column_total!r}, business={matched_business!r})")
         print(f"ok  servers search matches a non-hostname column ({column_total})")
 
         # Server inventory: the Status filter is an exact state, and a state
@@ -327,6 +436,13 @@ def main() -> int:
         # placement value silently splits every report and filter.
         page.goto(f"{BASE}/#/settings", wait_until="networkidle")
         page.wait_for_timeout(700)
+        retention = page.locator("#audit-retention-days")
+        if retention.count() != 1 or not retention.input_value().isdigit():
+            fail("settings: the audit retention control is missing or has no value")
+        elif not (30 <= int(retention.input_value()) <= 36500):
+            fail("settings: the audit retention value is outside 30–36500 days")
+        else:
+            print("ok  settings exposes the audit retention window")
         env_input = page.locator("#view input[placeholder='New environment value']")
         if env_input.count() != 1:
             fail("settings: the environment list has no add field")
