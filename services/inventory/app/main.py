@@ -7,7 +7,9 @@ asset/source reconciliation, integration configuration and health.
 from __future__ import annotations
 
 import json
+import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
@@ -19,9 +21,17 @@ from sqlalchemy.exc import IntegrityError
 from patchtrack_common.audit import record_audit
 from patchtrack_common.db import connection, execute, fetch_all, fetch_one
 from patchtrack_common.net import client_ip
-from patchtrack_common.secrets import SecretError, validate_reference
+from patchtrack_common.secrets import (
+    SecretError,
+    resolve as resolve_secret,
+    validate_reference,
+)
 from patchtrack_common.security import Principal, PrincipalDep, require_permission
 
+from .connectors.assetexplorer import AssetExplorerClient, AssetExplorerError
+from .connectors.satellite import SatelliteClient, SatelliteError
+from .connectors.sccm import SccmClient, SccmError
+from .connectors.solaris import SolarisIngestError, probe_inbox
 from .sync import PATCH_SOURCE_KEYS, resolve_conflict, run_assetexplorer_sync, run_patch_sync
 
 APP = "inventory"
@@ -934,6 +944,153 @@ def update_integration(
         f"SELECT {INTEGRATION_PUBLIC_COLUMNS} FROM inventory.integrations WHERE key = :k",
         k=key,
     )
+
+
+class IntegrationTest(BaseModel):
+    """Optional draft overrides. Absent fields mean "use the saved value".
+
+    The credential is still a reference (``env:`` / ``file:``); a blank
+    reference tests with the saved one.
+    """
+
+    endpoint: str | None = None
+    auth_method: str | None = None
+    secret_ref: str | None = None
+    connect_timeout_s: int | None = Field(default=None, ge=1, le=300)
+    read_timeout_s: int | None = Field(default=None, ge=1, le=900)
+    page_size: int | None = Field(default=None, ge=1, le=1000)
+    verify_tls: bool | None = None
+    extra: dict[str, Any] | None = None
+
+
+def _probe_integration(settings: dict[str, Any], secret: str) -> str:
+    """Exercise the configured source and return a human-readable result.
+
+    A probe is deliberately shallow: it proves the endpoint, TLS and
+    credential work and that the first page has the expected shape. It never
+    writes an assessment, an asset or a sync run, so a failed test leaves the
+    integration's health and history untouched.
+    """
+    key = settings["key"]
+    extra = settings.get("extra") or {}
+    if isinstance(extra, str):
+        extra = json.loads(extra)
+    verify_tls = bool(settings.get("verify_tls", True))
+
+    if key == "assetexplorer":
+        with AssetExplorerClient(
+            settings["endpoint"],
+            auth_method=settings.get("auth_method", "bearer"),
+            secret=secret,
+            timeout_s=float(settings.get("connect_timeout_s") or 30),
+            page_size=int(settings.get("page_size") or 200),
+            verify_tls=verify_tls,
+            field_map=extra.get("field_map"),
+        ) as client:
+            return client.probe()
+    if key == "satellite":
+        with SatelliteClient(
+            settings["endpoint"],
+            username=extra.get("username", ""),
+            password=secret,
+            timeout_s=float(settings.get("read_timeout_s") or 60),
+            page_size=int(settings.get("page_size") or 100),
+            verify_tls=verify_tls,
+        ) as client:
+            return client.probe()
+    if key == "sccm":
+        with SccmClient(
+            settings["endpoint"],
+            token=secret,
+            timeout_s=float(settings.get("read_timeout_s") or 60),
+            page_size=int(settings.get("page_size") or 200),
+            verify_tls=verify_tls,
+        ) as client:
+            return client.probe()
+    inbox = Path(extra.get("inbox") or "/var/lib/patchtrack/solaris-inbox")
+    return probe_inbox(inbox)
+
+
+@app.post("/integrations/{key}/test")
+def test_integration(
+    key: str,
+    request: Request,
+    principal: Annotated[Principal, Depends(require_permission("integrations:manage"))],
+    payload: IntegrationTest | None = None,
+) -> dict[str, Any]:
+    """Test an integration without collecting anything.
+
+    The body is optional and may carry the values currently in the editor, so
+    an administrator can validate a change before saving it. Nothing in the
+    request is persisted. The result is audited with the failure reason (but
+    never a credential).
+    """
+    if key not in ("assetexplorer", *PATCH_SOURCE_KEYS):
+        raise HTTPException(status_code=404, detail="Unknown integration")
+    stored = fetch_one("SELECT * FROM inventory.integrations WHERE key = :k", k=key)
+    if stored is None:
+        raise HTTPException(status_code=404, detail="Unknown integration")
+
+    changes = payload.model_dump(exclude_unset=True) if payload else {}
+    changes = {k: v for k, v in changes.items() if v is not None}
+    settings = {**stored, **changes}
+    draft = bool(changes)
+
+    def failed(detail: str, started: float) -> dict[str, Any]:
+        record_audit(
+            event_type="integration.tested", outcome="failure", principal=principal,
+            target_type="integration", target_id=key,
+            context={"detail": detail[:500], "draft": draft},
+            source_ip=_client_ip(request), service=APP,
+        )
+        return {
+            "status": "failed", "detail": detail,
+            "duration_ms": round((time.perf_counter() - started) * 1000),
+            "tested": "draft" if draft else "saved",
+        }
+
+    started = time.perf_counter()
+    endpoint = str(settings.get("endpoint") or "")
+    if key != "solaris":
+        if not endpoint:
+            return failed("Endpoint is not configured", started)
+        if not endpoint.startswith(("https://", "http://")):
+            return failed("Endpoint must be an http(s) URL", started)
+        if endpoint.startswith("http://") and settings.get("verify_tls") is not False:
+            return failed(
+                "Plain HTTP endpoints require explicit TLS verification opt-out",
+                started,
+            )
+
+    reference = str(changes.get("secret_ref") or stored.get("secret_ref") or "")
+    try:
+        if reference:
+            validate_reference(reference)
+        secret = resolve_secret(reference)
+    except SecretError as exc:
+        return failed(f"Credential reference: {exc}", started)
+
+    try:
+        detail = _probe_integration(settings, secret)
+    except (
+        AssetExplorerError, SatelliteError, SccmError, SolarisIngestError,
+        SecretError,
+    ) as exc:
+        return failed(str(exc), started)
+    except Exception as exc:  # noqa: BLE001 - a probe must never 500 the screen
+        return failed(f"{type(exc).__name__}: {exc}", started)
+
+    duration_ms = round((time.perf_counter() - started) * 1000)
+    record_audit(
+        event_type="integration.tested", outcome="success", principal=principal,
+        target_type="integration", target_id=key,
+        context={"detail": detail[:500], "draft": draft},
+        source_ip=_client_ip(request), service=APP,
+    )
+    return {
+        "status": "success", "detail": detail, "duration_ms": duration_ms,
+        "tested": "draft" if draft else "saved",
+    }
 
 
 class TriggerSync(BaseModel):

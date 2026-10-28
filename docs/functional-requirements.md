@@ -71,6 +71,7 @@ real source system this repository cannot reach.
 | FR-E5 | Each run is recorded with counts and an error summary | `inventory.sync_runs` |
 | FR-E6 | Manual sync can be triggered by an authorised user | `POST /sync` (`sync:run`) |
 | FR-E7 | Integration health is exposed with the last run and last success | `inventory /integrations`, `_health()` |
+| FR-E8 | An administrator can test an integration's configuration without collecting: endpoint, TLS and credential are exercised against the source and the result states success or the failure reason, with the duration. A draft from the editor can be tested before saving and is not persisted. A test writes no asset, assessment or sync run; it is audited as `integration.tested` with the outcome and reason | `POST /integrations/{key}/test`, `_probe_integration` in `inventory/app/main.py`; connector `probe()` methods; Integrations screen in `gateway/static/app.js` |
 
 ## Compliance evaluation (FR-F)
 

@@ -1907,6 +1907,7 @@ async function renderIntegrations() {
   const manage = can("integrations:manage");
   const cards = data.map((integration) => {
     const last = integration.last_run || {};
+    const testResult = h("div");
     const body = h("div", { class: "stack" },
       h("dl", { class: "kv" },
         h("dt", {}, "Status"), h("dd", {}, pill(integration.health, integration.health.replaceAll("_", " "))),
@@ -1938,7 +1939,31 @@ async function renderIntegrations() {
         manage ? h("button", {
           class: "btn btn-sm",
           onclick: () => editIntegration(integration),
-        }, "Configure") : null));
+        }, "Configure") : null,
+        manage ? h("button", {
+          class: "btn btn-sm",
+          onclick: async (event) => {
+            const button = event.currentTarget;
+            button.disabled = true;
+            button.textContent = "Testing…";
+            testResult.replaceChildren();
+            try {
+              const result = await api(
+                `inventory/integrations/${integration.key}/test`,
+                { method: "POST", body: {} },
+              );
+              testResult.appendChild(alert(
+                result.status === "success" ? "ok" : "error",
+                `${result.detail} (${result.duration_ms} ms)`));
+            } catch (error) {
+              testResult.appendChild(alert("error", error.message));
+            } finally {
+              button.disabled = false;
+              button.textContent = "Test configuration";
+            }
+          },
+        }, "Test configuration") : null),
+      testResult);
     return card(integration.display_name || integration.key,
       `${integration.kind} · every ${integration.sync_interval_minutes} min`, body);
   });
@@ -2004,23 +2029,49 @@ function editIntegration(integration) {
       h("label", { class: "row", style: { gap: "6px" } },
         h("input", { id: "int-tls", type: "checkbox", checked: integration.verify_tls }),
         "Verify TLS")));
+  const draftPayload = () => {
+    const payload = {
+      display_name: document.getElementById("int-name").value,
+      endpoint: document.getElementById("int-endpoint").value,
+      auth_method: document.getElementById("int-auth").value,
+      enabled: document.getElementById("int-enabled").checked,
+      verify_tls: document.getElementById("int-tls").checked,
+      sync_interval_minutes: Number(document.getElementById("int-interval").value),
+    };
+    const secret = document.getElementById("int-secret").value;
+    if (secret) payload.secret_ref = secret;
+    return payload;
+  };
   modal(`Configure ${integration.key}`, form, [
+    h("button", {
+      class: "btn",
+      onclick: async (event) => {
+        const button = event.currentTarget;
+        button.disabled = true;
+        button.textContent = "Testing…";
+        try {
+          // The draft is sent to the test route only; nothing is saved.
+          const result = await api(
+            `inventory/integrations/${integration.key}/test`,
+            { method: "POST", body: draftPayload() },
+          );
+          form.prepend(alert(
+            result.status === "success" ? "ok" : "error",
+            `${result.detail} (${result.duration_ms} ms)`));
+        } catch (error) {
+          form.prepend(alert("error", error.message));
+        } finally {
+          button.disabled = false;
+          button.textContent = "Test configuration";
+        }
+      },
+    }, "Test configuration"),
     h("button", {
       class: "btn btn-primary",
       onclick: async () => {
-        const payload = {
-          display_name: document.getElementById("int-name").value,
-          endpoint: document.getElementById("int-endpoint").value,
-          auth_method: document.getElementById("int-auth").value,
-          enabled: document.getElementById("int-enabled").checked,
-          verify_tls: document.getElementById("int-tls").checked,
-          sync_interval_minutes: Number(document.getElementById("int-interval").value),
-        };
-        const secret = document.getElementById("int-secret").value;
-        if (secret) payload.secret_ref = secret;
         try {
           await api(`inventory/integrations/${integration.key}`, {
-            method: "PATCH", body: payload,
+            method: "PATCH", body: draftPayload(),
           });
           document.getElementById("modal-root").innerHTML = "";
           renderIntegrations();

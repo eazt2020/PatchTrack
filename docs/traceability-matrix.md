@@ -53,7 +53,7 @@ check that verifies it. Status meanings:
 | FR-B1..B5 users and roles | same | 5/5 | Last-administrator guard is in `identity.update_user` |
 | FR-C1..C12 inventory | same | 12/12 | C1 field map is configuration-driven; C11 override survives a sync (integration test); C12 rename propagation through aliases, sync survival and the delete refusal are integration-tested |
 | FR-D1..D8 reconciliation | same | 8/8 | D7 resolution route + audit |
-| FR-E1..E7 integrations | same | 7/7 | E3 rejects pasted credentials |
+| FR-E1..E8 integrations | same | 8/8 | E3 rejects pasted credentials; E8 pinned by `test_integration_probe.py` and `test_integration_test_endpoint.py` |
 | FR-F1..F14 evaluation | same | 14/14 | F13 pinned by `test_period_parity.py` |
 | FR-G1..G5 snapshots | same | 5/5 | G1 idempotency via partial unique index |
 | FR-H1..H14 reporting | same | 14/14 | H10 pinned by `test_scheduler.py` |

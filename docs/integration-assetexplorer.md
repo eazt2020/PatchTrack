@@ -205,7 +205,24 @@ Content-Type: application/json
 }
 ```
 
-Then verify:
+Test the configuration first — this exercises the endpoint, TLS and bearer
+token and writes nothing:
+
+```http
+POST /api/inventory/integrations/assetexplorer/test
+Content-Type: application/json
+
+{}
+```
+
+A successful response is `{"status": "success", "detail": "AssetExplorer
+answered with HTTP 200; …", "duration_ms": …}`; a failure returns
+`{"status": "failed", "detail": "<reason>"}` with HTTP 200, so the UI can show
+the reason. The same route accepts draft `endpoint`, `auth_method`,
+`secret_ref`, `verify_tls`, timeout and `page_size` values to test a change
+before saving it.
+
+Then verify with a collection:
 
 ```http
 POST /api/inventory/sync   {"integration": "assetexplorer"}

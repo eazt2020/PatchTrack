@@ -80,6 +80,13 @@ class SatelliteClient:
         except ValueError as exc:
             raise SatelliteError("Satellite returned malformed JSON") from exc
 
+    def probe(self) -> str:
+        """One host page: endpoint, TLS and credentials, without collection."""
+        body = self._get("/hosts", {"page": 1, "per_page": 1})
+        total = body.get("total")
+        suffix = f"; {total} host(s) reported" if total is not None else ""
+        return f"Satellite answered with HTTP 200{suffix}"
+
     def fetch_assessments(self) -> list[PatchAssessment]:
         hosts: list[dict] = []
         page = 1

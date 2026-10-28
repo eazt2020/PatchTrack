@@ -7,8 +7,8 @@ pytest tests.
 
 | Layer | Location | Needs | Count |
 |-------|----------|-------|-------|
-| Unit tests | `tests/unit/` | Nothing but Python | 259 |
-| Database integration tests | `tests/integration/` | PostgreSQL | 66 |
+| Unit tests | `tests/unit/` | Nothing but Python | 270 |
+| Database integration tests | `tests/integration/` | PostgreSQL | 71 |
 | Browser smoke test | `tests/ui/smoke.py` | Playwright + Chromium + a running stack | 1 script, 14 routes |
 | Dashboard verification | manual procedure (§7) | Grafana + PostgreSQL | 15 panels |
 | Deployment verification | manual procedure (§8) | Docker + RHEL/Rocky 9 | full stack |
@@ -16,9 +16,9 @@ pytest tests.
 Run:
 
 ```bash
-/opt/patchtrack-venv/bin/python -m pytest                       # 259 pass, 55 skip without a DB
+/opt/patchtrack-venv/bin/python -m pytest                       # 270 pass, 71 skip without a DB
 PATCHTRACK_TEST_DATABASE_URL='postgresql+psycopg://patchtrack@/patchtrack_test?host=/tmp' \
-  /opt/patchtrack-venv/bin/python -m pytest                     # 314 pass
+  /opt/patchtrack-venv/bin/python -m pytest                     # 341 pass
 ```
 
 `pytest.ini` sets `testpaths = tests`, `--strict-markers` and fails on an
@@ -48,6 +48,7 @@ so the same command works on a build host without PostgreSQL.
 | `test_period_keys.py` | 28 | The dashboard's period keys resolve to exact calendar windows: month, quarter and year begin and end on the right days (including 29 February and 31 December); malformed, out-of-range and lower-case quarter keys are rejected rather than rounded; keys and reader labels round-trip |
 | `test_seed_demo.py` | 5 | The five-year demo generator spans 60 months; every day's states add up to the in-scope population and its severity counts add up to the patch total; the monthly, quarterly and yearly series each contain both met and missed periods, plus a visible outage quarter; per-dimension group rows reconcile to the snapshot totals without exceeding any group's population; live hosts are assigned exactly one state |
 | `test_job_scripts.py` | 14 | Both job runners authenticate as the `scheduler` principal with the service token and use no password, cookie or gateway route; the tick script stamps only after success and one failing step does not stop the rest; the single-job script detects container versus native deployment, supports both Docker and Podman container runtimes, and the native path runs the interpreter with `-I` |
+| `test_integration_probe.py` | 11 | Each connector's Test configuration probe uses one page, succeeds on a documented response, reports 401/403 as an authentication failure, rejects a malformed payload and raises rather than silently returning an empty collection; the Solaris probe checks the inbox exists and every document parses |
 
 The unit tests are where the compliance rules are pinned. Any change to
 `engine.py` that alters a published figure must change a test in
@@ -60,9 +61,10 @@ The unit tests are where the compliance rules are pinned. Any change to
 `tests/integration/test_rotation_end_to_end.py` — 3 tests,
 `tests/integration/test_asset_overrides.py` — 5 tests, and
 `tests/integration/test_placement_options.py` — 10 tests,
-`tests/integration/test_dashboard_breakdown.py` — 4 tests, and
-`tests/integration/test_dashboard_periods.py` — 12 tests, all against a real,
-freshly created database.
+`tests/integration/test_dashboard_breakdown.py` — 4 tests,
+`tests/integration/test_dashboard_periods.py` — 12 tests, and
+`tests/integration/test_integration_test_endpoint.py` — 5 tests, all against a
+real, freshly created database.
 
 The fixture creates `patchtrack_test`, applies every migration, and drops it at
 the end of the session. It **must not** be pointed at a database with data you
@@ -140,6 +142,16 @@ Dashboard breakdowns (`test_dashboard_breakdown.py`):
   environment and business-service names, which is what the panels draw;
 - nine business services produce nine group rows — the API never truncates the
   list that the panel draws.
+
+Integration configuration tests (`test_integration_test_endpoint.py`):
+
+- a successful probe returns success, the detail and a duration, and writes an
+  `integration.tested` event;
+- a probe writes no `sync_runs` row, so testing cannot look like a collection;
+- a connector failure is returned as `status: failed` with its reason instead
+  of raising a 500;
+- a draft endpoint is used for the test but is not persisted;
+- a missing endpoint and a pasted credential are refused before any request.
 
 Audit retention (`test_audit_retention.py`):
 

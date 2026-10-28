@@ -340,12 +340,34 @@ day of the month (1–28), an hour, a timezone and a recipient list.
 
 | Screen | Role required | Purpose |
 |--------|---------------|---------|
-| Integrations | Administrator | Endpoint, credential reference, TLS, enable, run now |
+| Integrations | Administrator | Endpoint, credential reference, TLS, enable, test configuration, run now |
 | Compliance policy | Administrator | Target, freshness, blocking severities, scope rules |
 | Users & roles | Administrator | Accounts, roles, password resets |
 | Audit trail | Administrator | Who did what, when |
 | Operational health | Operations | Integration status and manual collection |
 | Settings | Administrator | Organisation name on reports; environment and business-service lists; audit trail retention |
+
+### Testing an integration
+
+**Administration → Integrations → Test configuration** checks the saved
+configuration against the source without collecting anything. It proves the
+endpoint is reachable, TLS verifies, the credential is accepted and the first
+page has the expected shape. The result shows a short explanation and the
+round-trip time.
+
+- **Test configuration** on a card uses the saved values.
+- **Configure → Test configuration** uses the values currently in the form,
+  including an endpoint or credential reference you have not saved yet. A
+  blank credential field tests with the saved reference.
+- A test writes **no** assets, assessments or collection run, so it cannot
+  change compliance figures or the integration's health. It is recorded in the
+  audit trail as `integration.tested`.
+- For Solaris there is no remote endpoint: the test checks that the inbox
+  directory exists, is readable and every waiting document parses.
+
+A failed test names the reason — missing endpoint, TLS error, HTTP status,
+authentication failure, malformed payload or an unreadable inbox — so the
+configuration can be corrected before a collection is attempted.
 
 ### Editing policy
 

@@ -95,6 +95,29 @@ def parse_solaris_document(payload: dict) -> PatchAssessment:
     )
 
 
+def probe_inbox(inbox: Path) -> str:
+    """Check the watched directory is readable and its documents parse.
+
+    This is the Solaris equivalent of an HTTP probe: there is no remote
+    endpoint, so success means the collection job is writing valid documents
+    where PatchTrack expects them. Files are parsed but not moved or deleted.
+    """
+    if not inbox.exists():
+        raise SolarisIngestError(f"inbox {inbox} does not exist")
+    if not inbox.is_dir():
+        raise SolarisIngestError(f"inbox {inbox} is not a directory")
+    try:
+        loaded = load_inbox(inbox)
+    except SolarisIngestError:
+        raise
+    except OSError as exc:
+        raise SolarisIngestError(f"inbox {inbox} is not readable: {exc}") from exc
+    return (
+        f"inbox {inbox} is readable; {len(loaded)} document(s) waiting, "
+        "all parsed successfully"
+    )
+
+
 def load_inbox(inbox: Path) -> list[tuple[Path, PatchAssessment]]:
     """Read every ``*.json`` file in the inbox. Malformed files raise."""
     if not inbox.exists():

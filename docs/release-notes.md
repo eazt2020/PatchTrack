@@ -33,6 +33,13 @@ First release.
   value is preserved as `*_source` and the next sync cannot restore it. A value
   still in use cannot be deleted — rename it. The AssetExplorer sync never
   writes either table.
+- **Integration self-test.** Each integration card and the configuration editor
+  can test the source without collecting: endpoint reachability, TLS, credential
+  and the first page's shape are checked and reported with a reason and
+  duration. A draft can be tested before saving. The probe writes no asset,
+  assessment or sync run, so a failed test cannot disturb compliance or the
+  integration's health; it is audited as `integration.tested`. For Solaris the
+  test verifies the inbox exists, is readable and every waiting document parses.
 - **Compliance engine.** Five states (Compliant, Non-compliant, Unknown,
   Stale, Excluded) with a documented numerator and denominator. Unknown and
   stale are counted against compliance. Server percentage and patch counts are

@@ -145,6 +145,21 @@ class AssetExplorerClient:
             raise AssetExplorerError("AssetExplorer returned an unexpected payload")
         return body
 
+    def probe(self) -> str:
+        """Check reachability, TLS and credentials without collecting.
+
+        One page is enough: it proves the endpoint answers, the credential is
+        accepted and the payload is the documented shape. Nothing is written.
+        """
+        body = self._request_page(1)
+        items = body.get("data") or body.get("assets") or []
+        if not isinstance(items, list):
+            raise AssetExplorerError("AssetExplorer data field is not a list")
+        return (
+            f"AssetExplorer answered with HTTP 200; "
+            f"{len(items)} record(s) in the first page"
+        )
+
     def fetch_assets(self) -> list[AssetRecord]:
         records: list[AssetRecord] = []
         page = 1

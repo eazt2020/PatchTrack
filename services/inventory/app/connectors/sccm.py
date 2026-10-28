@@ -65,6 +65,31 @@ class SccmClient:
     def __exit__(self, *exc: object) -> None:
         self.close()
 
+    def probe(self) -> str:
+        """One-device query: endpoint, TLS and token, without collection."""
+        try:
+            response = self._client.get(
+                f"{self.base_url}/SMS_REST/DeviceCompliance",
+                params={"$top": 1, "$skip": 0},
+            )
+        except httpx.HTTPError as exc:
+            raise SccmError(f"SCCM request failed: {exc}") from exc
+        if response.status_code in (401, 403):
+            raise SccmError("SCCM authentication failed")
+        if response.status_code >= 400:
+            raise SccmError(
+                f"SCCM returned HTTP {response.status_code} for compliance query"
+            )
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise SccmError("SCCM returned malformed JSON") from exc
+        devices = body.get("value", []) if isinstance(body, dict) else []
+        return (
+            "SCCM answered with HTTP 200; "
+            f"{len(devices)} device record(s) in the first page"
+        )
+
     def fetch_assessments(self) -> list[PatchAssessment]:
         url = f"{self.base_url}/SMS_REST/DeviceCompliance"
         assessments: list[PatchAssessment] = []

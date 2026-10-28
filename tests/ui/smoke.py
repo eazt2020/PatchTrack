@@ -279,6 +279,31 @@ def main() -> int:
                 fail(f"{route}: console errors — {' | '.join(console_errors)}")
         print(f"ok  {len(list_routes)} registers expose filter and sort controls")
 
+        # --- an integration can be tested without collecting -----------------
+        # The seeded demo integrations have no endpoint, so the expected
+        # outcome is a *reported* failure — not a button that does nothing,
+        # and not a probe that writes a collection run.
+        console_errors.clear()
+        page.goto(f"{BASE}/#/integrations", wait_until="networkidle")
+        page.wait_for_timeout(500)
+        probe_card = page.locator(".card", has_text="AssetExplorer").first
+        if probe_card.get_by_role("button", name="Test configuration").count() != 1:
+            fail("integrations: no Test configuration button")
+        else:
+            probe_card.get_by_role("button", name="Test configuration").click()
+            try:
+                probe_card.locator(".alert").first.wait_for(timeout=40_000)
+            except Exception:
+                fail("integrations: Test configuration produced no result")
+            else:
+                text = probe_card.locator(".alert").first.inner_text()
+                if "ms)" not in text:
+                    fail(f"integrations: unhelpful test result — {text}")
+                else:
+                    print(f"ok  integrations report a configuration test — {text.splitlines()[-1]}")
+        if console_errors:
+            fail(f"integrations: console errors — {' | '.join(console_errors)}")
+
         # --- CSV export covers the filtered list, not just the visible page ---
         page.goto(f"{BASE}/#/findings", wait_until="networkidle")
         page.wait_for_timeout(400)
