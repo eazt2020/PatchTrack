@@ -229,6 +229,9 @@ def main() -> int:
         if not sidebar.is_visible():
             fail("dashboard: the sidebar should be visible before TV mode is enabled")
         page.click("#kiosk-toggle")
+        # Move off the button: a transform does not re-evaluate :hover until
+        # the pointer moves, so the header would otherwise stay revealed.
+        page.mouse.move(800, 500)
         page.wait_for_timeout(300)
         if sidebar.is_visible():
             fail("dashboard: the sidebar is still visible in TV mode")
@@ -236,6 +239,17 @@ def main() -> int:
             fail("dashboard: body.kiosk was not set in TV mode")
         if page.get_attribute("#kiosk-toggle", "aria-pressed") != "true":
             fail("dashboard: the TV mode button did not report aria-pressed=true")
+        header = page.locator(".topbar")
+        if header.bounding_box()["y"] > -1:
+            fail("dashboard: the header is still on screen in TV mode")
+        page.mouse.move(700, 3)            # top edge of the upper screen
+        page.wait_for_timeout(350)
+        if header.bounding_box()["y"] < 0:
+            fail("dashboard: hovering the top edge did not reveal the header")
+        page.mouse.move(700, 500)
+        page.wait_for_timeout(350)
+        if header.bounding_box()["y"] > -1:
+            fail("dashboard: the revealed header did not hide again")
         page.keyboard.press("k")          # K returns to the navigation
         page.wait_for_timeout(300)
         if not sidebar.is_visible():
@@ -248,7 +262,8 @@ def main() -> int:
         page.wait_for_timeout(300)
         if not sidebar.is_visible():
             fail("dashboard: Escape did not leave TV mode")
-        print("ok  dashboard TV mode hides the navigation (button, K, Esc, ?tv=1)")
+        print("ok  dashboard TV mode hides the navigation and header, with a "
+              "top-edge reveal (button, K, Esc, ?tv=1)")
 
         # --- every register can be filtered and sorted ------------------------
         # Server list and inventory sort server-side (the page holds one page of
@@ -348,6 +363,16 @@ def main() -> int:
                 fail(f"{route}: an Export CSV button is still present")
         print("ok  dashboard, operational health, settings and reports have no CSV export")
 
+        # Report deletion is selectable in the UI for an administrator, but the
+        # checkbox column must not appear as data in the CSV export.
+        page.goto(f"{BASE}/#/reports", wait_until="networkidle")
+        page.wait_for_timeout(400)
+        if not page.locator("table.data .select-cell input[type=checkbox]").count():
+            fail("reports: no selection checkboxes for an administrator")
+        if page.get_by_role("button", name="Delete selected").count() == 0:
+            fail("reports: Delete selected button is missing for an administrator")
+        print("ok  reports offer administrator selection and deletion")
+
         # Filtering narrows the rendered rows and says so, rather than silently
         # showing a subset.
         page.goto(f"{BASE}/#/audit", wait_until="networkidle")
@@ -410,6 +435,27 @@ def main() -> int:
                  f"({column_total!r}, business={matched_business!r})")
         print(f"ok  servers search matches a non-hostname column ({column_total})")
 
+        # A failing server can be verified by a person: the detail drawer
+        # offers a justification form with evidence, without changing the
+        # compliance state itself.
+        page.goto(f"{BASE}/#/servers?state=non_compliant", wait_until="networkidle")
+        page.wait_for_timeout(900)
+        rows = page.locator("#view tbody tr")
+        if not rows.count():
+            fail("justifications: no non-compliant server to inspect")
+        rows.first.locator("a").first.click()
+        page.wait_for_timeout(900)
+        if not page.get_by_text("Verification and justification").count():
+            fail("justifications: the server detail has no verification card")
+        elif not page.locator("#justification-reason").is_visible():
+            fail("justifications: the verification form or reason picker is missing")
+        elif not page.locator("#justification-evidence").count():
+            fail("justifications: the form has no evidence file input")
+        else:
+            print("ok  a failing server offers verification with evidence")
+        page.locator("#modal-root button[aria-label='Close']").click()
+        page.wait_for_timeout(300)
+
         # Server inventory: the Status filter is an exact state, and a state
         # name in the search box is matched as a whole term. Searching
         # "Compliant" must not drag in every "Non-compliant" server — it did,
@@ -455,6 +501,25 @@ def main() -> int:
         else:
             print("ok  inventory search keeps focus and caret across the re-render")
 
+        # Operational health is split by concern so the integration table and
+        # the run history are not buried under the service list.
+        page.goto(f"{BASE}/#/health", wait_until="networkidle")
+        page.wait_for_timeout(500)
+        health_tabs = [tab.inner_text() for tab in page.get_by_role("tab").all()]
+        if health_tabs != ["Services", "Data freshness",
+                           "Integrations", "Collection runs"]:
+            fail(f"operational health: unexpected tabs {health_tabs}")
+        else:
+            print("ok  operational health is split into service, freshness, "
+                  "integration and run tabs")
+        page.get_by_role("tab", name="Collection runs").click()
+        page.wait_for_timeout(200)
+        if not page.locator('[role="tabpanel"]:not([hidden])').get_by_text(
+                "Recent collection runs").is_visible():
+            fail("operational health: the Collection runs tab is not visible")
+        else:
+            print("ok  the Collection runs tab shows the run history")
+
         # Settings manages the environment / business-service picker. Add,
         # rename and delete must all work there, and the placement editor must
         # then offer the curated list instead of free text — a typo in a
@@ -468,6 +533,48 @@ def main() -> int:
             fail("settings: the audit retention value is outside 30–36500 days")
         else:
             print("ok  settings exposes the audit retention window")
+        report_retention = page.locator("#report-retention-days")
+        if (report_retention.count() != 1
+                or not report_retention.input_value().isdigit()):
+            fail("settings: the report retention control is missing or has no value")
+        elif not (30 <= int(report_retention.input_value()) <= 36500):
+            fail("settings: the report retention value is outside 30–36500 days")
+        else:
+            print("ok  settings exposes the report file retention window")
+        branding = ["#org-name", "#org-logo", "#preparer-name",
+                    "#preparer-title", "#concur-name", "#concur-title"]
+        missing = [selector for selector in branding
+                   if page.locator(f"#view {selector}").count() != 1]
+        if missing:
+            fail(f"settings: report branding controls missing: {missing}")
+        else:
+            print("ok  settings exposes logo upload and both signatories")
+        tabs = page.get_by_role("tab")
+        tab_labels = [tab.inner_text() for tab in tabs.all()]
+        if tab_labels != ["Report branding", "Retention",
+                          "Inventory placement", "Platform"]:
+            fail(f"settings: unexpected tabs {tab_labels}")
+        else:
+            print("ok  settings is split into branded, retention, placement and platform tabs")
+        page.get_by_role("tab", name="Retention").click()
+        page.wait_for_timeout(200)
+        if not page.locator("#report-retention-days").is_visible():
+            fail("settings: the Retention tab does not show the report retention control")
+        elif not page.locator("#audit-retention-days").is_visible():
+            fail("settings: the Retention tab does not show the audit retention control")
+        else:
+            print("ok  the Retention tab shows both retention windows")
+        page.get_by_role("tab", name="Platform").click()
+        page.wait_for_timeout(200)
+        zone_select = page.locator("#system-timezone")
+        if not zone_select.is_visible():
+            fail("settings: the Platform tab does not show the timezone selector")
+        elif zone_select.locator("option").count() < 2:
+            fail("settings: the timezone selector has no zones")
+        else:
+            print("ok  the Platform tab offers the system timezone selector")
+        page.get_by_role("tab", name="Inventory placement").click()
+        page.wait_for_timeout(300)
         env_input = page.locator("#view input[placeholder='New environment value']")
         if env_input.count() != 1:
             fail("settings: the environment list has no add field")
@@ -559,6 +666,45 @@ def main() -> int:
                  f"{finding_rows} rows")
         print(f"ok  findings search matches the source column "
               f"({finding_rows} → {sccm_rows} rows)")
+
+        # --- chart labels are data, never markup -----------------------------
+        # Group and environment names come from inventory and can contain HTML
+        # metacharacters. Legends and tooltips must render them as text.
+        escaping = page.evaluate(
+            """async () => {
+                const charts = await import('/static/charts.js');
+                const host = document.createElement('div');
+                document.body.appendChild(host);
+                const payload = '<img src=x onerror="window.__ptXss=1">';
+                charts.legend(host, [{label: payload, color: '#3987e5'}]);
+                const plot = document.createElement('div');
+                document.body.appendChild(plot);
+                charts.stackedColumns(plot, {
+                    rows: [{group: payload, overdue: 3}],
+                    keys: ['overdue'],
+                    labels: {overdue: 'Overdue'},
+                    colors: {overdue: '#d9534f'},
+                });
+                const rect = plot.querySelector('rect');
+                rect.dispatchEvent(new MouseEvent(
+                    'mouseenter', {clientX: 20, clientY: 20, bubbles: true}));
+                const tip = document.querySelector('.tooltip');
+                const result = {
+                    legendInjected: host.querySelector('img') !== null,
+                    tooltipInjected: !!tip && tip.querySelector('img') !== null,
+                    tooltipText: tip ? tip.textContent : '',
+                };
+                host.remove();
+                plot.remove();
+                if (tip) tip.style.display = 'none';
+                return result;
+            }""")
+        if escaping["legendInjected"] or escaping["tooltipInjected"]:
+            fail("charts: an inventory value was parsed as HTML in a chart label")
+        elif "onerror" not in escaping["tooltipText"]:
+            fail("charts: the HTML-special group name is missing from the tooltip")
+        else:
+            print("ok  chart legends and tooltips render group names as text")
 
         if args.screenshot:
             page.screenshot(path=args.screenshot, full_page=True)

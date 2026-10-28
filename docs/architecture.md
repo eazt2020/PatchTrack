@@ -130,7 +130,7 @@ independent queries.
 | SMTP down | Report stays `completed`; delivery attempt recorded `failed` |
 | compliance service down | Gateway returns 503 for compliance routes; reports and inventory continue |
 | Database down | Every service reports unhealthy on `/readyz`; no partial writes are possible |
-| Duplicate scheduler instances | `reporting.job_executions` unique key makes the second instance a no-op |
+| Duplicate scheduler instances | A PostgreSQL advisory lock plus `reporting.job_executions`' unique key make the second instance a no-op |
 
 ## 7. Deployment topology
 
@@ -151,12 +151,14 @@ See [install.md](install.md) and [offline-deployment.md](offline-deployment.md).
 ## 8. Deliberate limitations
 
 - **No message broker.** Collection and report generation are synchronous
-  within a request or a scheduler tick. This is appropriate for a population
-  of tens of thousands of servers collected a few times a day; it would not be
-  for continuous streaming.
+  within a request or a scheduler pass. The scheduler loop lives in each
+  service process; due state is in `shared.scheduled_jobs`. This is appropriate
+  for a population of tens of thousands of servers collected a few times a day;
+  it would not be for continuous streaming.
 - **Single writer per schema.** The design assumes one instance of each
-  service. The idempotency keys in reporting make two schedulers safe, but
-  horizontal scaling of the services is not a supported configuration.
+  service. The scheduler's advisory lock and the reporting idempotency keys
+  make two instances safe, but horizontal scaling of the services is not a
+  supported configuration.
 - **No object storage.** Report files live on a volume; the database holds
   metadata and the SHA-256.
 - **Staleness is computed at evaluation time, from the source's `assessed_at`.**

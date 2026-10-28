@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
+from uuid import UUID
 
 import jwt
 from fastapi import Depends, HTTPException, Request, status
@@ -37,6 +38,7 @@ PERMISSIONS: dict[str, set[str]] = {
         # source value.
         "inventory:manage",
         "compliance:view",
+        "compliance:justify",
         "findings:view",
         "integrations:view",
         "sync:run",
@@ -52,6 +54,9 @@ PERMISSIONS: dict[str, set[str]] = {
         "reports:download",
         "schedules:manage",
     },
+    # `reports:delete` is deliberately absent from every other role, including
+    # Report Manager: producing an archived report and destroying it are
+    # different duties. Administrator receives it through the wildcard.
     "administrator": {"*"},
 }
 
@@ -73,7 +78,7 @@ class Principal:
 
 def create_access_token(
     *, user_id: str, username: str, role: str, display_name: str = "",
-    must_change_password: bool = False,
+    must_change_password: bool = False, token_version: int = 0,
 ) -> tuple[str, int]:
     settings = get_settings()
     expires_in = settings.access_token_minutes * 60
@@ -86,6 +91,10 @@ def create_access_token(
         # Carried in the token so the gateway can refuse everything else until
         # the forced rotation is satisfied, without a database call per request.
         "pwd_change_required": bool(must_change_password),
+        # The account's revocation counter at issue time. The signature alone
+        # cannot express "this session ended"; downstream services compare
+        # this claim with identity.users.token_version.
+        "ver": int(token_version),
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(seconds=expires_in)).timestamp()),
         "iss": "patchtrack-identity",
@@ -116,6 +125,50 @@ def decode_token(token: str) -> dict[str, Any]:
         ) from exc
 
 
+def _reject_revoked_session(payload: dict[str, Any]) -> None:
+    """Refuse a bearer token whose account has moved on.
+
+    Signing out, a password change, a password reset, a role change and
+    deactivation all increment ``identity.users.token_version``. Tokens minted
+    before that carry the old number and no longer authenticate, so an access
+    token cannot outlive the session it was issued for. Tokens without the
+    claim predate revocation and are refused rather than trusted.
+    """
+    if "ver" not in payload:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session is no longer valid",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    try:
+        user_id = str(UUID(str(payload["sub"])))
+        version = int(payload["ver"])
+    except (ValueError, TypeError, AttributeError):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+        ) from None
+
+    from .db import fetch_one
+
+    row = fetch_one(
+        "SELECT token_version, is_active FROM identity.users WHERE id = :id",
+        id=user_id,
+    )
+    if row is None or not row.get("is_active", True):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session is no longer valid",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if int(row["token_version"]) != version:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session has been revoked",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
 def principal_from_request(request: Request) -> Principal:
     """Resolve the caller from a bearer token or the trusted gateway headers.
 
@@ -130,6 +183,7 @@ def principal_from_request(request: Request) -> Principal:
         role = str(payload.get("role", "viewer"))
         if role not in ROLES:
             raise HTTPException(status_code=403, detail="Unknown role")
+        _reject_revoked_session(payload)
         return Principal(
             user_id=str(payload["sub"]),
             username=str(payload.get("username", "")),

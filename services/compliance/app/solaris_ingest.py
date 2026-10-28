@@ -119,7 +119,7 @@ def ingest_solaris_records(
                         """
                     ),
                     {
-                        "a": asset_id, "assessed": data["assessed_at"],
+                        "a": asset_id, "assessed": data.get("assessed_at"),
                         "run": run_id, "total": len(data.get("patches", [])),
                         "crit": counts["critical"], "imp": counts["important"],
                         "mod": counts["moderate"], "low": counts["low"],

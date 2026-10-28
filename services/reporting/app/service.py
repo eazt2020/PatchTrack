@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from datetime import UTC, datetime, timedelta
@@ -15,6 +16,7 @@ from patchtrack_common.db import connection, fetch_all, fetch_one
 
 from .mailer import send_report_email
 from .pdf import ReportContext, render_report, sha256_of, validate_pdf
+from patchtrack_common import timezones as timezone_settings
 
 log = logging.getLogger(__name__)
 
@@ -27,6 +29,39 @@ REPORT_TITLES = {
 
 class ReportError(RuntimeError):
     pass
+
+
+# Retention is an administrator setting stored in shared.app_settings, not a
+# deployment constant: changing it applies to existing reports and to the next
+# purge without a restart. The environment value is the default until an
+# administrator saves a window.
+REPORT_RETENTION_KEY = "report_retention_days"
+REPORT_RETENTION_DEFAULT = 2555
+REPORT_RETENTION_MIN = 30
+REPORT_RETENTION_MAX = 36500
+
+
+def report_retention_days() -> tuple[int, dict[str, Any] | None]:
+    """The configured file-retention window, and the settings row if any."""
+    row = fetch_one(
+        "SELECT value, updated_at, updated_by FROM shared.app_settings "
+        "WHERE key = :key",
+        key=REPORT_RETENTION_KEY,
+    )
+    fallback = int(get_settings().report_retention_days)
+    if row is None:
+        return fallback, None
+    value = row["value"]
+    if isinstance(value, str):
+        value = json.loads(value)
+    stored = value.get("days") if isinstance(value, dict) else value
+    try:
+        days = int(stored)
+    except (TypeError, ValueError):
+        return fallback, row
+    if not REPORT_RETENTION_MIN <= days <= REPORT_RETENTION_MAX:
+        return fallback, row
+    return days, row
 
 
 def _report_dir() -> Path:
@@ -171,6 +206,65 @@ def _period_label(snapshot: dict[str, Any]) -> str:
     return f"{start.isoformat()} to {last_day.isoformat()}"
 
 
+def _failing_servers() -> list[dict[str, Any]]:
+    """Every server in a failing state, with its current verification if any.
+
+    The section has to show both halves of the picture: what was justified and
+    what was not. A missing compliance row means the engine treated the server
+    as unknown, so it belongs in the failing list too. Only the active
+    justification per server is joined; superseded and withdrawn records stay
+    in the database for audit.
+    """
+    return fetch_all(
+        """
+        SELECT a.hostname, a.os_name, a.os_version, a.environment,
+               a.business_group,
+               COALESCE(c.state, 'unknown') AS state,
+               COALESCE(c.reason, '') AS compliance_reason,
+               COALESCE(c.total_patches, 0) AS total_patches,
+               COALESCE(c.critical_count, 0) AS critical_count,
+               j.id AS justification_id, j.reason_code, j.statement,
+               j.remediation_plan, j.remediation_target, j.created_by,
+               j.created_at,
+               count(e.id) AS evidence_count,
+               string_agg(e.filename, ', ' ORDER BY e.uploaded_at)
+                   AS evidence_names
+        FROM inventory.asset_effective a
+        LEFT JOIN compliance.asset_compliance c ON c.asset_id = a.id
+        LEFT JOIN inventory.asset_justifications j
+               ON j.asset_id = a.id AND j.status = 'active'
+        LEFT JOIN inventory.justification_evidence e
+               ON e.justification_id = j.id
+        WHERE a.in_scope AND a.lifecycle_status = 'active'
+          AND (c.state IN ('non_compliant', 'stale', 'unknown')
+               OR c.state IS NULL)
+        GROUP BY a.hostname, a.os_name, a.os_version, a.environment,
+                 a.business_group, c.state, c.reason, c.total_patches,
+                 c.critical_count, j.id
+        ORDER BY a.hostname
+        """
+    )
+
+
+def _reason_labels(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    # Imported lazily: the reporting service does not otherwise depend on the
+    # inventory package, and the label map is the only shared vocabulary.
+    labels = {
+        "accepted_risk": "Accepted risk",
+        "compensating_control": "Compensating control in place",
+        "scheduled_remediation": "Remediation scheduled",
+        "false_positive": "False positive / assessment error",
+        "decommissioning": "Asset being decommissioned",
+        "collection_gap": "Collection or authentication gap",
+        "investigation": "Under investigation",
+    }
+    for row in rows:
+        row["reason_label"] = labels.get(row["reason_code"], row["reason_code"])
+        names = row.get("evidence_names")
+        row["evidence_names"] = [name.strip() for name in names.split(",")] if names else []
+    return rows
+
+
 def build_context(report: dict[str, Any]) -> ReportContext:
     settings = get_settings()
     snapshot = _load_snapshot_for(report)
@@ -181,11 +275,25 @@ def build_context(report: dict[str, Any]) -> ReportContext:
     )
     org_name = "PatchTrack"
     logo_path = None
+    logo_data = None
+    organization_fields: dict[str, str] = {}
     if organization:
         value = organization["value"]
+        if isinstance(value, str):
+            import json
+            value = json.loads(value)
         if isinstance(value, dict):
             org_name = value.get("name") or org_name
+            # The logo is stored with the setting so every reporting replica
+            # renders the same cover; a legacy path is still honoured for an
+            # installation that had one before the uploader existed.
             logo_path = value.get("logo_path")
+            logo_data = _decode_logo(value.get("logo_data"))
+            organization_fields = {
+                key: str(value.get(key) or "") for key in (
+                    "preparer_name", "preparer_title", "concur_name", "concur_title",
+                )
+            }
     methodology = snapshot.get("methodology") or {}
     if isinstance(methodology, str):
         import json
@@ -196,6 +304,7 @@ def build_context(report: dict[str, Any]) -> ReportContext:
         classification="CONFIDENTIAL — INTERNAL USE ONLY",
         period_label=period_label,
         generated_at=datetime.now(UTC),
+        timezone=timezone_settings.system_timezone(),
         generated_by=report["requested_by"],
         snapshot=snapshot,
         groups=groups,
@@ -206,8 +315,23 @@ def build_context(report: dict[str, Any]) -> ReportContext:
         top_non_compliant=_top_non_compliant(snapshot),
         findings=[],
         trend=_trend(),
+        failing_servers=_reason_labels(_failing_servers()),
         logo_path=logo_path,
+        logo_data=logo_data,
+        **organization_fields,
     )
+
+
+def _decode_logo(data_uri: Any) -> bytes | None:
+    """Decode the stored data URI; a malformed value must not block a report."""
+    if not isinstance(data_uri, str) or "," not in data_uri:
+        return None
+    try:
+        import base64
+        return base64.b64decode(data_uri.split(",", 1)[1], validate=True)
+    except Exception:  # noqa: BLE001 - branding is optional
+        log.warning("stored organisation logo could not be decoded")
+        return None
 
 
 def _target_path(report_id: str, report_type: str,
@@ -248,6 +372,7 @@ def generate_report(report_id: str, *, deliver: bool = False) -> dict[str, Any]:
         os.chmod(tmp, 0o640)
         tmp.replace(path)
         digest = sha256_of(pdf_bytes)
+        retention_days, _ = report_retention_days()
         with connection() as conn:
             conn.execute(
                 text(
@@ -256,7 +381,8 @@ def generate_report(report_id: str, *, deliver: bool = False) -> dict[str, Any]:
                         status = 'completed', completed_at = now(),
                         filename = :f, file_path = :p, sha256 = :h,
                         file_size = :s, page_count = :pages,
-                        snapshot_id = :snap
+                        snapshot_id = :snap,
+                        expires_at = now() + make_interval(days => :days)
                     WHERE id = :id
                     """
                 ),
@@ -265,6 +391,7 @@ def generate_report(report_id: str, *, deliver: bool = False) -> dict[str, Any]:
                     "s": len(pdf_bytes),
                     "pages": pdf_bytes.count(b"/Type /Page") + 1,
                     "snap": context.snapshot["id"], "id": report_id,
+                    "days": retention_days,
                 },
             )
     except Exception as exc:  # noqa: BLE001 - failures are persisted, not raised
@@ -330,7 +457,23 @@ def deliver_report(report_id: str, recipients: list[str]) -> dict[str, Any]:
 
 
 def purge_expired() -> int:
-    """Delete report files past retention, keeping a metadata tombstone."""
+    """Delete report files past retention, keeping a metadata tombstone.
+
+    Reports completed before retention became a stored setting have no
+    `expires_at`; their expiry is derived from the configured window and the
+    completion date first, so the daily job enforces the policy for them too.
+    """
+    days, _ = report_retention_days()
+    with connection() as conn:
+        conn.execute(
+            text(
+                "UPDATE reporting.reports "
+                "SET expires_at = completed_at + make_interval(days => :days) "
+                "WHERE status = 'completed' AND completed_at IS NOT NULL "
+                "  AND expires_at IS NULL"
+            ),
+            {"days": days},
+        )
     expired = fetch_all(
         "SELECT id, file_path FROM reporting.reports "
         "WHERE expires_at IS NOT NULL AND expires_at < now() "

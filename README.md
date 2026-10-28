@@ -35,7 +35,7 @@ reported and without the next sync undoing it.
 | `deploy/container` | Service image, entrypoint and pinned requirements |
 | `deploy/grafana` | Provisioned datasource and dashboard |
 | `deploy/systemd` | Native (non-container) service units |
-| `scripts` | Development launcher, demo data, dashboard generator, scheduled-job runners |
+| `scripts` | Development launcher, demo data, dashboard generator, manual job runner |
 | `tests` | Unit tests, database integration tests, browser smoke test |
 | `docs` | Requirements, design, operations and user documentation |
 

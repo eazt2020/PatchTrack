@@ -7,8 +7,8 @@ pytest tests.
 
 | Layer | Location | Needs | Count |
 |-------|----------|-------|-------|
-| Unit tests | `tests/unit/` | Nothing but Python | 270 |
-| Database integration tests | `tests/integration/` | PostgreSQL | 71 |
+| Unit tests | `tests/unit/` | Nothing but Python | 272 |
+| Database integration tests | `tests/integration/` | PostgreSQL | 77 |
 | Browser smoke test | `tests/ui/smoke.py` | Playwright + Chromium + a running stack | 1 script, 14 routes |
 | Dashboard verification | manual procedure (§7) | Grafana + PostgreSQL | 15 panels |
 | Deployment verification | manual procedure (§8) | Docker + RHEL/Rocky 9 | full stack |
@@ -16,7 +16,7 @@ pytest tests.
 Run:
 
 ```bash
-/opt/patchtrack-venv/bin/python -m pytest                       # 270 pass, 71 skip without a DB
+/opt/patchtrack-venv/bin/python -m pytest                       # 272 pass, 77 skip without a DB
 PATCHTRACK_TEST_DATABASE_URL='postgresql+psycopg://patchtrack@/patchtrack_test?host=/tmp' \
   /opt/patchtrack-venv/bin/python -m pytest                     # 341 pass
 ```
@@ -32,22 +32,24 @@ so the same command works on a build host without PostgreSQL.
 | `test_engine.py` | 44 | Every one of the five states; the state ordering; empty population yields `None`; the freshness boundary is inclusive at exactly the threshold and stale just past it; scope rules and first-match-wins; excluded assets stay out of the denominator; patch counts are never blended; remediation due dates; `period_bounds` for months, quarters, year rollover and invalid input |
 | `test_period_parity.py` | 27 | `compliance.app.engine.period_bounds` and `reporting.app.periods.period_bounds` return identical results for the same input, and both reject the same invalid inputs. A report and a snapshot must never disagree about which days a period covers. |
 | `test_secrets.py` | 15 | Reference forms (`env:`, `file:`, empty); a bare credential is rejected; resolution from environment and file |
-| `test_security.py` | 31 | The full role matrix; administrator-only capabilities withheld from other roles; token round-trip; forged, expired, unsigned and missing-claim tokens rejected; gateway header trust requires the service token; the forced-rotation claim survives encode/decode |
-| `test_report_pdf.py` | 8 | A valid PDF is produced; EOF marker present; non-trivial size; truncation rejected; non-PDF rejected; tiny file rejected; an empty population renders without inventing 0% |
-| `test_scheduler.py` | 12 | Monthly/quarterly advancement; a passed run time moves to the next period; the result is always in the future; month-end clamping (31st → 28 Feb); timezone changes the instant; unknown timezone falls back to UTC; DST handled on the local wall clock |
-| `test_gateway_rotation.py` | 8 | A session that still owes a password change is refused (403) by every proxied route, including identity administration; `/api/me` reports the flag; a normal session is not caught by the guard |
+| `test_security.py` | 32 | The full role matrix; administrator-only capabilities withheld from other roles; token round-trip; forged, expired, unsigned and missing-claim tokens rejected; gateway header trust requires the service token; the forced-rotation claim survives encode/decode; the revocation counter travels in the token |
+| `test_report_pdf.py` | 18 | A valid PDF is produced; EOF marker present; non-trivial size; truncation rejected; non-PDF rejected; tiny file rejected; an empty population renders without inventing 0%; a cover logo is embedded and a corrupt logo is skipped without failing the report; group names, hostnames, branding and methodology text are XML-escaped |
+| `test_request_guards.py` | 5 | Declared and streamed bodies over the limit are refused with 413; a body within the limit reaches the route; a `RecursionError` is answered with 422 rather than 500; the guard installs on a FastAPI app |
+| `test_scheduler.py` | 12 | Report schedule maths: monthly/quarterly advancement; a passed run time moves to the next period; the result is always in the future; month-end clamping (31st → 28 Feb); timezone changes the instant; unknown timezone falls back to UTC; DST handled on the local wall clock |
+| `test_inapp_scheduler.py` | 8 | Only an explicit `status: failed` result counts as failure; a disabled scheduler registers no handlers; installing registers startup and shutdown and keeps the job list |
+| `test_gateway_rotation.py` | 11 | A session that still owes a password change is refused (403) by every proxied route, including identity administration; `/api/me` reports the flag; a normal session is not caught by the guard; encoded and double-encoded dot segments are refused with 400 |
 | `test_net.py` | 4 | Client addresses are canonicalised; header text, a list, and a CIDR are not addresses and become NULL rather than reaching an `inet` column |
 | `test_client_address.py` | 4 | The gateway ignores a browser-supplied `X-Forwarded-For`, uses the ASGI peer, and records NULL when the peer is not an address |
 | `test_container_entrypoint.py` | 5 | A command supplied by compose (the one-shot `migrate` job) is executed by the entrypoint rather than swallowed; a service start without `PATCHTRACK_SERVICE` still fails loudly; the command branch precedes the service check; the log level is lowercased for uvicorn; the build elevates for its ownership step and ends as uid 1001 |
 | `test_image_requirements.py` | 2 | Every third-party import in `services/` resolves to a distribution declared in `deploy/container/requirements.txt`, and `email-validator` is present for pydantic's `EmailStr` |
-| `test_systemd_units.py` | 17 | Each instance loads its own port file; no built-in port; migrations are a required predecessor unit; non-root, no capabilities, `ProtectSystem=strict`, `ReadWritePaths` limited to `/var/lib/patchtrack`; `--forwarded-allow-ips` is configurable and never `*`; the job unit loads the shared environment, depends on the services it calls, and the timer is hourly, persistent and bound to that unit |
+| `test_systemd_units.py` | 14 | Each instance loads its own port file; no built-in port; migrations are a required predecessor unit; non-root, no capabilities, `ProtectSystem=strict`, `ReadWritePaths` limited to `/var/lib/patchtrack`; `--forwarded-allow-ips` is configurable and never `*`; no scheduler timer or tick unit is shipped |
 | `test_migrations.py` | 6 | The migration directory is found in both the source-tree layout and the image layout (`/opt/patchtrack/common/patchtrack_common` is one level shallower), the nearest ancestor wins, and a missing directory raises instead of reporting an empty schema as up to date |
 | `test_cookie_policy.py` | 10 | Secure cookies are required for every non-loopback host by default; `always` and `never` behave as documented; an IPv6 loopback literal is recognised; `never` with `PRODUCTION` is refused at startup; an unknown policy value is rejected |
 | `test_server_sort.py` | 6 | The server list resolves a sort key through a fixed column table; an unknown key is a 422 rather than a silently ignored sort; rows with no value sort last in both directions; a hostname/id tie-break keeps paging stable |
 | `test_trend_periods.py` | 13 | Monthly, quarterly and yearly windows start on a real calendar period boundary; shifting back by N periods crosses year boundaries; labels read `Oct 26`, `Q4 2026`, `2026`; the basis table is the single source of truth for unit and default point count |
 | `test_period_keys.py` | 28 | The dashboard's period keys resolve to exact calendar windows: month, quarter and year begin and end on the right days (including 29 February and 31 December); malformed, out-of-range and lower-case quarter keys are rejected rather than rounded; keys and reader labels round-trip |
 | `test_seed_demo.py` | 5 | The five-year demo generator spans 60 months; every day's states add up to the in-scope population and its severity counts add up to the patch total; the monthly, quarterly and yearly series each contain both met and missed periods, plus a visible outage quarter; per-dimension group rows reconcile to the snapshot totals without exceeding any group's population; live hosts are assigned exactly one state |
-| `test_job_scripts.py` | 14 | The job runner authenticates as the `scheduler` principal with the service token and uses no password, cookie or gateway route; the tick runner delegates transport to it, stamps only after success and lets one failing step continue the rest; the single-job script detects container versus native deployment, supports both Docker and Podman container runtimes, and the native path runs the interpreter with `-I` |
+| `test_job_scripts.py` | 8 | The manual job runner authenticates as the `scheduler` principal with the service token and uses no password, cookie or gateway route; it detects container versus native deployment, supports both Docker and Podman container runtimes, and the native path runs the interpreter with `-I` |
 | `test_integration_probe.py` | 11 | Each connector's Test configuration probe uses one page, succeeds on a documented response, reports 401/403 as an authentication failure, rejects a malformed payload and raises rather than silently returning an empty collection; the Solaris probe checks the inbox exists and every document parses |
 
 The unit tests are where the compliance rules are pinned. Any change to
@@ -62,9 +64,13 @@ The unit tests are where the compliance rules are pinned. Any change to
 `tests/integration/test_asset_overrides.py` — 5 tests, and
 `tests/integration/test_placement_options.py` — 10 tests,
 `tests/integration/test_dashboard_breakdown.py` — 4 tests,
-`tests/integration/test_dashboard_periods.py` — 12 tests, and
-`tests/integration/test_integration_test_endpoint.py` — 5 tests, all against a
-real, freshly created database.
+`tests/integration/test_dashboard_periods.py` — 12 tests,
+`tests/integration/test_integration_test_endpoint.py` — 5 tests, and
+`tests/integration/test_report_branding.py` — 6 tests,
+`tests/integration/test_report_retention.py` — 6 tests,
+`tests/integration/test_session_revocation.py` — 10 tests, and
+`tests/integration/test_scheduler_state.py` — 5 tests, all against a real,
+freshly created database.
 
 The fixture creates `patchtrack_test`, applies every migration, and drops it at
 the end of the session. It **must not** be pointed at a database with data you
@@ -100,6 +106,17 @@ Password rotation (`test_password_change.py`):
   credential cannot be renewed;
 - an unauthenticated caller cannot change a password, and a service-token
   caller with no user identity is refused cleanly.
+
+Report branding (`test_report_branding.py`):
+
+- the organisation name, logo and both signatories round-trip through the real
+  settings row;
+- a name-only save preserves a previously uploaded logo, because the update is
+  partial by design;
+- removing the logo requires `remove_logo`, and clearing it does not disturb the
+  other branding fields;
+- a data URI that is not PNG/JPEG, whose bytes do not match the declared type,
+  or that exceeds 1 MB is rejected before it can be embedded in a report.
 
 Placement overrides (`test_asset_overrides.py`):
 
@@ -152,6 +169,18 @@ Integration configuration tests (`test_integration_test_endpoint.py`):
   of raising a 500;
 - a draft endpoint is used for the test but is not persisted;
 - a missing endpoint and a pasted credential are refused before any request.
+
+Report file retention (`test_report_retention.py`):
+
+- the default window is 2,555 days until an administrator stores a value;
+- saving a window recomputes every completed report's `expires_at` from its
+  completion date and runs the purge in the same request, so a shortened window
+  deletes expired files immediately;
+- a purged report keeps its row, status and digest, and its `file_path` becomes
+  empty with the retention tombstone recorded;
+- extending the window moves the expiry forward but cannot restore a file that
+  was already deleted;
+- a window outside 30–36,500 days is refused at the model.
 
 Audit retention (`test_audit_retention.py`):
 
@@ -267,7 +296,7 @@ delivery path now has its own tests.
    ownership step ran unprivileged and failed.
 8. **The default database image did not exist.** Red Hat publishes the
    PostgreSQL image behind a subscription; the default is now the official
-   `postgres:13`.
+   `postgres:17` (was `postgres:13`, which reached end of life).
 9. **The `migrate` container never ran.** The entrypoint ignored compose's
    `CMD`, demanded `PATCHTRACK_SERVICE` and exited 2, blocking every service
    that waits on it.

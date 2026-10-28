@@ -89,3 +89,17 @@ def test_a_normal_session_is_not_blocked_by_the_rotation_guard(client: TestClien
     client.cookies.set(GATEWAY_COOKIE, _session())
     response = client.get("/api/inventory/assets")
     assert response.status_code != 403
+
+
+@pytest.mark.parametrize("path", [
+    "/api/identity/auth/%2e%2e/users",
+    "/api/identity/auth/%252e%252e/users",
+    "/api/inventory/%2e%2e/%2e%2e/identity/users",
+])
+def test_encoded_dot_segments_cannot_reach_closed_routes(client: TestClient, path: str):
+    # httpx would resolve a literal '..' before sending, while Starlette routes
+    # on the encoded form. Both must be refused rather than let the upstream
+    # path normalisation turn "auth/../users" into "/users".
+    client.cookies.set(GATEWAY_COOKIE, _session())
+    response = client.get(path)
+    assert response.status_code == 400

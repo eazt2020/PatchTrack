@@ -161,9 +161,14 @@ class SccmClient:
         )
 
 
-def _parse_time(value: str | None) -> datetime:
+def _parse_time(value: str | None) -> datetime | None:
+    """Parse a SCCM timestamp, or return None when the source has none.
+
+    Substituting the current time would make an undated assessment look
+    freshly collected, so a missing or malformed value stays unknown.
+    """
     if not value:
-        return datetime.now(UTC)
+        return None
     cleaned = str(value).replace("Z", "+00:00")
     try:
         parsed = datetime.fromisoformat(cleaned)
@@ -176,4 +181,5 @@ def _parse_time(value: str | None) -> datetime:
                 return datetime.fromtimestamp(millis / 1000, tz=UTC)
             except ValueError:
                 pass
-        return datetime.now(UTC)
+        log.warning("SCCM returned an unparseable timestamp: %r", value)
+        return None

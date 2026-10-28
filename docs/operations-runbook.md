@@ -42,75 +42,77 @@ done
 
 ## 3. Scheduled jobs
 
-Jobs are HTTP calls to the owning service. The gateway's `/api` routes require a
-browser session cookie, which is the wrong credential for a timer, so jobs call
-the service directly and present the shared service token instead. In every
-case they act as the `scheduler` principal — never as a named human user — so
-the audit trail answers "who ran what" without a shared account.
+Scheduling runs inside the application. Each service starts a scheduler loop
+with its process and executes the jobs it owns; there is no systemd timer,
+crontab or `/etc/cron.d` entry. Jobs act as the `scheduler` principal (the run
+is attributed to it in the audit trail), never as a named human user.
 
-**Scheduling is systemd-only.** Do not create a crontab or `/etc/cron.d`
-entry; the shipped `patchtrack-tick.timer` is the supported and reproducible
-scheduler.
+| Service | Jobs | Default cadence |
+|---------|------|-----------------|
+| inventory | AssetExplorer, Satellite, SCCM and Solaris collection | 6 h, 6 h, 24 h, 7 d |
+| compliance | Daily snapshot and compliance refresh | 24 h |
+| reporting | Report schedules, report retention | 60 s |
+| identity | Audit retention purge | 24 h |
+| gateway | none | — |
 
-Two scripts, one job each versus everything due:
+The due time of every job is persisted in `shared.scheduled_jobs`. A run
+advances it to now + the interval; a failure advances it to now +
+`PATCHTRACK_SCHEDULER_RETRY_SECONDS` (default 300), so a transient source-system
+outage recovers within minutes rather than waiting a day. A PostgreSQL advisory
+lock is held while a job runs, so two replicas of a service cannot execute the
+same job, and the lock is released automatically if the process exits.
 
-| Script | What it runs | How the request is made |
-|--------|--------------|-------------------------|
-| `scripts/patchtrack-job.sh` | One named job (`sync …`, `daily`, `tick`, `purge`, `audit-purge`) — for manual use or by the timer runner | Detects the deployment per call: `docker compose exec` (or `podman-compose exec` / `podman exec`, the usual runtime on RHEL and Rocky) into the service's own container where one is running, otherwise a direct request to `127.0.0.1:$PORT`. `PATCHTRACK_MODE=container\|native` overrides the detection; `PATCHTRACK_CONTAINER_CLI=docker\|podman` pins the runtime when both are installed |
-| `scripts/patchtrack-tick.sh` | Every job not yet due; this is what the timer executes | Delegates each step to `patchtrack-job.sh`, so it works the same for containers and native; one hourly run covers every cadence |
-
-The tick script also applies the audit retention window once a day. The window
-itself is configured in **Settings → Audit trail retention** and stored in the
-database; `audit-purge` is only the job that enforces it, and it is safe to run
-manually (`patchtrack-job.sh audit-purge`). Each run reports how many events it
-deleted and records `audit.purged`.
-
-Both exit non-zero when any job reports a failure, so the systemd unit enters
-a failed state and journalctl carries the reason; nothing depends on a mail
-spool.
-
-### Install the timer
-
-`scripts/patchtrack-tick.sh` decides what is actually due on each run and
-delegates each step to `patchtrack-job.sh`. One timer therefore covers both
-deployments: a running service container is the target where one exists, and
-`127.0.0.1:$PORT` otherwise. In a container installation the `patchtrack`
-account needs access to the container runtime (for example the `docker`
-group) and the compose project directory.
-
-| File | What it does |
-|------|--------------|
-| `patchtrack-tick.service` | `Type=oneshot`; runs the script as `patchtrack` with the optional `/etc/patchtrack/.env` (token for a native installation) and `/etc/patchtrack/tick.env` (cadences); writable only in `/var/lib/patchtrack` |
-| `patchtrack-tick.timer` | `OnCalendar=hourly`, `Persistent=true` so a run missed while the host was down happens once after boot |
-
-```bash
-sudo install -m 0644 deploy/systemd/patchtrack-tick.service \
-  deploy/systemd/patchtrack-tick.timer /etc/systemd/system/
-sudo install -m 0755 scripts/patchtrack-tick.sh scripts/patchtrack-job.sh \
-  /opt/patchtrack/scripts/
-sudo install -d -m 0750 -o patchtrack -g patchtrack /var/lib/patchtrack/state
-sudo systemctl daemon-reload
-sudo systemctl enable --now patchtrack-tick.timer
-```
-
-Cadence is configuration, in `/etc/patchtrack/tick.env`:
+Cadence is configuration in the service environment:
 
 ```ini
+PATCHTRACK_SCHEDULER_ENABLED=true
+PATCHTRACK_SCHEDULER_POLL_SECONDS=15
+PATCHTRACK_SCHEDULER_RETRY_SECONDS=300
 PATCHTRACK_SYNC_ASSETEXPLORER_INTERVAL=21600   # seconds
 PATCHTRACK_SYNC_SATELLITE_INTERVAL=21600
 PATCHTRACK_SYNC_SCCM_INTERVAL=86400
 PATCHTRACK_SYNC_SOLARIS_INTERVAL=604800
+PATCHTRACK_DAILY_SNAPSHOT_INTERVAL=86400
+PATCHTRACK_AUDIT_PURGE_INTERVAL=86400
+PATCHTRACK_REPORT_TICK_INTERVAL=60
 ```
 
-The daily snapshot runs at most once per 24 hours and the report tick runs on
-every timer firing. A stamp is written only on success, so a failed collection
-retries on the next tick rather than waiting a full interval; a failure in one
-step does not prevent the others from running (a dead SCCM endpoint must not
-stop the daily snapshot). Output distinguishes `ok`, `skip … (not due)` and
-`FAIL`, and the unit fails if anything reported `FAIL`.
+Changing an interval requires restarting that service. Setting
+`PATCHTRACK_SCHEDULER_ENABLED=false` pauses all scheduled work without
+disabling the HTTP job endpoints.
 
-Check with `systemctl list-timers patchtrack-*` and
-`journalctl -u patchtrack-tick --since yesterday`.
+The audit retention window itself is configured in **Settings → Retention →
+Audit trail retention** and stored in the database; the identity scheduler only
+enforces it, and `patchtrack-job.sh audit-purge` is safe to run manually. Each
+run records `audit.purged` with the number deleted.
+
+### Run a job by hand
+
+`scripts/patchtrack-job.sh` runs one named job (`sync <integration>`, `daily`,
+`tick`, `purge`, `audit-purge`) against a running deployment. It detects the
+deployment per call: `docker compose exec` (or `podman-compose exec` / `podman
+exec`, the usual runtime on RHEL and Rocky) into the service's own container
+where one is running, otherwise a direct request to `127.0.0.1:$PORT`.
+`PATCHTRACK_MODE=container|native` overrides the detection;
+`PATCHTRACK_CONTAINER_CLI=docker|podman` pins the runtime when both are
+installed. It presents the shared service token and exits non-zero when the
+job reports a failure.
+
+A scheduled job is not executed by this script; it calls the same service
+function the scheduler calls, so a manual run is equivalent to a due run.
+
+Check scheduled state in the database:
+
+```sql
+SELECT name, interval_seconds, next_run_at, last_started_at,
+       last_finished_at, last_status, left(last_message, 120) AS message
+FROM shared.scheduled_jobs ORDER BY name;
+```
+
+and the audit trail for `sync.requested`, `compliance.daily_job`,
+`schedule.executed` and `audit.purged` events. Scheduler failures are also in
+each service's journal (`journalctl -u 'patchtrack@*' --since yesterday`,
+`grep scheduler`).
 
 ## 4. Common operations
 
@@ -164,7 +166,7 @@ once. Prefer the UI so the action is attributed in the audit trail.
 ### Inspect the placement picker lists
 
 Environment and business-service values offered in the editor are administered
-in **Settings → Inventory placement values**. To inspect them, including how
+in **Settings → Inventory placement**. To inspect them, including how
 many servers currently hold each value (source or override):
 
 ```bash
@@ -312,9 +314,24 @@ changing `PATCHTRACK_SERVICE_TOKEN` (all services must agree).
 | Backup job exit code | Non-zero → alert, and treat as no backup |
 | `reporting.reports` stuck in `generating` | > 1 hour → investigate |
 
-A Prometheus exporter is not included in this release; the checks above are
-query-based (e.g. a scheduled `curl` + `psql` probe emitted to your existing
-monitoring agent).
+Every service exposes these signals at `/metrics` in the Prometheus text
+format (see `deploy/monitoring/README.md`):
+
+| Metric | Use |
+|--------|-----|
+| `patchtrack_http_requests_total` | Error-rate alerts by service, route and status |
+| `patchtrack_http_request_duration_seconds` | p95 latency |
+| `patchtrack_service_uptime_seconds` | Restart detection |
+| `up{job="patchtrack"}` | Scrape failure, the closest thing to `/readyz` |
+
+Start the bundled scraper with `docker compose --profile monitoring up -d
+prometheus`; it loads `deploy/monitoring/alerts.yml`. The metrics endpoint is
+unauthenticated by design (a scraper has no session), so keep the service
+ports on the internal network and never proxy `/metrics` through the gateway.
+
+Business signals that are not yet exported as gauges — last successful
+collection age, consecutive failed runs, reports stuck in `generating` — remain
+query-based; use a scheduled `psql` probe or the Operational health screen.
 
 ## 9. Escalation data to collect
 

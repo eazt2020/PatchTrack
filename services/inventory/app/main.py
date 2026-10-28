@@ -6,19 +6,30 @@ asset/source reconciliation, integration configuration and health.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
+import re
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
+from patchtrack_common.metrics import install as install_metrics
+from patchtrack_common.request_guards import install as install_request_guards
+from patchtrack_common.scheduler import (
+    SCHEDULER_PRINCIPAL,
+    ScheduledJob,
+    install as install_scheduler,
+)
 from patchtrack_common.audit import record_audit
+from patchtrack_common.config import get_settings
 from patchtrack_common.db import connection, execute, fetch_all, fetch_one
 from patchtrack_common.net import client_ip
 from patchtrack_common.secrets import (
@@ -32,10 +43,13 @@ from .connectors.assetexplorer import AssetExplorerClient, AssetExplorerError
 from .connectors.satellite import SatelliteClient, SatelliteError
 from .connectors.sccm import SccmClient, SccmError
 from .connectors.solaris import SolarisIngestError, probe_inbox
+from . import justifications as justification_rules
 from .sync import PATCH_SOURCE_KEYS, resolve_conflict, run_assetexplorer_sync, run_patch_sync
 
 APP = "inventory"
 app = FastAPI(title="PatchTrack Inventory", version="1.0.0", docs_url="/docs")
+install_metrics(app, APP)
+install_request_guards(app)
 
 ASSET_FILTER_COLUMNS = {
     "os_family": "a.os_family",
@@ -242,7 +256,7 @@ def get_asset(
         SELECT source_system, assessed_at, collected_at, status, total_patches,
                critical_count, important_count, moderate_count, low_count
         FROM compliance.assessments WHERE asset_id = :id
-        ORDER BY assessed_at DESC LIMIT 30
+        ORDER BY assessed_at DESC NULLS LAST LIMIT 30
         """,
         id=asset_id,
     )
@@ -252,6 +266,7 @@ def get_asset(
         "findings": findings,
         "source_links": links,
         "assessment_history": history,
+        "justifications": _justification_rows(asset_id),
     }
 
 
@@ -267,6 +282,297 @@ def asset_findings(
         sql += " AND severity = :sev"
         params["sev"] = severity
     return fetch_all(sql + " ORDER BY released_at DESC NULLS LAST LIMIT 1000", **params)
+
+
+# ---------------------------------------------------------------- justifications
+class EvidenceUpload(BaseModel):
+    filename: str = Field(min_length=1, max_length=255)
+    content_type: str = Field(min_length=1, max_length=128)
+    # Base64, optionally a data: URI. Kept in JSON so the service needs no
+    # multipart parser and the gateway can proxy it unchanged.
+    data: str
+
+
+class JustificationCreate(BaseModel):
+    reason_code: str = Field(min_length=1, max_length=64)
+    statement: str = Field(min_length=1, max_length=4000)
+    remediation_plan: str = Field(default="", max_length=2000)
+    remediation_target: date | None = None
+    evidence: list[EvidenceUpload] = Field(default_factory=list)
+
+
+def _justification_rows(asset_id: UUID) -> dict[str, Any]:
+    rows = fetch_all(
+        """
+        SELECT j.id, j.asset_id, j.compliance_state, j.reason_code, j.statement,
+               j.remediation_plan, j.remediation_target, j.status, j.created_by,
+               j.created_at, j.superseded_at, j.superseded_by,
+               e.id AS evidence_id, e.filename, e.content_type, e.byte_size,
+               e.sha256, e.uploaded_by, e.uploaded_at
+        FROM inventory.asset_justifications j
+        LEFT JOIN inventory.justification_evidence e ON e.justification_id = j.id
+        WHERE j.asset_id = :id
+        ORDER BY j.created_at DESC, e.uploaded_at
+        """,
+        id=asset_id,
+    )
+    by_id: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        jid = str(row["id"])
+        item = by_id.get(jid)
+        if item is None:
+            item = {
+                key: row[key] for key in (
+                    "id", "asset_id", "compliance_state", "reason_code",
+                    "statement", "remediation_plan", "remediation_target",
+                    "status", "created_by", "created_at", "superseded_at",
+                    "superseded_by",
+                )
+            }
+            item["reason_label"] = justification_rules.REASONS.get(
+                row["reason_code"], row["reason_code"])
+            item["evidence"] = []
+            by_id[jid] = item
+        if row["evidence_id"]:
+            item["evidence"].append({
+                "id": row["evidence_id"], "filename": row["filename"],
+                "content_type": row["content_type"], "byte_size": row["byte_size"],
+                "sha256": row["sha256"], "uploaded_by": row["uploaded_by"],
+                "uploaded_at": row["uploaded_at"],
+            })
+    records = list(by_id.values())
+    active = next((r for r in records if r["status"] == "active"), None)
+    return {"active": active, "history": records}
+
+
+@app.get("/assets/{asset_id}/justifications")
+def list_justifications(
+    asset_id: UUID,
+    _: Annotated[Principal, Depends(require_permission("inventory:detail"))],
+) -> dict[str, Any]:
+    if fetch_one("SELECT id FROM inventory.assets WHERE id = :id", id=asset_id) is None:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    return _justification_rows(asset_id)
+
+
+@app.post("/assets/{asset_id}/justifications", status_code=201)
+def create_justification(
+    asset_id: UUID,
+    payload: JustificationCreate,
+    request: Request,
+    principal: Annotated[Principal, Depends(
+        require_permission("compliance:justify"))],
+) -> dict[str, Any]:
+    asset = fetch_one(
+        """
+        SELECT a.hostname, c.state
+        FROM inventory.assets a
+        LEFT JOIN compliance.asset_compliance c ON c.asset_id = a.id
+        WHERE a.id = :id
+        """,
+        id=asset_id,
+    )
+    if asset is None:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    state = justification_rules.effective_state(asset["state"])
+    if state not in justification_rules.JUSTIFIABLE_STATES:
+        raise HTTPException(
+            status_code=409,
+            detail="Only a non-compliant, stale or unknown asset needs a justification",
+        )
+    try:
+        reason = justification_rules.validate_reason(payload.reason_code)
+        statement = justification_rules.validate_statement(payload.statement)
+        plan = justification_rules.validate_plan(payload.remediation_plan)
+        evidence = justification_rules.normalise_evidence(
+            [item.model_dump() for item in payload.evidence])
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    try:
+        with connection() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE inventory.asset_justifications
+                    SET status = 'superseded', superseded_at = now(),
+                        superseded_by = :by
+                    WHERE asset_id = :id AND status = 'active'
+                    """
+                ),
+                {"by": principal.username, "id": asset_id},
+            )
+            justification_id = conn.execute(
+                text(
+                    """
+                    INSERT INTO inventory.asset_justifications (
+                        asset_id, compliance_state, reason_code, statement,
+                        remediation_plan, remediation_target, created_by
+                    ) VALUES (:asset, :state, :reason, :statement, :plan, :target, :by)
+                    RETURNING id
+                    """
+                ),
+                {
+                    "asset": asset_id, "state": state, "reason": reason,
+                    "statement": statement, "plan": plan,
+                    "target": payload.remediation_target, "by": principal.username,
+                },
+            ).first()[0]
+            for item in evidence:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO inventory.justification_evidence (
+                            justification_id, filename, content_type, byte_size,
+                            sha256, content, uploaded_by
+                        ) VALUES (:j, :f, :t, :s, :h, :c, :by)
+                        """
+                    ),
+                    {
+                        "j": justification_id, "f": item.filename,
+                        "t": item.content_type, "s": item.size,
+                        "h": item.sha256, "c": item.content,
+                        "by": principal.username,
+                    },
+                )
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Another justification was recorded at the same time; reload "
+                   "the server and try again",
+        ) from exc
+    record_audit(
+        event_type="compliance.justification_recorded", outcome="success",
+        principal=principal, target_type="asset", target_id=str(asset_id),
+        context={
+            "justification_id": str(justification_id), "state": state,
+            "reason": reason, "evidence_count": len(evidence),
+        },
+        source_ip=_client_ip(request), service=APP,
+    )
+    return {"status": "recorded", "id": str(justification_id),
+            "evidence_count": len(evidence)}
+
+
+@app.post("/assets/{asset_id}/justifications/{justification_id}/evidence",
+          status_code=201)
+def add_justification_evidence(
+    asset_id: UUID,
+    justification_id: UUID,
+    payload: list[EvidenceUpload],
+    request: Request,
+    principal: Annotated[Principal, Depends(
+        require_permission("compliance:justify"))],
+) -> dict[str, Any]:
+    item = fetch_one(
+        """
+        SELECT id, status FROM inventory.asset_justifications
+        WHERE id = :j AND asset_id = :a
+        """,
+        j=justification_id, a=asset_id,
+    )
+    if item is None:
+        raise HTTPException(status_code=404, detail="Justification not found")
+    if item["status"] != "active":
+        raise HTTPException(
+            status_code=409,
+            detail="Evidence can only be attached to the current justification",
+        )
+    try:
+        evidence = justification_rules.normalise_evidence(
+            [entry.model_dump() for entry in payload])
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    existing = fetch_one(
+        "SELECT count(*) AS n FROM inventory.justification_evidence "
+        "WHERE justification_id = :j", j=justification_id,
+    )
+    if (existing["n"] if existing else 0) + len(evidence) > (
+            justification_rules.MAX_EVIDENCE_PER_JUSTIFICATION):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Attach at most "
+                   f"{justification_rules.MAX_EVIDENCE_PER_JUSTIFICATION} "
+                   "evidence files to one justification",
+        )
+    with connection() as conn:
+        for entry in evidence:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO inventory.justification_evidence (
+                        justification_id, filename, content_type, byte_size,
+                        sha256, content, uploaded_by
+                    ) VALUES (:j, :f, :t, :s, :h, :c, :by)
+                    """
+                ),
+                {
+                    "j": justification_id, "f": entry.filename,
+                    "t": entry.content_type, "s": entry.size,
+                    "h": entry.sha256, "c": entry.content,
+                    "by": principal.username,
+                },
+            )
+    record_audit(
+        event_type="compliance.justification_evidence_added", outcome="success",
+        principal=principal, target_type="asset", target_id=str(asset_id),
+        context={"justification_id": str(justification_id),
+                 "evidence_count": len(evidence)},
+        source_ip=_client_ip(request), service=APP,
+    )
+    return {"status": "attached", "evidence_count": len(evidence)}
+
+
+@app.get("/assets/{asset_id}/justifications/{justification_id}/evidence/{evidence_id}")
+def download_justification_evidence(
+    asset_id: UUID,
+    justification_id: UUID,
+    evidence_id: UUID,
+    _: Annotated[Principal, Depends(require_permission("inventory:detail"))],
+) -> Response:
+    row = fetch_one(
+        """
+        SELECT e.filename, e.content_type, e.content
+        FROM inventory.justification_evidence e
+        JOIN inventory.asset_justifications j ON j.id = e.justification_id
+        WHERE e.id = :e AND j.id = :j AND j.asset_id = :a
+        """,
+        e=evidence_id, j=justification_id, a=asset_id,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Evidence not found")
+    safe = re.sub(r'[^\w.\- ]', "_", row["filename"])[:120] or "evidence"
+    return Response(
+        content=bytes(row["content"]), media_type=row["content_type"],
+        headers={"Content-Disposition": f'attachment; filename="{safe}"'},
+    )
+
+
+@app.delete("/assets/{asset_id}/justifications/{justification_id}")
+def withdraw_justification(
+    asset_id: UUID,
+    justification_id: UUID,
+    request: Request,
+    principal: Annotated[Principal, Depends(
+        require_permission("compliance:justify"))],
+) -> dict[str, str]:
+    updated = execute(
+        """
+        UPDATE inventory.asset_justifications
+        SET status = 'withdrawn', superseded_at = now(), superseded_by = :by
+        WHERE id = :j AND asset_id = :a AND status = 'active'
+        """,
+        j=justification_id, a=asset_id, by=principal.username,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Current justification not found")
+    record_audit(
+        event_type="compliance.justification_withdrawn", outcome="success",
+        principal=principal, target_type="asset", target_id=str(asset_id),
+        context={"justification_id": str(justification_id)},
+        source_ip=_client_ip(request), service=APP,
+    )
+    return {"status": "withdrawn"}
 
 
 @app.post("/assets/{asset_id}/exclude")
@@ -446,8 +752,77 @@ def dimensions(
 
 
 # --------------------------------------------------------------------------- settings
+# The organisation block is the report's branding. It lives in the settings
+# table rather than on disk so a container replacement cannot lose the logo,
+# and so every reporting replica renders the same cover.
+LOGO_SIGNATURES = {
+    "image/png": b"\x89PNG\r\n\x1a\n",
+    "image/jpeg": b"\xff\xd8\xff",
+}
+MAX_LOGO_BYTES = 1_000_000
+LOGO_DATA_RE = re.compile(r"^data:(image/(?:png|jpeg));base64,([A-Za-z0-9+/=\s]+)$")
+
+
 class OrganizationSetting(BaseModel):
-    name: str = Field(min_length=1, max_length=200)
+    """Partial update: an omitted field keeps its stored value.
+
+    A plain PUT of ``{"name": ...}`` therefore still works and, importantly,
+    cannot erase a previously uploaded logo by accident.
+    """
+
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    logo_data: str | None = Field(default=None, max_length=2_000_000)
+    logo_filename: str | None = Field(default=None, max_length=120)
+    preparer_name: str | None = Field(default=None, max_length=120)
+    preparer_title: str | None = Field(default=None, max_length=120)
+    concur_name: str | None = Field(default=None, max_length=120)
+    concur_title: str | None = Field(default=None, max_length=120)
+    remove_logo: bool = False
+
+
+def _validated_logo(data_uri: str) -> str:
+    """Accept only a small PNG or JPEG data URI, verified by its signature.
+
+    The file extension and the browser's Content-Type are both caller-supplied,
+    so neither is trusted. ReportLab can only embed raster images here, and a
+    logo that is not really an image would either break report generation or,
+    worse, be published as part of the evidence.
+    """
+    match = LOGO_DATA_RE.match(data_uri.strip())
+    if not match:
+        raise HTTPException(
+            status_code=422,
+            detail="Logo must be a PNG or JPEG image encoded as a data URI",
+        )
+    media_type, payload = match.group(1), re.sub(r"\s+", "", match.group(2))
+    try:
+        raw = base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="Logo data is not valid base64") from exc
+    if len(raw) > MAX_LOGO_BYTES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Logo must be no larger than {MAX_LOGO_BYTES // 1000} KB",
+        )
+    signature = LOGO_SIGNATURES[media_type]
+    if not raw.startswith(signature):
+        raise HTTPException(
+            status_code=422,
+            detail="Logo content does not match its declared image type",
+        )
+    return f"data:{media_type};base64,{payload}"
+
+
+def _organization_view(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": value.get("name", ""),
+        "logo_data": value.get("logo_data") or "",
+        "logo_filename": value.get("logo_filename") or "",
+        "preparer_name": value.get("preparer_name", ""),
+        "preparer_title": value.get("preparer_title", ""),
+        "concur_name": value.get("concur_name", ""),
+        "concur_title": value.get("concur_title", ""),
+    }
 
 
 @app.get("/settings/organization")
@@ -459,12 +834,12 @@ def get_organization(
         "WHERE key = 'organization'"
     )
     if row is None:
-        return {"name": "", "updated_at": None, "updated_by": None}
+        return {**_organization_view({}), "updated_at": None, "updated_by": None}
     value = row["value"]
     if isinstance(value, str):
         value = json.loads(value)
     return {
-        "name": value.get("name", ""),
+        **_organization_view(value),
         "updated_at": row["updated_at"],
         "updated_by": row["updated_by"],
     }
@@ -476,8 +851,29 @@ def set_organization(
     request: Request,
     principal: Annotated[Principal, Depends(require_permission("settings:manage"))],
 ) -> dict[str, Any]:
-    """Branding used on generated PDFs. Survives restarts (stored in the DB)."""
-    value = json.dumps({"name": payload.name.strip()})
+    """Report branding used on generated PDFs. Survives restarts (stored in the DB)."""
+    row = fetch_one(
+        "SELECT value FROM shared.app_settings WHERE key = 'organization'"
+    )
+    value: dict[str, Any] = {}
+    if row:
+        value = row["value"]
+        if isinstance(value, str):
+            value = json.loads(value)
+
+    if payload.name is not None:
+        value["name"] = payload.name.strip()
+    for field in ("preparer_name", "preparer_title", "concur_name", "concur_title"):
+        field_value = getattr(payload, field)
+        if field_value is not None:
+            value[field] = field_value.strip()
+    if payload.remove_logo:
+        value.pop("logo_data", None)
+        value.pop("logo_filename", None)
+    if payload.logo_data is not None:
+        value["logo_data"] = _validated_logo(payload.logo_data)
+        value["logo_filename"] = (payload.logo_filename or "logo").strip()[:120]
+
     execute(
         """
         INSERT INTO shared.app_settings (key, value, updated_at, updated_by)
@@ -485,14 +881,20 @@ def set_organization(
         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value,
             updated_at = now(), updated_by = EXCLUDED.updated_by
         """,
-        v=value, by=principal.username,
+        v=json.dumps(value), by=principal.username,
     )
     record_audit(
         event_type="settings.updated", outcome="success", principal=principal,
         target_type="setting", target_id="organization",
-        context={"name": payload.name}, source_ip=_client_ip(request), service=APP,
+        context={
+            "name": value.get("name", ""),
+            "logo": bool(value.get("logo_data")),
+            "preparer": value.get("preparer_name", ""),
+            "concur": value.get("concur_name", ""),
+        },
+        source_ip=_client_ip(request), service=APP,
     )
-    return {"name": payload.name}
+    return _organization_view(value)
 
 
 # --------------------------------------------------------------------------- placement options
@@ -1107,24 +1509,44 @@ def trigger_sync(
     if key != "assetexplorer" and key not in PATCH_SOURCE_KEYS:
         raise HTTPException(status_code=404, detail="Unknown integration")
     try:
+        return collect_integration(key, principal, source_ip=_client_ip(request))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def collect_integration(
+    key: str,
+    principal: Principal,
+    *,
+    trigger: str = "manual",
+    source_ip: str | None = None,
+) -> dict[str, Any]:
+    """Collect one integration. Shared by the HTTP route and the scheduler.
+
+    A concurrent run raises ``RuntimeError``; the route turns that into 409
+    and the scheduler records a failed attempt and retries later.
+    """
+    try:
         result = (
-            run_assetexplorer_sync(trigger="manual", requested_by=principal.username)
+            run_assetexplorer_sync(trigger=trigger, requested_by=principal.username)
             if key == "assetexplorer"
-            else run_patch_sync(key, trigger="manual", requested_by=principal.username)
+            else run_patch_sync(key, trigger=trigger, requested_by=principal.username)
         )
     except RuntimeError as exc:
         record_audit(
             event_type="sync.requested", outcome="failure", principal=principal,
             target_type="integration", target_id=key,
-            context={"error": str(exc)}, source_ip=_client_ip(request), service=APP,
+            context={"error": str(exc), "trigger": trigger},
+            source_ip=source_ip, service=APP,
         )
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise
     record_audit(
         event_type="sync.requested",
         outcome="success" if result.get("status") != "failed" else "failure",
         principal=principal, target_type="integration", target_id=key,
-        context={"result": result.get("status"), "run_id": result.get("run_id")},
-        source_ip=_client_ip(request), service=APP,
+        context={"result": result.get("status"), "run_id": result.get("run_id"),
+                 "trigger": trigger},
+        source_ip=source_ip, service=APP,
     )
     return result
 
@@ -1198,3 +1620,26 @@ def resolve(
         source_ip=_client_ip(request), service=APP,
     )
     return {"status": "resolved"}
+
+
+# --------------------------------------------------------------------------- in-app scheduler
+_settings = get_settings()
+install_scheduler(app, [
+    ScheduledJob(
+        name="inventory.assetexplorer",
+        interval_seconds=_settings.sync_assetexplorer_interval,
+        run=lambda: collect_integration(
+            "assetexplorer", SCHEDULER_PRINCIPAL, trigger="schedule"
+        ),
+    ),
+    *[
+        ScheduledJob(
+            name=f"inventory.{key}",
+            interval_seconds=getattr(_settings, f"sync_{key}_interval"),
+            run=lambda key=key: collect_integration(
+                key, SCHEDULER_PRINCIPAL, trigger="schedule"
+            ),
+        )
+        for key in PATCH_SOURCE_KEYS
+    ],
+])

@@ -10,8 +10,8 @@ removable media and verified before use.
 | `patchtrack-3.0.0.tar.gz` | Application source |
 | `patchtrack-app-3.0.0.tar` | The built service image (`docker save`) |
 | `ubi9-python-312.tar` | Base image, if not already present on the target |
-| `postgres-13.tar` | PostgreSQL image |
-| `grafana-oss-10.2.6.tar` | Optional dashboard image |
+| `postgres-17.tar` | PostgreSQL image |
+| `grafana-oss-13.0.2.tar` | Optional dashboard image |
 | `patchtrack-wheels/` | Python wheels for native installation |
 | `SHA256SUMS` | Digest of every file above |
 
@@ -34,18 +34,19 @@ docker build -f deploy/container/Dockerfile -t patchtrack:3.0.0 .
 docker save patchtrack:3.0.0 -o "$OUT/patchtrack-app-3.0.0.tar"
 
 # Dependency images
-docker pull registry.access.redhat.com/ubi9/python-312:latest
-docker save registry.access.redhat.com/ubi9/python-312:latest -o "$OUT/ubi9-python-312.tar"
+docker pull registry.access.redhat.com/ubi9/python-312:1-1762230134
+docker save registry.access.redhat.com/ubi9/python-312:1-1762230134 -o "$OUT/ubi9-python-312.tar"
 
-docker pull docker.io/library/postgres:13
-docker save docker.io/library/postgres:13 -o "$OUT/postgres-13.tar"
+docker pull docker.io/library/postgres:17
+docker save docker.io/library/postgres:17 -o "$OUT/postgres-17.tar"
 
-docker pull docker.io/grafana/grafana-oss:10.2.6
-docker save docker.io/grafana/grafana-oss:10.2.6 -o "$OUT/grafana-oss-10.2.6.tar"
+docker pull docker.io/grafana/grafana-oss:13.0.2
+docker save docker.io/grafana/grafana-oss:13.0.2 -o "$OUT/grafana-oss-13.0.2.tar"
 
 # Source + wheels for a native fallback
-git archive --format=tar.gz --prefix=patchtrack-3.0.0/ HEAD \
-  -o "$OUT/patchtrack-3.0.0.tar.gz"
+# Builds a verified archive that contains no .env, keys or runtime state.
+scripts/build-release.sh 3.0.0
+cp dist/patchtrack-3.0.0.tar.gz dist/patchtrack-3.0.0.tar.gz.sha256 "$OUT/"
 pip download -r deploy/container/requirements.txt \
   --dest "$OUT/patchtrack-wheels" \
   --only-binary=:all: --python-version 3.12 --platform manylinux_2_17_x86_64
@@ -80,7 +81,7 @@ Every line must read `OK`. Do not proceed on a mismatch; re-transfer.
 docker load -i patchtrack-app-3.0.0.tar
 docker load -i ubi9-python-312.tar
 docker load -i postgres-13.tar
-docker load -i grafana-oss-10.2.6.tar
+docker load -i grafana-oss-13.0.2.tar
 docker images | grep -E 'patchtrack|postgres|grafana'
 ```
 
@@ -91,7 +92,7 @@ the base image names. Two safeguards in `.env`:
 
 ```bash
 PATCHTRACK_VERSION=3.0.0
-POSTGRES_IMAGE=docker.io/library/postgres:13
+POSTGRES_IMAGE=docker.io/library/postgres:17
 ```
 
 and, if the host cannot reach any registry, run compose with pulls disabled:

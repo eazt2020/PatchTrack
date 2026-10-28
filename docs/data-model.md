@@ -73,6 +73,21 @@ Key/value jsonb. Holds the organisation name used on reports and
 whatever runtime configuration must survive restarts. Secrets are **not**
 stored here, or anywhere else in the database.
 
+### `shared.scheduled_jobs`
+
+One row per in-app scheduled job (`inventory.assetexplorer`,
+`inventory.satellite`, `inventory.sccm`, `inventory.solaris`,
+`compliance.daily`, `identity.audit_purge`, `reporting.tick`). Holds
+`interval_seconds`, `next_run_at`, last start/finish timestamps, `last_status`
+(`success`/`failure`) and `last_message`.
+
+`next_run_at` NULL means the job has never run and is due; a successful run
+sets it to now + `interval_seconds`, a failure to now + the scheduler retry
+delay. Persisting it stops a service restart from replaying long-interval
+work. The row is not a lock: execution is serialised by a PostgreSQL advisory
+lock held for the duration of the run, which releases automatically if the
+process dies.
+
 ## identity
 
 ### `identity.users`

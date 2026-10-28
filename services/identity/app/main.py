@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 import secrets
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import Annotated, Any
 from uuid import UUID, uuid4
 
@@ -16,10 +18,18 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
+from patchtrack_common.metrics import install as install_metrics
+from patchtrack_common.request_guards import install as install_request_guards
+from patchtrack_common.scheduler import (
+    SCHEDULER_PRINCIPAL,
+    ScheduledJob,
+    install as install_scheduler,
+)
 from patchtrack_common.audit import record_audit
 from patchtrack_common.config import get_settings
 from patchtrack_common.db import connection, execute, fetch_all, fetch_one
 from patchtrack_common.net import client_ip
+from patchtrack_common import timezones as timezone_settings
 from patchtrack_common.security import (
     PERMISSIONS,
     ROLES,
@@ -31,10 +41,24 @@ from patchtrack_common.security import (
 
 APP = "identity"
 app = FastAPI(title="PatchTrack Identity", version="1.0.0", docs_url="/docs")
+install_metrics(app, APP)
+install_request_guards(app)
 
 _hasher = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=4)
 MAX_FAILED_ATTEMPTS = 5
 LOCKOUT_MINUTES = 15
+# A single account is locked after MAX_FAILED_ATTEMPTS, but an attacker who
+# sprays one password across many accounts stays under that per-account
+# threshold. These limits cap failed attempts per source address and per
+# address/account pair over the same window as the lockout.
+RATE_WINDOW_MINUTES = LOCKOUT_MINUTES
+MAX_FAILURES_PER_PAIR = 10
+MAX_FAILURES_PER_IP = 50
+
+# Verified against when the account does not exist or cannot sign in locally.
+# Argon2 is deliberately slow; returning early would let a response-time
+# difference reveal which usernames are real.
+_DUMMY_HASH = _hasher.hash(secrets.token_urlsafe(32))
 
 
 # --------------------------------------------------------------------------- models
@@ -83,6 +107,44 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def _spend_password_check(password: str) -> None:
+    """Run the password hash even when there is no account to check.
+
+    The result is discarded. Its only purpose is to make "unknown user" cost
+    the same as "wrong password", so timing cannot be used to enumerate
+    accounts.
+    """
+    try:
+        _hasher.verify(_DUMMY_HASH, password)
+    except Exception:  # noqa: B014 - argon2 raises varied errors
+        pass
+
+
+def _login_rate_limited(username: str, ip: str | None) -> bool:
+    """Whether this address (or address/account pair) is over the failure cap."""
+    row = fetch_one(
+        """
+        SELECT
+            count(*) FILTER (WHERE source_ip = CAST(:ip AS inet)) AS by_ip,
+            count(*) FILTER (
+                WHERE source_ip = CAST(:ip AS inet) AND username = :u
+            ) AS by_pair
+        FROM identity.login_attempts
+        WHERE NOT succeeded
+          AND attempted_at > now() - make_interval(mins => :window)
+        """,
+        u=username,
+        ip=ip,
+        window=RATE_WINDOW_MINUTES,
+    )
+    if row is None:
+        return False
+    return (
+        int(row["by_ip"] or 0) >= MAX_FAILURES_PER_IP
+        or int(row["by_pair"] or 0) >= MAX_FAILURES_PER_PAIR
+    )
+
+
 def _as_uuid(value: str) -> UUID | None:
     """Parse a principal's user id, or return None when it is not one.
 
@@ -104,6 +166,7 @@ def _issue_tokens(user: dict[str, Any], request: Request) -> TokenResponse:
         role=user["role"],
         display_name=user.get("display_name") or "",
         must_change_password=bool(user.get("must_change_password")),
+        token_version=int(user.get("token_version") or 0),
     )
     refresh = secrets.token_urlsafe(48)
     with connection() as conn:
@@ -168,10 +231,6 @@ def readyz() -> dict[str, str]:
 def login(payload: LoginRequest, request: Request) -> TokenResponse:
     username = payload.username.strip()
     ip = _client_ip(request)
-    user = fetch_one(
-        "SELECT * FROM identity.users WHERE username = :u", u=username
-    )
-
     def _fail(reason: str) -> None:
         with connection() as conn:
             conn.execute(
@@ -194,23 +253,42 @@ def login(payload: LoginRequest, request: Request) -> TokenResponse:
             service=APP,
         )
 
+    if _login_rate_limited(username, ip):
+        _fail("rate_limited")
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed sign-in attempts. Try again later.",
+            headers={"Retry-After": str(RATE_WINDOW_MINUTES * 60)},
+        )
+
+    user = fetch_one(
+        "SELECT * FROM identity.users WHERE username = :u", u=username
+    )
+
+    # Every failure below answers identically. A distinct status for "no such
+    # user", "locked" or "single sign-on account" tells an unauthenticated
+    # caller which usernames are real, and the lockout status additionally
+    # lets anyone deny service to a known account.
     if user is None or not user["is_active"]:
+        _spend_password_check(payload.password)
         _fail("invalid_credentials")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid username or password",
         )
     if user["auth_source"] != "local":
+        _spend_password_check(payload.password)
         _fail("external_identity")
         raise HTTPException(
-            status_code=400,
-            detail="This account authenticates through the enterprise identity provider",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid username or password",
         )
     if user.get("locked_until") and user["locked_until"] > datetime.now(UTC):
+        _spend_password_check(payload.password)
         _fail("locked")
         raise HTTPException(
-            status_code=status.HTTP_423_LOCKED,
-            detail="Account temporarily locked after repeated failed sign-in",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid username or password",
         )
     try:
         _hasher.verify(user["password_hash"] or "", payload.password)
@@ -307,6 +385,40 @@ def logout(payload: RefreshRequest) -> dict[str, str]:
             ),
             {"h": _hash_token(payload.refresh_token)},
         )
+    return {"status": "logged_out"}
+
+
+@app.post("/auth/revoke-session")
+def revoke_session(principal: PrincipalDep, request: Request) -> dict[str, str]:
+    """End the caller's sessions server-side.
+
+    Deleting the browser cookie is not revocation: a copied access token stays
+    valid until it expires. Raising the account's token_version invalidates
+    this and every other outstanding session for the account.
+    """
+    user_id = _as_uuid(principal.user_id)
+    if user_id is None:
+        return {"status": "logged_out"}
+    with connection() as conn:
+        conn.execute(
+            text(
+                "UPDATE identity.users SET token_version = token_version + 1, "
+                "updated_at = now() WHERE id = :id"
+            ),
+            {"id": user_id},
+        )
+        conn.execute(
+            text(
+                "UPDATE identity.refresh_tokens SET revoked_at = now() "
+                "WHERE user_id = :id AND revoked_at IS NULL"
+            ),
+            {"id": user_id},
+        )
+    record_audit(
+        event_type="auth.logout", outcome="success", principal=principal,
+        target_type="user", target_id=str(user_id),
+        source_ip=_client_ip(request), service=APP,
+    )
     return {"status": "logged_out"}
 
 
@@ -411,7 +523,12 @@ def update_user(
                 status_code=409,
                 detail="Cannot remove the last active administrator",
             )
+    # Changing a role or deactivating an account must take effect at once, not
+    # when the current access token happens to expire.
+    security_change = bool({"role", "is_active"} & changes.keys())
     assignments = ", ".join(f"{key} = :{key}" for key in changes)
+    if security_change:
+        assignments += ", token_version = token_version + 1"
     with connection() as conn:
         row = conn.execute(
             text(
@@ -420,6 +537,14 @@ def update_user(
             ),
             {**changes, "id": user_id},
         ).mappings().first()
+        if security_change:
+            conn.execute(
+                text(
+                    "UPDATE identity.refresh_tokens SET revoked_at = now() "
+                    "WHERE user_id = :id AND revoked_at IS NULL"
+                ),
+                {"id": user_id},
+            )
     record_audit(
         event_type="user.updated",
         outcome="success",
@@ -440,12 +565,24 @@ def reset_password(
     principal: Annotated[Principal, Depends(require_permission("users:manage"))],
     request: Request,
 ) -> dict[str, str]:
-    updated = execute(
-        "UPDATE identity.users SET password_hash = :p, must_change_password = true, "
-        "failed_attempts = 0, locked_until = NULL, updated_at = now() WHERE id = :id",
-        p=_hasher.hash(payload.password),
-        id=user_id,
-    )
+    with connection() as conn:
+        updated = conn.execute(
+            text(
+                "UPDATE identity.users SET password_hash = :p, "
+                "must_change_password = true, failed_attempts = 0, "
+                "locked_until = NULL, token_version = token_version + 1, "
+                "updated_at = now() WHERE id = :id"
+            ),
+            {"p": _hasher.hash(payload.password), "id": user_id},
+        ).rowcount
+        if updated:
+            conn.execute(
+                text(
+                    "UPDATE identity.refresh_tokens SET revoked_at = now() "
+                    "WHERE user_id = :id AND revoked_at IS NULL"
+                ),
+                {"id": user_id},
+            )
     if not updated:
         raise HTTPException(status_code=404, detail="User not found")
     record_audit(
@@ -514,7 +651,8 @@ def change_password(
             text(
                 "UPDATE identity.users SET password_hash = :p, "
                 "must_change_password = false, failed_attempts = 0, "
-                "locked_until = NULL, updated_at = now() WHERE id = :id"
+                "locked_until = NULL, token_version = token_version + 1, "
+                "updated_at = now() WHERE id = :id"
             ),
             {"p": _hasher.hash(payload.new_password), "id": user["id"]},
         )
@@ -648,10 +786,60 @@ def set_audit_retention(
     return {"days": payload.days}
 
 
+# --------------------------------------------------------------------------- timezone
+class TimezoneUpdate(BaseModel):
+    timezone: str = Field(min_length=1, max_length=64)
+
+
+@app.get("/settings/timezone")
+def get_timezone(principal: PrincipalDep) -> dict[str, Any]:
+    """Any signed-in user may read the display timezone; only an administrator
+    may change it. The value drives schedules, snapshot periods and the PDFs."""
+    return {
+        "timezone": timezone_settings.system_timezone(),
+        "zones": timezone_settings.available(),
+        "common": list(timezone_settings.COMMON),
+        "default": timezone_settings.DEFAULT,
+    }
+
+
+@app.put("/settings/timezone")
+def set_timezone(
+    payload: TimezoneUpdate,
+    request: Request,
+    principal: Annotated[Principal, Depends(require_permission("settings:manage"))],
+) -> dict[str, Any]:
+    try:
+        name = timezone_settings.validate_timezone(payload.timezone)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    execute(
+        """
+        INSERT INTO shared.app_settings (key, value, updated_at, updated_by)
+        VALUES (:key, CAST(:v AS jsonb), now(), :by)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value,
+            updated_at = now(), updated_by = EXCLUDED.updated_by
+        """,
+        key=timezone_settings.KEY, v=json.dumps({"name": name}),
+        by=principal.username,
+    )
+    record_audit(
+        event_type="settings.updated", outcome="success", principal=principal,
+        target_type="setting", target_id=timezone_settings.KEY,
+        context={"timezone": name}, source_ip=client_ip(request), service=APP,
+    )
+    local = datetime.now(UTC).astimezone(ZoneInfo(name))
+    return {"timezone": name, "local_time": local.isoformat()}
+
+
 @app.post("/jobs/audit-purge")
 def purge_audit_trail(
     principal: Annotated[Principal, Depends(require_permission("settings:manage"))],
 ) -> dict[str, Any]:
+    return purge_audit_trail_job(principal)
+
+
+def purge_audit_trail_job(principal: Principal) -> dict[str, Any]:
     """Apply the retention window. Safe to run repeatedly; it is the scheduler
     that decides how often. The purge itself is audited after the delete, so
     the record of it cannot be removed by the same run."""
@@ -683,3 +871,13 @@ def bootstrap_status() -> dict[str, Any]:
     """Public endpoint used by the gateway to prompt first-run setup."""
     row = fetch_one("SELECT count(*) AS n FROM identity.users")
     return {"needs_admin": bool(row and row["n"] == 0)}
+
+
+# --------------------------------------------------------------------------- in-app scheduler
+install_scheduler(app, [
+    ScheduledJob(
+        name="identity.audit_purge",
+        interval_seconds=get_settings().audit_purge_interval,
+        run=lambda: purge_audit_trail_job(SCHEDULER_PRINCIPAL),
+    ),
+])

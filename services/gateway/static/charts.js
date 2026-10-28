@@ -79,9 +79,38 @@ function tooltip() {
   return tipEl;
 }
 
-function showTip(html, event) {
+function renderTip(content) {
   const tip = tooltip();
-  tip.innerHTML = html;
+  tip.replaceChildren();
+  if (content.title !== undefined) {
+    const title = document.createElement("strong");
+    // Tooltip content includes asset and organisation names from the database;
+    // text nodes keep them inert instead of parsing them as markup.
+    title.textContent = String(content.title);
+    tip.appendChild(title);
+  }
+  for (const row of content.rows || []) {
+    const line = document.createElement("div");
+    line.className = "tt-row";
+    const left = document.createElement("span");
+    if (row.color) {
+      const swatch = document.createElement("span");
+      swatch.className = "legend-swatch";
+      swatch.style.display = "inline-block";
+      swatch.style.background = String(row.color);
+      left.append(swatch, document.createTextNode(" "));
+    }
+    left.append(document.createTextNode(String(row.label)));
+    const value = document.createElement("strong");
+    value.textContent = String(row.value);
+    line.append(left, value);
+    tip.appendChild(line);
+  }
+  return tip;
+}
+
+function showTip(content, event) {
+  const tip = renderTip(content);
   tip.style.display = "block";
   const pad = 14;
   const rect = tip.getBoundingClientRect();
@@ -97,23 +126,24 @@ function hideTip() {
   if (tipEl) tipEl.style.display = "none";
 }
 
-function bindTip(node, html) {
-  node.addEventListener("mouseenter", (e) => showTip(html, e));
-  node.addEventListener("mousemove", (e) => showTip(html, e));
+function bindTip(node, content) {
+  node.addEventListener("mouseenter", (e) => showTip(content, e));
+  node.addEventListener("mousemove", (e) => showTip(content, e));
   node.addEventListener("mouseleave", hideTip);
   node.setAttribute("tabindex", "0");
   node.addEventListener("focus", (e) => {
     const box = node.getBoundingClientRect();
-    showTip(html, { clientX: box.left + box.width / 2, clientY: box.top });
+    showTip(content, { clientX: box.left + box.width / 2, clientY: box.top });
   });
   node.addEventListener("blur", hideTip);
 }
 
 function tipRow(label, value, color) {
-  const swatch = color
-    ? `<span class="legend-swatch" style="display:inline-block;background:${color}"></span> `
-    : "";
-  return `<div class="tt-row"><span>${swatch}${label}</span><strong>${value}</strong></div>`;
+  return { label, value, color };
+}
+
+function tipBody(title, rows) {
+  return { title, rows: rows.filter(Boolean) };
 }
 
 export function legend(container, entries) {
@@ -121,14 +151,20 @@ export function legend(container, entries) {
   for (const entry of entries) {
     const span = document.createElement("span");
     span.className = "legend-item";
-    span.innerHTML =
-      `<span class="legend-swatch" style="background:${entry.color}"></span>${entry.label}`;
+    const swatch = document.createElement("span");
+    swatch.className = "legend-swatch";
+    swatch.style.background = String(entry.color);
+    span.append(swatch, document.createTextNode(String(entry.label)));
     container.appendChild(span);
   }
 }
 
 function emptyState(container, message) {
-  container.innerHTML = `<div class="chart-empty">${message}</div>`;
+  container.replaceChildren();
+  const node = document.createElement("div");
+  node.className = "chart-empty";
+  node.textContent = message;
+  container.appendChild(node);
 }
 
 function frame(container, height) {
@@ -197,12 +233,11 @@ export function stackedColumns(container, options) {
         rx: isTop ? 4 : 0,
         ry: isTop ? 4 : 0,
       });
-      bindTip(rect, [
-        `<strong>${row.group}</strong>`,
+      bindTip(rect, tipBody(row.group, [
         ...keys.map((k) =>
           tipRow(labels[k], compact(row[k] || 0), colors[k])),
         tipRow(valueLabel, compact(total)),
-      ].join(""));
+      ]));
       svg.appendChild(rect);
       if (isTop && h > 14) {
         svg.appendChild(el("rect", {
@@ -272,11 +307,10 @@ export function stackedRows(container, options) {
       const rect = el("rect", {
         x: cursor + 1, y, width: Math.max(1, w - 2), height: 14, fill: colors[key],
       });
-      bindTip(rect, [
-        `<strong>${row.group}</strong>`,
+      bindTip(rect, tipBody(row.group, [
         ...keys.map((k) => tipRow(labels[k], compact(row[k] || 0), colors[k])),
         tipRow("Total", compact(total)),
-      ].join(""));
+      ]));
       svg.appendChild(rect);
       cursor += w;
     });
@@ -325,11 +359,10 @@ export function donut(container, options) {
       transform: `rotate(-90 ${cx} ${cy})`,
       "stroke-linecap": "butt",
     });
-    bindTip(arc, [
-      `<strong>${row.label}</strong>`,
+    bindTip(arc, tipBody(row.label, [
       tipRow("Servers", compact(row.value), row.color),
       tipRow("Share", `${(frac * 100).toFixed(1)}%`),
-    ].join(""));
+    ]));
     svg.appendChild(arc);
     offset += frac * circumference;
   });
@@ -399,9 +432,10 @@ export function trendLine(container, options) {
       cx: x(i), cy: y(Number(point.value)), r: 4.5, fill: "#3987e5",
       stroke: SURFACE, "stroke-width": 2,
     });
-    bindTip(dot, `<strong>${point.label}</strong>${tipRow(
-      "Compliance", `${Number(point.value).toFixed(1)}${unit}`, "#3987e5")}${
-      target ? tipRow("Target", `${target}${unit}`, "#ec835a") : ""}`);
+    bindTip(dot, tipBody(point.label, [
+      tipRow("Compliance", `${Number(point.value).toFixed(1)}${unit}`, "#3987e5"),
+      target ? tipRow("Target", `${target}${unit}`, "#ec835a") : null,
+    ]));
     svg.appendChild(dot);
     const stride = Math.ceil(points.length / 7);
     if (i % stride === 0 || i === points.length - 1) {
@@ -458,9 +492,11 @@ export function targetColumns(container, options) {
       fill: met ? STATUS.compliant : SEVERITY.important,
       rx: 4, ry: 4,
     });
-    bindTip(bar, `<strong>${point.label}</strong>${tipRow(
-      "Compliance", `${value.toFixed(1)}${unit}`, met ? STATUS.compliant : SEVERITY.important,
-    )}${target ? tipRow("Target", `${target}${unit}`, "#ec835a") : ""}`);
+    bindTip(bar, tipBody(point.label, [
+      tipRow("Compliance", `${value.toFixed(1)}${unit}`,
+        met ? STATUS.compliant : SEVERITY.important),
+      target ? tipRow("Target", `${target}${unit}`, "#ec835a") : null,
+    ]));
     svg.appendChild(bar);
     svg.appendChild(el("text", {
       x: cx, y: y - 7, "text-anchor": "middle", class: "axis-tick",
@@ -516,8 +552,9 @@ export function severityBars(container, rows) {
       x: pad.left, y, width: Math.max(2, w), height: 16, rx: 3,
       fill: SEVERITY[row.severity] || MUTED,
     });
-    bindTip(bar, `<strong>${row.severity}</strong>${tipRow(
-      "Outstanding patches", compact(row.count), SEVERITY[row.severity])}`);
+    bindTip(bar, tipBody(row.severity, [
+      tipRow("Outstanding patches", compact(row.count), SEVERITY[row.severity]),
+    ]));
     svg.appendChild(bar);
     svg.appendChild(el("text", {
       x: width - 4, y: y + 13, "text-anchor": "end", class: "axis-tick",
@@ -546,8 +583,13 @@ export function sparkline(container, points, color = "#3987e5") {
       return `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`;
     })
     .join(" ");
-  container.innerHTML =
-    `<svg viewBox="0 0 ${w} ${h}" width="120" height="30" aria-hidden="true">` +
-    `<path d="${d}" fill="none" stroke="${color}" stroke-width="2" ` +
-    `stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  container.replaceChildren();
+  const svg = el("svg", {
+    viewBox: `0 0 ${w} ${h}`, width: 120, height: 30, "aria-hidden": "true",
+  });
+  svg.appendChild(el("path", {
+    d, fill: "none", stroke: color, "stroke-width": 2,
+    "stroke-linecap": "round", "stroke-linejoin": "round",
+  }));
+  container.appendChild(svg);
 }

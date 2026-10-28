@@ -12,8 +12,9 @@ import {
 } from "/static/charts.js";
 import {
   alert, card, debounce, escapeHtml, fmtDate, fmtNumber, fmtPct, fmtRelative,
-  h, modal, mount, pill, select, spinnerRows, statePill, statTile,
-  table, toMonthInput,
+  fmtTime,
+  h, modal, mount, pill, select, setDisplayTimeZone, spinnerRows, statePill,
+  statTile, table, toMonthInput,
 } from "/static/ui.js";
 
 const BASIS_CHOICES = [
@@ -40,6 +41,53 @@ function stored(key, fallback) {
 
 function remember(key, value) {
   try { localStorage.setItem(key, String(value)); } catch { /* optional */ }
+}
+
+/* A tab strip with one panel visible at a time. `panels` is a list of
+ * [key, label, content]; `state.key` remembers the selection for the session so
+ * navigating away and back does not reset it. Keyboard: arrows, Home and End. */
+function tabbedPanels(panels, { ariaLabel = "Sections", state: tabState = {} } = {}) {
+  const tabbar = h("div", {
+    class: "tabbar", role: "tablist", "aria-label": ariaLabel,
+  });
+  const panelHost = h("div", { class: "tabpanels" });
+  const keys = panels.map(([key]) => key);
+  const choose = (selected) => {
+    tabState.key = selected;
+    for (const [key] of panels) {
+      const tab = tabbar.querySelector(`#tab-${key}`);
+      if (tab) {
+        tab.setAttribute("aria-selected", key === selected ? "true" : "false");
+        tab.tabIndex = key === selected ? 0 : -1;
+      }
+      panelHost.querySelector(`#panel-${key}`)?.toggleAttribute(
+        "hidden", key !== selected);
+    }
+  };
+  for (const [key, label, content] of panels) {
+    tabbar.appendChild(h("button", {
+      type: "button", class: "tab", role: "tab", id: `tab-${key}`,
+      "aria-controls": `panel-${key}`, "aria-selected": "false",
+      tabindex: "-1", onclick: () => choose(key),
+    }, label));
+    panelHost.appendChild(h("div", {
+      role: "tabpanel", id: `panel-${key}`, "aria-labelledby": `tab-${key}`,
+      hidden: true,
+    }, content));
+  }
+  tabbar.addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    let index = keys.indexOf(tabState.key);
+    if (event.key === "Home") index = 0;
+    else if (event.key === "End") index = keys.length - 1;
+    else if (event.key === "ArrowLeft") index = (index - 1 + keys.length) % keys.length;
+    else index = (index + 1) % keys.length;
+    choose(keys[index]);
+    tabbar.querySelector(`#tab-${keys[index]}`)?.focus();
+  });
+  choose(keys.includes(tabState.key) ? tabState.key : keys[0]);
+  return h("div", { class: "stack" }, tabbar, panelHost);
 }
 
 const state = {
@@ -329,9 +377,10 @@ function listPanel(key, {
   title, subtitle, columns, rows, empty = "No records found.",
   exportable = true,
   searchLabel = "Search", searchPlaceholder = "Search every column…",
-  facets = [], sorts = [], extra = null, note = null,
+  facets = [], sorts = [], extra = null, note = null, selection = null,
+  live = null,
 }) {
-  const source = rows || [];
+  let source = rows || [];
   const st = listState(key, {
     q: "",
     sort: sorts[0]?.field || "",
@@ -353,6 +402,77 @@ function listPanel(key, {
       "aria-label": `${searchLabel} ${title}`,
       oninput: debounce((event) => { st.q = event.target.value; paint(); }, 120),
     }))];
+
+  /* Selection is opt-in. A panel that offers it gets a checkbox per row and a
+   * header checkbox that applies to the rows currently shown, so "select all"
+   * means "all that match my search and filters", not "everything in the
+   * database" — the operator can see exactly what they are about to act on. */
+  const selected = new Set();
+  let lastShown = [];
+  let headerCheck = null;
+  let deleteButton = null;
+  let tableColumns = columns;
+  let keyOf = null;
+  if (selection) {
+    keyOf = selection.key || ((row) => row.id);
+    const canSelect = selection.selectable || (() => true);
+    headerCheck = h("input", {
+      type: "checkbox", title: "Select every row shown",
+      "aria-label": "Select every row shown",
+    });
+    headerCheck.addEventListener("change", () => {
+      for (const row of lastShown) {
+        if (!canSelect(row)) continue;
+        if (headerCheck.checked) selected.add(keyOf(row));
+        else selected.delete(keyOf(row));
+      }
+      paint();
+    });
+    tableColumns = [
+      {
+        label: headerCheck, export: false, class: "select-cell",
+        render: (row) => {
+          if (!canSelect(row)) return h("span", { class: "muted" }, "—");
+          const box = h("input", {
+            type: "checkbox",
+            "aria-label": `Select ${selection.label
+              ? selection.label(row) : keyOf(row)}`,
+          });
+          box.checked = selected.has(keyOf(row));
+          box.addEventListener("change", () => {
+            if (box.checked) selected.add(keyOf(row));
+            else selected.delete(keyOf(row));
+            paint();
+          });
+          return box;
+        },
+      },
+      ...columns,
+    ];
+    deleteButton = h("button", {
+      type: "button", class: "btn btn-sm btn-danger", disabled: true,
+    }, "Delete selected");
+    deleteButton.addEventListener("click", async () => {
+      const rows = source.filter((row) => selected.has(keyOf(row)));
+      if (!rows.length) return;
+      deleteButton.disabled = true;
+      const label = deleteButton.textContent;
+      deleteButton.textContent = "Deleting…";
+      try {
+        // `false` means the operator cancelled: keep the ticks so the
+        // selection is not silently discarded.
+        if (await selection.onDelete(rows) !== false) {
+          for (const row of rows) selected.delete(keyOf(row));
+        }
+      } catch (error) {
+        alert("error", error.message);
+      } finally {
+        deleteButton.textContent = label;
+        paint();
+      }
+    });
+    tools.push(deleteButton);
+  }
 
   for (const facet of facets) {
     const seen = new Map();
@@ -391,10 +511,23 @@ function listPanel(key, {
 
   function paint() {
     const shown = applyList(source, st, facets, sorts);
+    lastShown = shown;
+    if (selection) {
+      const canSelect = selection.selectable || (() => true);
+      const eligible = shown.filter(canSelect);
+      const chosen = eligible.filter((row) => selected.has(keyOf(row))).length;
+      headerCheck.checked = eligible.length > 0 && chosen === eligible.length;
+      headerCheck.indeterminate = chosen > 0 && chosen < eligible.length;
+      headerCheck.disabled = eligible.length === 0;
+      deleteButton.disabled = selected.size === 0;
+      deleteButton.textContent = selected.size
+        ? `Delete selected (${selected.size})` : "Delete selected";
+    }
     direction.textContent = st.dir === "asc" ? "↑ Ascending" : "↓ Descending";
     direction.setAttribute("aria-label",
       `Sort ${st.dir === "asc" ? "ascending" : "descending"}; click to reverse`);
-    body.replaceChildren(table(columns, shown, { compact: true, empty, export: exportable }));
+    body.replaceChildren(table(tableColumns, shown,
+      { compact: true, empty, export: exportable }));
     const noun = source.length === 1 ? "row" : "rows";
     count.textContent = shown.length === source.length
       ? `${fmtNumber(source.length)} ${noun}`
@@ -402,13 +535,42 @@ function listPanel(key, {
   }
 
   paint();
-  return card(title, subtitle,
+  const panel = card(title, subtitle,
     h("div", {},
       h("div", { class: "list-tools" }, ...tools),
       note || null,
       body,
       count),
     extra);
+
+  /* A register whose rows change on their own — a report moving from queued to
+   * completed — refreshes its table in place. Re-rendering the whole screen
+   * would throw away the operator's search, sort and scroll position, and
+   * making them reload to see a finished report is the wrong answer. The poll
+   * stops when `done` says nothing is in flight, and a detached panel (the
+   * operator navigated away) stops on its next tick. */
+  if (live) {
+    const interval = live.interval ?? 3000;
+    let stopped = false;
+    const tick = async () => {
+      if (stopped || !panel.isConnected) return;
+      try {
+        const next = await live.fetch();
+        if (stopped || !panel.isConnected) return;
+        if (Array.isArray(next)) {
+          source = next;
+          paint();
+        }
+        if (live.done && live.done(source)) return;
+      } catch {
+        // A transient failure must not pin the previous "Generating" state
+        // forever; try again on the next tick.
+      }
+      setTimeout(tick, interval);
+    };
+    setTimeout(tick, interval);
+  }
+  return panel;
 }
 
 /* ----------------------------------------------------- server-side search box */
@@ -479,6 +641,12 @@ function setKiosk(on, { persist = true } = {}) {
     button.setAttribute("aria-pressed", state.kiosk ? "true" : "false");
   }
   if (persist) remember("patchtrack.kiosk", state.kiosk ? "1" : "0");
+  // The header hides in TV mode. If the toggle button keeps focus, :focus-within
+  // would pin it on screen, so hand focus to the view; Tab still reveals the
+  // header when an operator needs its controls.
+  if (state.kiosk && document.querySelector(".topbar")?.contains(document.activeElement)) {
+    document.getElementById("view")?.focus({ preventScroll: true });
+  }
 }
 
 function bindKiosk() {
@@ -520,7 +688,7 @@ function startDashboardRefresh(seconds) {
     if (document.getElementById("modal-root").childElementCount) return;
     renderDashboard({ silent: true }).catch(() => {
       lastRefresh.textContent =
-        `Refresh failed at ${new Date().toLocaleTimeString()} — retrying`;
+        `Refresh failed at ${fmtTime()} — retrying`;
     });
   }, seconds * 1000);
 }
@@ -726,9 +894,9 @@ async function renderDashboard({ silent = false } = {}) {
   ]);
   const refreshSeconds = Number(state.dashboard.refreshSeconds) || 0;
   lastRefresh.textContent = refreshSeconds
-    ? `Updated ${new Date().toLocaleTimeString()} · every ${
+    ? `Updated ${fmtTime()} · every ${
       REFRESH_CHOICES.find((c) => c.value === String(refreshSeconds))?.label || `${refreshSeconds}s`}`
-    : `Updated ${new Date().toLocaleTimeString()} · auto-refresh off`;
+    : `Updated ${fmtTime()} · auto-refresh off`;
   // freshnessLine builds a node, so it is mounted rather than stringified.
   // In period mode the provenance of the frozen snapshot replaces it: the age
   // of today's collection is not evidence about a past month.
@@ -1066,6 +1234,210 @@ async function renderServers(params) {
   restoreSearchFocus("servers", searchInput);
 }
 
+/* ------------------------------------------------------- justifications */
+/* A failing state is verified by a person, not silenced by the UI. The
+ * compliance engine still reports exactly what the collectors found; the
+ * justification sits beside it, is versioned, and carries the evidence the
+ * operator relied on. */
+const JUSTIFICATION_REASONS = [
+  ["accepted_risk", "Accepted risk"],
+  ["compensating_control", "Compensating control in place"],
+  ["scheduled_remediation", "Remediation scheduled"],
+  ["false_positive", "False positive / assessment error"],
+  ["decommissioning", "Asset being decommissioned"],
+  ["collection_gap", "Collection or authentication gap"],
+  ["investigation", "Under investigation"],
+];
+const EVIDENCE_TYPES = [
+  "image/png", "image/jpeg", "application/pdf", "text/plain", "text/csv",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.ms-excel",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+];
+
+function fileToEvidence(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve({
+      filename: file.name,
+      content_type: file.type || "application/octet-stream",
+      data: String(reader.result || ""),
+    });
+    reader.onerror = () => reject(new Error(`${file.name} could not be read`));
+    reader.readAsDataURL(file);
+  });
+}
+
+function justificationCard(asset, justifications, justifiable, refresh) {
+  const active = justifications.active;
+  const status = h("div");
+  const evidenceRows = (active?.evidence || []);
+  const activeBlock = active
+    ? h("div", { class: "stack" },
+      h("div", { class: "row between" },
+        h("div", {},
+          h("strong", {}, active.reason_label),
+          h("div", { class: "muted small" },
+            `Recorded by ${active.created_by} · `,
+            fmtDate(active.created_at, true),
+            active.compliance_state
+              ? ` · state at the time: ${active.compliance_state.replaceAll("_", " ")}`
+              : "")),
+        can("compliance:justify")
+          ? h("button", {
+            class: "btn btn-sm",
+            onclick: async () => {
+              if (!window.confirm("Withdraw this justification? Its history and "
+                + "evidence are kept.")) return;
+              status.replaceChildren();
+              try {
+                await api(`inventory/assets/${asset.id}/justifications/${active.id}`, {
+                  method: "DELETE",
+                });
+                await refresh();
+              } catch (error) {
+                status.appendChild(alert("error", error.message));
+              }
+            },
+          }, "Withdraw")
+          : null),
+      h("p", { style: { margin: 0, whiteSpace: "pre-wrap" } }, active.statement),
+      active.remediation_plan
+        ? h("div", {}, h("span", { class: "muted small" }, "Remediation plan: "),
+          active.remediation_plan)
+        : null,
+      active.remediation_target
+        ? h("div", { class: "muted small" },
+          `Target date: ${fmtDate(active.remediation_target)}`)
+        : null,
+      evidenceRows.length
+        ? table([
+          { label: "Evidence", key: "filename" },
+          { label: "Type", key: "content_type" },
+          { label: "Size", numeric: true,
+            render: (r) => `${(r.byte_size / 1024).toFixed(0)} KB` },
+          { label: "Uploaded", render: (r) => fmtDate(r.uploaded_at, true) },
+          { label: "", export: false, render: (r) => h("button", {
+            class: "btn btn-sm",
+            onclick: () => download(
+              `inventory/assets/${asset.id}/justifications/${active.id}`
+              + `/evidence/${r.id}`, r.filename),
+          }, "Download") },
+        ], evidenceRows, { compact: true, export: false })
+        : h("div", { class: "muted small" }, "No evidence attached."),
+      status)
+    : h("div", { class: "muted small" },
+      justifiable
+        ? "No justification recorded. The state above is what the collected "
+          + "evidence shows."
+        : "No justification recorded.");
+
+  let form = null;
+  if (can("compliance:justify") && justifiable) {
+    const reason = h("select", { id: "justification-reason" },
+      ...JUSTIFICATION_REASONS.map(([value, label]) =>
+        h("option", { value }, label)));
+    const statement = h("textarea", {
+      id: "justification-statement", rows: "3", minLength: "20", maxLength: "4000",
+      placeholder: "What did you verify, and why is the asset in this state?",
+      style: { width: "100%" },
+    });
+    const plan = h("input", {
+      id: "justification-plan", type: "text", maxLength: "2000",
+      placeholder: "What will be done, and by whom?",
+    });
+    const target = h("input", { id: "justification-target", type: "date" });
+    const files = h("input", {
+      id: "justification-evidence", type: "file", multiple: true,
+      accept: EVIDENCE_TYPES.join(","),
+    });
+    const submit = h("button", { class: "btn btn-primary", type: "submit" },
+      "Record verification");
+    const formEl = h("form", {
+      class: "stack",
+      onsubmit: async (event) => {
+        event.preventDefault();
+        status.replaceChildren();
+        const chosen = [...(files.files || [])];
+        if (chosen.length > 5) {
+          status.appendChild(alert("error", "Attach at most 5 evidence files."));
+          return;
+        }
+        const tooBig = chosen.find((file) => file.size > 5 * 1024 * 1024);
+        if (tooBig) {
+          status.appendChild(alert("error", `${tooBig.name} is larger than 5 MB.`));
+          return;
+        }
+        submit.disabled = true;
+        try {
+          const evidence = await Promise.all(chosen.map(fileToEvidence));
+          await api(`inventory/assets/${asset.id}/justifications`, {
+            method: "POST",
+            body: {
+              reason_code: reason.value,
+              statement: statement.value,
+              remediation_plan: plan.value,
+              remediation_target: target.value || null,
+              evidence,
+            },
+          });
+          await refresh();
+        } catch (error) {
+          status.appendChild(alert("error", error.message));
+          submit.disabled = false;
+        }
+      },
+    },
+    h("div", { class: "row" },
+      h("div", { class: "field", style: { minWidth: "240px" } },
+        h("label", { for: "justification-reason" }, "Reason"), reason),
+      h("div", { class: "field", style: { minWidth: "170px" } },
+        h("label", { for: "justification-target" }, "Remediation target"), target)),
+    h("div", { class: "field" },
+      h("label", { for: "justification-statement" },
+        "What was verified (at least 20 characters)"), statement),
+    h("div", { class: "field" },
+      h("label", { for: "justification-plan" }, "Remediation plan"), plan),
+    h("div", { class: "field" },
+      h("label", { for: "justification-evidence" },
+        "Evidence (PDF, image, text, CSV or Office; up to 5 files, 5 MB each)"),
+      files),
+    submit);
+    form = h("div", { class: "stack" },
+      h("h3", { style: { margin: "8px 0 0", fontSize: "13.5px" } },
+        active ? "Record a new verification (supersedes the current one)"
+          : "Record verification"),
+      formEl);
+  }
+
+  const history = (justifications.history || [])
+    .filter((row) => row.status !== "active");
+  const historyBlock = history.length
+    ? card("Justification history",
+      "Superseded and withdrawn records are retained for audit",
+      table([
+        { label: "Recorded", render: (r) => fmtDate(r.created_at, true) },
+        { label: "By", key: "created_by" },
+        { label: "Reason", key: "reason_label" },
+        { label: "State", key: "compliance_state" },
+        { label: "Status", render: (r) => pill(r.status, r.status) },
+        { label: "Evidence", numeric: true,
+          render: (r) => (r.evidence || []).length },
+      ], history, { compact: true, export: false }))
+    : null;
+
+  return h("div", { class: "stack" },
+    card("Verification and justification",
+      justifiable
+        ? "This asset is non-compliant, stale or unknown. Record what you "
+          + "verified and attach evidence; the compliance state itself is not "
+          + "changed by this record."
+        : "Recorded verifications for this asset.",
+      h("div", { class: "stack" }, activeBlock, status, form)),
+    historyBlock);
+}
+
 /* ------------------------------------------------------------------ server detail */
 async function openServer(assetId) {
   const close = modal("Server detail", spinnerRows(2));
@@ -1074,6 +1446,10 @@ async function openServer(assetId) {
     const asset = data.asset;
     const assessment = data.assessment;
     const findings = data.findings || [];
+    const justifications = data.justifications || { active: null, history: [] };
+    const justifiable = ["non_compliant", "stale", "unknown"]
+      .includes(asset.compliance_state || "unknown");
+    const reopen = async () => { close(); await openServer(assetId); };
     const detail = h("div", { class: "stack" },
       h("div", { class: "row between" },
         h("div", {},
@@ -1113,7 +1489,9 @@ async function openServer(assetId) {
         h("dt", {}, "Compliance reason"), h("dd", {}, asset.compliance_reason || "—")),
       h("div", { class: "alert warn" }, h("span", { class: "ico" }, "!"),
         h("div", {}, "Remediation is performed in the authoritative patch-management " +
-          "system. PatchTrack records status and references only.")),
+          "system. PatchTrack records status, references and the operator's " +
+          "verification of a failing state.")),
+      justificationCard(asset, justifications, justifiable, reopen),
       card("Outstanding findings",
         assessment ? `${fmtNumber(findings.length)} recorded · assessment ${fmtDate(assessment.assessed_at, true)}` : "No assessment recorded",
         table([
@@ -1792,6 +2170,34 @@ async function renderReports() {
       { field: "requested_by", label: "Requested by" },
     ],
     empty: "No reports match this selection.",
+    // Generation runs in the background. While anything is queued or
+    // generating, refresh just this table so the status changes on its own.
+    live: reports.items.some((r) => r.status === "queued" || r.status === "generating")
+      ? {
+        interval: 2500,
+        fetch: async () => (await api("reporting/reports?limit=40")).items,
+        done: (rows) => !rows.some(
+          (r) => r.status === "queued" || r.status === "generating"),
+      } : null,
+    selection: can("reports:delete") ? {
+      label: (r) => `${r.report_type.replaceAll("_", " ")} ${r.period_start}`,
+      selectable: (r) => r.status !== "queued" && r.status !== "generating",
+      onDelete: async (rows) => {
+        const noun = rows.length === 1 ? "report" : "reports";
+        if (!window.confirm(
+          `Delete ${rows.length} ${noun} permanently, including the archived `
+          + "PDF? This cannot be undone.")) return false;
+        const result = await api("reporting/reports/bulk-delete", {
+          method: "POST", body: { ids: rows.map((row) => row.id) },
+        });
+        if (result.refused?.length) {
+          window.alert(`${result.refused.length} report(s) could not be deleted: `
+            + result.refused.map((item) => item.reason).join("; "));
+        }
+        await renderReports();
+        return true;
+      },
+    } : null,
   });
 
   mount(view, h("div", { class: "stack" }, requestCard, history));
@@ -2342,6 +2748,9 @@ async function renderAudit() {
 }
 
 /* ------------------------------------------------------------------ health */
+// Remember the selected Operational health tab for the session.
+const HEALTH_STATE = { key: "services" };
+
 async function renderHealth() {
   mount(view, spinnerRows(3));
   const gateway = await fetch("/readyz").then((r) => r.json()).catch(() => ({}));
@@ -2353,8 +2762,9 @@ async function renderHealth() {
   const serviceRows = Object.entries(gateway.services || {}).map(([name, status]) => ({
     name, status,
   }));
-  mount(view, h("div", { class: "stack" },
-    card("Service availability", "Core functionality remains available if Grafana is down",
+  const panels = [
+    ["services", "Services", card("Service availability",
+      "Core functionality remains available if Grafana is down",
       table([
         { label: "Component", key: "name" },
         { label: "Status", render: (r) => pill(r.status, r.status) },
@@ -2362,28 +2772,36 @@ async function renderHealth() {
         { name: "gateway", status: gateway.status || "unknown" },
         ...serviceRows,
         { name: "grafana (optional)", status: "separate" },
-      ], { compact: true, export: false })),
-    card("Data freshness", "Inventory and patch collection are tracked separately",
+      ], { compact: true, export: false }))],
+    ["freshness", "Data freshness", card("Data freshness",
+      "Inventory and patch collection are tracked separately",
       h("dl", { class: "kv" },
-        h("dt", {}, "Inventory synchronised"), h("dd", {}, fmtDate(summary?.freshness?.inventory_synced_at, true)),
-        h("dt", {}, "Patch data synchronised"), h("dd", {}, fmtDate(summary?.freshness?.patch_synced_at, true)),
+        h("dt", {}, "Inventory synchronised"),
+        h("dd", {}, fmtDate(summary?.freshness?.inventory_synced_at, true)),
+        h("dt", {}, "Patch data synchronised"),
+        h("dd", {}, fmtDate(summary?.freshness?.patch_synced_at, true)),
         ...Object.entries(summary?.freshness?.per_source || {}).flatMap(([key, value]) => [
           h("dt", {}, `${key} last success`), h("dd", {}, fmtDate(value, true)),
-        ]))),
-    card("Integration health", "Per-source state", table([
+        ])))],
+    ["integrations", "Integrations", card("Integration health", "Per-source state", table([
       { label: "Integration", key: "key" },
       { label: "Health", render: (r) => pill(r.health, r.health.replaceAll("_", " ")) },
       { label: "Last success", render: (r) => fmtDate(r.last_success_at, true) },
       { label: "Last status", render: (r) => (r.last_run ? pill(r.last_run.status, r.last_run.status) : "—") },
-    ], integrations, { compact: true, export: false })),
-    card("Recent collection runs", "Operational history", table([
+    ], integrations, { compact: true, export: false }))],
+    ["runs", "Collection runs", card("Recent collection runs", "Operational history", table([
       { label: "Started", render: (r) => fmtDate(r.started_at, true) },
       { label: "Integration", key: "integration_key" },
       { label: "Status", render: (r) => pill(r.status, r.status) },
       { label: "Seen", numeric: true, key: "records_seen" },
       { label: "Rejected", numeric: true, key: "records_rejected" },
       { label: "Error", render: (r) => r.error_summary || "—" },
-    ], runs, { compact: true, export: false }))));
+    ], runs, { compact: true, export: false }))],
+  ];
+  mount(view, h("div", { class: "stack" },
+    tabbedPanels(panels, {
+      ariaLabel: "Operational health sections", state: HEALTH_STATE,
+    })));
 }
 
 /* ------------------------------------------------------------------ settings */
@@ -2394,6 +2812,9 @@ async function renderHealth() {
  * AssetExplorer is preserved and shown beside it); a value still in use cannot
  * be deleted, only renamed. */
 let SETTINGS_FLASH = null;
+// Remember the selected Settings tab while the console stays open, so saving
+// a value and re-rendering does not throw the operator back to the first tab.
+const SETTINGS_STATE = { key: "branding" };
 
 function renamePlacementOption(item, label) {
   const error = h("div");
@@ -2515,16 +2936,100 @@ function placementOptionSection(kind, label, items) {
 async function renderSettings() {
   mount(view, spinnerRows(3));
   const orgInput = h("input", { id: "org-name", type: "text", placeholder: "Organisation name" });
+  const preparerName = h("input", { id: "preparer-name", type: "text", placeholder: "Name" });
+  const preparerTitle = h("input", { id: "preparer-title", type: "text", placeholder: "Designation" });
+  const concurName = h("input", { id: "concur-name", type: "text", placeholder: "Name" });
+  const concurTitle = h("input", { id: "concur-title", type: "text", placeholder: "Designation" });
+  const logoInput = h("input", {
+    id: "org-logo", type: "file", accept: "image/png,image/jpeg",
+    style: { maxWidth: "300px" },
+  });
+  const logoPreview = h("img", {
+    alt: "Organisation logo preview",
+    style: {
+      maxHeight: "64px", maxWidth: "220px", display: "none",
+      background: "#fff", padding: "6px", borderRadius: "4px",
+    },
+  });
+  const logoName = h("span", { class: "muted small" });
+  const logoRemove = h("button", {
+    class: "btn btn-sm", type: "button", style: { display: "none" },
+  }, "Remove logo");
   const orgStatus = h("div");
   const retentionInput = h("input", {
     id: "audit-retention-days",
     type: "number", min: "30", max: "36500", step: "1",
   });
   const retentionStatus = h("div", { class: "muted small" });
+  const reportRetentionInput = h("input", {
+    id: "report-retention-days",
+    type: "number", min: "30", max: "36500", step: "1",
+  });
+  const reportRetentionStatus = h("div", { class: "muted small" });
+  const timezoneInput = h("select", { id: "system-timezone" });
+  const timezoneStatus = h("div", { class: "muted small" });
   let placement = { environments: [], business_groups: [] };
+  // The logo is sent to the server only when it changed: re-uploading a
+  // 700 KB data URI on every name edit would be wasteful, and an omitted
+  // field must not be mistaken for a request to remove it.
+  const logo = { data: "", filename: "", remove: false, existing: "" };
+  const showLogo = (src, name) => {
+    if (src) {
+      logoPreview.src = src;
+      logoPreview.style.display = "block";
+      logoName.textContent = name || "Uploaded logo";
+      logoRemove.style.display = "inline-flex";
+    } else {
+      logoPreview.removeAttribute("src");
+      logoPreview.style.display = "none";
+      logoName.textContent = "No logo configured — reports show the organisation name only";
+      logoRemove.style.display = "none";
+    }
+  };
+  showLogo("", "");
+  logoRemove.addEventListener("click", () => {
+    logo.data = "";
+    logo.filename = "";
+    logo.remove = true;
+    logoInput.value = "";
+    showLogo("", "");
+  });
+  logoInput.addEventListener("change", () => {
+    const file = logoInput.files && logoInput.files[0];
+    if (!file) return;
+    if (!["image/png", "image/jpeg"].includes(file.type)) {
+      orgStatus.replaceChildren(alert("error", "Choose a PNG or JPEG image."));
+      logoInput.value = "";
+      return;
+    }
+    if (file.size > 1000000) {
+      orgStatus.replaceChildren(alert("error", "The logo must be no larger than 1 MB."));
+      logoInput.value = "";
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      logo.data = String(reader.result || "");
+      logo.filename = file.name;
+      logo.remove = false;
+      orgStatus.replaceChildren();
+      showLogo(logo.data, file.name);
+    };
+    reader.onerror = () => orgStatus.replaceChildren(
+      alert("error", "The logo could not be read."));
+    reader.readAsDataURL(file);
+  });
   try {
     const value = await api("inventory/settings/organization");
     orgInput.value = value?.name || "";
+    preparerName.value = value?.preparer_name || "";
+    preparerTitle.value = value?.preparer_title || "";
+    concurName.value = value?.concur_name || "";
+    concurTitle.value = value?.concur_title || "";
+    if (value?.logo_data) {
+      logo.existing = value.logo_data;
+      showLogo(value.logo_data, value.logo_filename);
+    }
   } catch { /* not configured yet */ }
   try {
     const value = await api("identity/settings/audit-retention");
@@ -2537,59 +3042,145 @@ async function renderSettings() {
     retentionStatus.textContent = `${seen}. Applied by the daily maintenance job.`;
   } catch { /* the server default still applies */ }
   try {
+    const value = await api("reporting/settings/report-retention");
+    reportRetentionInput.min = String(value.min_days);
+    reportRetentionInput.max = String(value.max_days);
+    reportRetentionInput.value = String(value.days);
+    reportRetentionStatus.textContent =
+      `${value.completed.toLocaleString()} archived reports`
+      + (value.expired ? `, ${value.expired} awaiting purge` : "");
+  } catch { /* the server default still applies */ }
+  try {
+    const value = await api("identity/settings/timezone");
+    const zones = value?.zones?.length ? value.zones : [value.timezone];
+    timezoneInput.replaceChildren(...zones.map((zone) => h("option", {
+      value: zone, selected: zone === value.timezone ? true : null,
+    }, zone)));
+    timezoneStatus.textContent =
+      `Currently ${value.timezone}. Schedules, daily snapshots, period `
+      + "boundaries and report timestamps all use this zone.";
+  } catch { /* the selector still saves a typed zone only if the list loads */ }
+  try {
     placement = await api("inventory/settings/placement");
   } catch { /* the free-text fallback in the editor still works */ }
   const flash = SETTINGS_FLASH;
   SETTINGS_FLASH = null;
-  const form = h("div", { class: "stack" },
+  const signatureGroup = (heading, nameInput, titleInput) =>
+    h("div", { class: "field" },
+      h("label", {}, heading),
+      h("div", { class: "stack", style: { gap: "6px" } },
+        nameInput, titleInput));
+  // One column of the side-by-side policy panel: the branding controls are
+  // stacked so they fit the column without forcing the grid wider.
+  const form = h("div", { class: "stack", style: { gap: "10px" } },
+    h("div", { class: "field" },
+      h("label", { for: "org-name" }, "Organisation name"), orgInput),
+    h("div", { class: "field" },
+      h("label", { for: "org-logo" }, "Logo (PNG or JPEG, up to 1 MB)"),
+      logoInput),
+    h("div", { class: "row", style: { alignItems: "center", gap: "10px" } },
+      logoPreview, logoName, logoRemove),
+    signatureGroup("Prepared by", preparerName, preparerTitle),
+    signatureGroup("Concurred by", concurName, concurTitle),
     h("div", { class: "row", style: { alignItems: "flex-end" } },
-      h("div", { class: "field", style: { minWidth: "320px" } },
-        h("label", {}, "Organisation name (report branding)"), orgInput),
       h("button", {
         class: "btn btn-primary",
         onclick: async () => {
           orgStatus.replaceChildren();
           try {
-            await api("inventory/settings/organization", {
-              method: "PUT", body: { name: orgInput.value },
+            const body = {
+              name: orgInput.value,
+              preparer_name: preparerName.value,
+              preparer_title: preparerTitle.value,
+              concur_name: concurName.value,
+              concur_title: concurTitle.value,
+              remove_logo: logo.remove,
+            };
+            if (logo.data) {
+              body.logo_data = logo.data;
+              body.logo_filename = logo.filename;
+            }
+            const saved = await api("inventory/settings/organization", {
+              method: "PUT", body,
             });
-            orgStatus.appendChild(alert("ok", "Saved"));
+            logo.data = "";
+            logo.remove = false;
+            logo.existing = saved?.logo_data || "";
+            logoInput.value = "";
+            if (saved?.logo_data) showLogo(saved.logo_data, saved.logo_filename);
+            orgStatus.appendChild(alert("ok", "Branding saved. New reports use it."));
           } catch (error) {
             orgStatus.appendChild(alert("error", error.message));
           }
         },
-      }, "Save")),
+      }, "Save branding")),
     orgStatus);
-  mount(view, h("div", { class: "stack" },
-    flash,
-    card("Report branding", "Used in PDF headers and footers", form),
-    card("Audit trail retention",
-      "How long audit events are kept before the maintenance job deletes them. "
-      + "The trail is append-only otherwise: no screen or API can edit or "
-      + "remove an individual event, and a change to this setting is itself "
-      + "audited.",
-      h("div", { class: "stack" },
-        h("div", { class: "row", style: { alignItems: "flex-end" } },
-          h("div", { class: "field", style: { minWidth: "220px" } },
-            h("label", { for: "audit-retention-days" }, "Retention (days)"),
-            retentionInput),
-          h("button", {
-            class: "btn btn-primary",
-            onclick: async () => {
-              retentionStatus.replaceChildren();
-              try {
-                const value = await api("identity/settings/audit-retention", {
-                  method: "PUT", body: { days: Number(retentionInput.value) },
-                });
-                retentionStatus.appendChild(alert("ok",
-                  `Saved — events older than ${value.days} days will be removed.`));
-              } catch (error) {
-                retentionStatus.appendChild(alert("error", error.message));
-              }
-            },
-          }, "Save")),
-        retentionStatus)),
-    card("Inventory placement values",
+  // Each Settings concern gets its own tab, so a long form or two retention
+  // windows never compete for one screen. The panels are built once and shown
+  // or hidden; the last selected tab survives a re-render.
+  const panels = [
+    ["branding", "Report branding", card(
+      "Report branding",
+      "Organisation name, logo and signatories used on generated PDFs. The "
+      + "cover carries the logo; the preparer and concurrence blocks appear on "
+      + "the sign-off page.", form)],
+    ["retention", "Retention", h("div", { class: "stack" },
+      card("Report file retention",
+        "How long generated PDFs are kept before the maintenance job deletes "
+        + "them. Saving applies the window immediately, including to reports "
+        + "already on disk; the report record, SHA-256 and size are retained as "
+        + "an archive tombstone either way.",
+        h("div", { class: "stack" },
+          h("div", { class: "row", style: { alignItems: "flex-end" } },
+            h("div", { class: "field", style: { minWidth: "220px" } },
+              h("label", { for: "report-retention-days" }, "Retention (days)"),
+              reportRetentionInput),
+            h("button", {
+              class: "btn btn-primary",
+              onclick: async () => {
+                reportRetentionStatus.replaceChildren();
+                try {
+                  const value = await api("reporting/settings/report-retention", {
+                    method: "PUT",
+                    body: { days: Number(reportRetentionInput.value) },
+                  });
+                  reportRetentionStatus.appendChild(alert("ok",
+                    `Saved — files older than ${value.days} days are removed. `
+                    + `${value.purged_reports} expired file(s) purged now.`));
+                } catch (error) {
+                  reportRetentionStatus.appendChild(alert("error", error.message));
+                }
+              },
+            }, "Save")),
+          reportRetentionStatus)),
+      card("Audit trail retention",
+        "How long audit events are kept before the maintenance job deletes "
+        + "them. The trail is append-only otherwise: no screen or API can edit "
+        + "or remove an individual event, and a change to this setting is "
+        + "itself audited.",
+        h("div", { class: "stack" },
+          h("div", { class: "row", style: { alignItems: "flex-end" } },
+            h("div", { class: "field", style: { minWidth: "220px" } },
+              h("label", { for: "audit-retention-days" }, "Retention (days)"),
+              retentionInput),
+            h("button", {
+              class: "btn btn-primary",
+              onclick: async () => {
+                retentionStatus.replaceChildren();
+                try {
+                  const value = await api("identity/settings/audit-retention", {
+                    method: "PUT", body: { days: Number(retentionInput.value) },
+                  });
+                  retentionStatus.appendChild(alert("ok",
+                    `Saved — events older than ${value.days} days will be removed.`));
+                } catch (error) {
+                  retentionStatus.appendChild(alert("error", error.message));
+                }
+              },
+            }, "Save")),
+          retentionStatus)))],
+    ["placement", "Inventory placement", card(
+      "Inventory placement values",
       "The picker offered when an operator corrects environment or business "
       + "service, and the names shown across inventory, compliance, reports and "
       + "the dashboard. A rename updates every server holding the old value; "
@@ -2598,13 +3189,45 @@ async function renderSettings() {
         placementOptionSection("environment", "environment",
           placement.environments || []),
         placementOptionSection("business_group", "business service",
-          placement.business_groups || []))),
-    card("Platform", "Deployment facts",
-      h("dl", { class: "kv" },
-        h("dt", {}, "Application"), h("dd", {}, "PatchTrack 1.0.0"),
-        h("dt", {}, "Timezone"), h("dd", {}, "UTC (schedules and snapshots)"),
-        h("dt", {}, "Report retention"), h("dd", {}, "2555 days by default"),
-        h("dt", {}, "Database"), h("dd", {}, "PostgreSQL")))));
+          placement.business_groups || [])))],
+    ["platform", "Platform", h("div", { class: "stack" },
+      card("System timezone",
+        "One timezone for the whole deployment. It decides the local calendar "
+        + "day a daily snapshot covers, the first and last instant of every "
+        + "reporting period and schedule run, and how timestamps are displayed "
+        + "here and in generated PDFs. Stored instants remain UTC.",
+        h("div", { class: "stack" },
+          h("div", { class: "row", style: { alignItems: "flex-end" } },
+            h("div", { class: "field", style: { minWidth: "280px" } },
+              h("label", { for: "system-timezone" }, "Timezone"), timezoneInput),
+            h("button", {
+              class: "btn btn-primary",
+              onclick: async () => {
+                timezoneStatus.replaceChildren();
+                try {
+                  const value = await api("identity/settings/timezone", {
+                    method: "PUT", body: { timezone: timezoneInput.value },
+                  });
+                  setDisplayTimeZone(value.timezone);
+                  timezoneStatus.appendChild(alert("ok",
+                    `Saved — PatchTrack now uses ${value.timezone} `
+                    + `(local time ${value.local_time}).`));
+                } catch (error) {
+                  timezoneStatus.appendChild(alert("error", error.message));
+                }
+              },
+            }, "Save timezone")),
+          timezoneStatus)),
+      card("Platform", "Deployment facts",
+        h("dl", { class: "kv" },
+          h("dt", {}, "Application"), h("dd", {}, "PatchTrack 1.0.0"),
+          h("dt", {}, "Report retention"), h("dd", {}, "Editable in Settings"),
+          h("dt", {}, "Database"), h("dd", {}, "PostgreSQL"))))],
+  ];
+  mount(view, h("div", { class: "stack" }, flash,
+    tabbedPanels(panels, {
+      ariaLabel: "Settings sections", state: SETTINGS_STATE,
+    })));
 }
 
 const RENDERERS = {
@@ -2703,6 +3326,10 @@ async function boot() {
     window.location.replace("/login");
     return;
   }
+  try {
+    const zone = await api("identity/settings/timezone");
+    setDisplayTimeZone(zone?.timezone);
+  } catch { /* display falls back to the browser timezone */ }
   await loadDimensions();
   bindKiosk();
   document.getElementById("refresh").addEventListener("click", () => renderRoute());

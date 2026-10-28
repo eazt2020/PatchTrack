@@ -14,6 +14,14 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
+from patchtrack_common import timezones as timezone_settings
+from patchtrack_common.metrics import install as install_metrics
+from patchtrack_common.request_guards import install as install_request_guards
+from patchtrack_common.scheduler import (
+    SCHEDULER_PRINCIPAL,
+    ScheduledJob,
+    install as install_scheduler,
+)
 from patchtrack_common.audit import record_audit
 from patchtrack_common.config import get_settings
 from patchtrack_common.db import connection, fetch_all, fetch_one
@@ -28,16 +36,22 @@ from .scheduler import (
     period_for_schedule,
 )
 from .service import (
+    REPORT_RETENTION_KEY,
+    REPORT_RETENTION_MAX,
+    REPORT_RETENTION_MIN,
     REPORT_TITLES,
     ReportError,
     deliver_report,
     generate_report,
     purge_expired,
+    report_retention_days,
 )
 
 APP = "reporting"
 log = logging.getLogger(__name__)
 app = FastAPI(title="PatchTrack Reporting", version="1.0.0", docs_url="/docs")
+install_metrics(app, APP)
+install_request_guards(app)
 
 
 def _client_ip(request: Request) -> str | None:
@@ -67,6 +81,80 @@ def _report_view(row: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
+# ------------------------------------------------------------------- retention
+class ReportRetentionUpdate(BaseModel):
+    days: int = Field(ge=REPORT_RETENTION_MIN, le=REPORT_RETENTION_MAX)
+
+
+@app.get("/settings/report-retention")
+def get_report_retention(
+    _: Annotated[Principal, Depends(require_permission("settings:manage"))],
+) -> dict[str, Any]:
+    days, row = report_retention_days()
+    stats = fetch_one(
+        "SELECT count(*) FILTER (WHERE status = 'completed') AS completed, "
+        "       count(*) FILTER (WHERE status = 'completed' "
+        "                        AND expires_at IS NOT NULL "
+        "                        AND expires_at < now()) AS expired "
+        "FROM reporting.reports"
+    ) or {}
+    return {
+        "days": days,
+        "min_days": REPORT_RETENTION_MIN,
+        "max_days": REPORT_RETENTION_MAX,
+        "updated_at": row["updated_at"] if row else None,
+        "updated_by": row["updated_by"] if row else None,
+        "completed": int(stats.get("completed") or 0),
+        "expired": int(stats.get("expired") or 0),
+    }
+
+
+@app.put("/settings/report-retention")
+def set_report_retention(
+    payload: ReportRetentionUpdate,
+    request: Request,
+    principal: Annotated[Principal, Depends(require_permission("settings:manage"))],
+) -> dict[str, Any]:
+    """Save the window and apply it at once: every completed report's expiry is
+    recomputed from its completion date, then the purge runs, so lowering the
+    window removes already-expired files immediately rather than at the next
+    scheduled tick."""
+    import json
+
+    with connection() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO shared.app_settings "
+                "(key, value, updated_at, updated_by) "
+                "VALUES (:key, CAST(:v AS jsonb), now(), :by) "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, "
+                "    updated_at = now(), updated_by = EXCLUDED.updated_by"
+            ),
+            {
+                "key": REPORT_RETENTION_KEY,
+                "v": json.dumps({"days": payload.days}),
+                "by": principal.username,
+            },
+        )
+        conn.execute(
+            text(
+                "UPDATE reporting.reports SET expires_at = "
+                "CASE WHEN status = 'completed' AND completed_at IS NOT NULL "
+                "     THEN completed_at + make_interval(days => :days) "
+                "     ELSE NULL END"
+            ),
+            {"days": payload.days},
+        )
+    purged = purge_expired()
+    record_audit(
+        event_type="settings.updated", outcome="success", principal=principal,
+        target_type="setting", target_id=REPORT_RETENTION_KEY,
+        context={"days": payload.days, "purged_reports": purged},
+        source_ip=_client_ip(request), service=APP,
+    )
+    return {"days": payload.days, "purged_reports": purged}
+
+
 # --------------------------------------------------------------------------- reports
 class ReportRequest(BaseModel):
     report_type: str
@@ -91,7 +179,9 @@ def request_report(
     from .periods import period_bounds
 
     try:
-        start, end = period_bounds(payload.reporting_month, payload.quarter)
+        start, end = period_bounds(
+            payload.reporting_month, payload.quarter,
+            tz=timezone_settings.system_timezone())
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -111,6 +201,9 @@ def request_report(
                          WHEN 'on_demand' THEN 2 ELSE 3 END,
               captured_at DESC LIMIT 1
             """,
+            # period_start is a calendar date. Passing a UTC datetime compares
+            # against local midnight (date -> timestamptz), which is the
+            # previous day in Asia/Kuala_Lumpur and matches nothing.
             ps=start.date(),
         )
         if snapshot is None:
@@ -273,6 +366,119 @@ def retry_report(
     return {"status": "queued"}
 
 
+class ReportDeleteRequest(BaseModel):
+    ids: list[UUID] = Field(min_length=1, max_length=200)
+
+
+def _delete_reports(ids: list[UUID], principal: Principal,
+                    request: Request) -> dict[str, Any]:
+    """Remove archived reports and their PDFs.
+
+    Only an administrator holds `reports:delete`. The state is deliberately not
+    inferred: a report that is still queued or generating is refused rather
+    than deleted underneath the worker. The row is removed only after the file
+    is gone (or already absent), so a failed unlink never leaves a report whose
+    archive is neither downloadable nor deletable.
+    """
+    wanted = list(dict.fromkeys(ids))
+    rows = fetch_all(
+        "SELECT id, status, report_type, period_start, filename, file_path, "
+        "       requested_by FROM reporting.reports WHERE id = ANY(:ids)",
+        ids=wanted,
+    )
+    found = {str(row["id"]): row for row in rows}
+    report_root = Path(get_settings().report_dir).resolve()
+
+    deleted: list[str] = []
+    refused: list[dict[str, str]] = []
+    missing: list[str] = []
+    for report_id in wanted:
+        key = str(report_id)
+        row = found.get(key)
+        if row is None:
+            missing.append(key)
+            continue
+        if row["status"] in ("queued", "generating"):
+            refused.append({
+                "id": key,
+                "reason": "Report is still being generated",
+            })
+            continue
+        path = Path(row["file_path"]).resolve() if row["file_path"] else None
+        if path is not None and path.exists():
+            # Never unlink outside the archive volume, even if a row was
+            # tampered with.
+            if not str(path).startswith(str(report_root) + "/"):
+                refused.append({
+                    "id": key,
+                    "reason": "Report file is outside the archive directory",
+                })
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                refused.append({
+                    "id": key,
+                    "reason": "Could not remove the report file",
+                })
+                continue
+        with connection() as conn:
+            conn.execute(
+                text("DELETE FROM reporting.reports WHERE id = :id"),
+                {"id": report_id},
+            )
+        deleted.append(key)
+        record_audit(
+            event_type="report.deleted", outcome="success", principal=principal,
+            target_type="report", target_id=key,
+            context={
+                "report_type": row["report_type"],
+                "period_start": str(row["period_start"]),
+                "filename": row["filename"],
+                "requested_by": row["requested_by"],
+            },
+            source_ip=_client_ip(request), service=APP,
+        )
+
+    outcome = "success" if not refused and not missing else "failure"
+    record_audit(
+        event_type="report.bulk_deleted", outcome=outcome, principal=principal,
+        target_type="report_batch", target_id="",
+        context={"requested": len(wanted), "deleted": len(deleted),
+                 "refused": len(refused), "not_found": len(missing)},
+        source_ip=_client_ip(request), service=APP,
+    )
+    return {
+        "deleted": deleted,
+        "refused": refused,
+        "not_found": missing,
+        "count": len(deleted),
+    }
+
+
+@app.post("/reports/bulk-delete")
+def bulk_delete_reports(
+    payload: ReportDeleteRequest,
+    request: Request,
+    principal: Annotated[Principal, Depends(require_permission("reports:delete"))],
+) -> dict[str, Any]:
+    return _delete_reports(payload.ids, principal, request)
+
+
+@app.delete("/reports/{report_id}")
+def delete_report(
+    report_id: UUID,
+    request: Request,
+    principal: Annotated[Principal, Depends(require_permission("reports:delete"))],
+) -> dict[str, Any]:
+    result = _delete_reports([report_id], principal, request)
+    if result["not_found"]:
+        raise HTTPException(status_code=404, detail="Report not found")
+    if result["refused"]:
+        raise HTTPException(status_code=409, detail=result["refused"][0]["reason"])
+    return result
+
+
 # --------------------------------------------------------------------------- schedules
 class ScheduleCreate(BaseModel):
     name: str = Field(min_length=3, max_length=150)
@@ -280,7 +486,7 @@ class ScheduleCreate(BaseModel):
     cadence: str
     day_of_month: int = Field(default=1, ge=1, le=28)
     run_hour: int = Field(default=6, ge=0, le=23)
-    timezone: str = "UTC"
+    timezone: str | None = None
     recipients: list[str] = Field(default_factory=list)
     filters: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = True
@@ -303,8 +509,13 @@ def create_schedule(
         raise HTTPException(status_code=422, detail="Unsupported scheduled report type")
     if payload.cadence not in ("monthly", "quarterly"):
         raise HTTPException(status_code=422, detail="cadence must be monthly or quarterly")
+    try:
+        schedule_tz = timezone_settings.validate_timezone(
+            payload.timezone or timezone_settings.system_timezone())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     next_run = compute_next_run(
-        payload.cadence, payload.day_of_month, payload.run_hour, payload.timezone
+        payload.cadence, payload.day_of_month, payload.run_hour, schedule_tz
     )
     with connection() as conn:
         row = conn.execute(
@@ -321,7 +532,7 @@ def create_schedule(
             {
                 "n": payload.name, "t": payload.report_type, "c": payload.cadence,
                 "d": payload.day_of_month, "h": payload.run_hour,
-                "tz": payload.timezone, "rec": payload.recipients,
+                "tz": schedule_tz, "rec": payload.recipients,
                 "f": __import__("json").dumps(payload.filters), "e": payload.enabled,
                 "next": next_run, "by": principal.username,
             },
@@ -415,13 +626,15 @@ def delete_schedule(
 
 
 # --------------------------------------------------------------------------- scheduler tick
-@app.post("/jobs/tick")
-def scheduler_tick(
-    request: Request,
-    principal: Annotated[Principal, Depends(require_permission("sync:run"))],
-    background: BackgroundTasks,
+def execute_due_schedules(
+    principal: Principal, *, source_ip: str | None = None
 ) -> dict[str, Any]:
-    """Called by the platform scheduler. Idempotent per schedule and period."""
+    """Generate reports for schedules that are due, then apply retention.
+
+    Idempotent per schedule and period, so a second replica, a retried run and
+    a manual tick can all call it without producing duplicate reports. Shared
+    by the in-app scheduler and ``POST /jobs/tick``.
+    """
     processed: list[dict[str, Any]] = []
     now = datetime.now(UTC)
     for schedule in due_schedules(now=now):
@@ -430,8 +643,8 @@ def scheduler_tick(
             schedule["cadence"], schedule["day_of_month"], schedule["run_hour"],
             schedule["timezone"], now=now,
         )
-        if not claim_execution(str(schedule["id"]), start.date()):
-            finish_execution(str(schedule["id"]), start.date(), "skipped",
+        if not claim_execution(str(schedule["id"]), start):
+            finish_execution(str(schedule["id"]), start, "skipped",
                              "Already executed for this period", next_run)
             processed.append({"schedule": schedule["name"], "status": "skipped"})
             continue
@@ -439,10 +652,10 @@ def scheduler_tick(
             "SELECT id FROM compliance.snapshots WHERE period_start = :ps "
             "ORDER BY CASE scope WHEN 'monthly' THEN 0 WHEN 'quarterly' THEN 1 "
             "ELSE 3 END, captured_at DESC LIMIT 1",
-            ps=start.date(),
+            ps=start,
         )
         if snapshot is None:
-            finish_execution(str(schedule["id"]), start.date(), "failed",
+            finish_execution(str(schedule["id"]), start, "failed",
                              "No snapshot for period", next_run)
             processed.append({"schedule": schedule["name"],
                               "status": "failed", "reason": "no snapshot"})
@@ -460,8 +673,8 @@ def scheduler_tick(
                         """
                     ),
                     {
-                        "t": schedule["report_type"], "ps": start.date(),
-                        "pe": end.date(),
+                        "t": schedule["report_type"], "ps": start,
+                        "pe": end,
                         "f": __import__("json").dumps(schedule["filters"]),
                         "snap": snapshot["id"],
                         "by": f"schedule:{schedule['name']}",
@@ -476,7 +689,7 @@ def scheduler_tick(
             {"status": "skipped", "detail": "generation failed"}
         )
         finish_execution(
-            str(schedule["id"]), start.date(),
+            str(schedule["id"]), start,
             "success" if result.get("status") == "completed" else "failed",
             f"report={report_id} delivery={delivery['status']}", next_run,
         )
@@ -486,15 +699,24 @@ def scheduler_tick(
             principal=principal, target_type="schedule",
             target_id=str(schedule["id"]),
             context={"report_id": report_id, "delivery": delivery["status"]},
-            source_ip=_client_ip(request), service=APP,
+            source_ip=source_ip, service=APP,
         )
         processed.append({
             "schedule": schedule["name"], "report_id": report_id,
             "status": result.get("status"), "delivery": delivery["status"],
         })
     purged = purge_expired()
-    return {"processed": processed, "purged_reports": purged,
-            "evaluated_at": now.isoformat()}
+    return {"status": "success", "processed": processed,
+            "purged_reports": purged, "evaluated_at": now.isoformat()}
+
+
+@app.post("/jobs/tick")
+def scheduler_tick(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_permission("sync:run"))],
+) -> dict[str, Any]:
+    """Manual/internal trigger. The in-app scheduler calls the same code."""
+    return execute_due_schedules(principal, source_ip=_client_ip(request))
 
 
 @app.post("/jobs/purge")
@@ -502,3 +724,13 @@ def purge(
     principal: Annotated[Principal, Depends(require_permission("settings:manage"))],
 ) -> dict[str, int]:
     return {"purged_reports": purge_expired()}
+
+
+# --------------------------------------------------------------------------- in-app scheduler
+install_scheduler(app, [
+    ScheduledJob(
+        name="reporting.tick",
+        interval_seconds=get_settings().report_tick_interval,
+        run=lambda: execute_due_schedules(SCHEDULER_PRINCIPAL),
+    ),
+])

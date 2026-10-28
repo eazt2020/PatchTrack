@@ -17,9 +17,11 @@ The gateway holds no business logic. It never contacts the database.
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Response, status
@@ -28,6 +30,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from patchtrack_common.config import get_settings
+from patchtrack_common.metrics import install as install_metrics
+from patchtrack_common.request_guards import install as install_request_guards
 from patchtrack_common.net import client_ip
 from patchtrack_common.security import decode_token
 
@@ -39,6 +43,8 @@ STATIC_DIR = BASE_DIR.parent / "static"
 
 app = FastAPI(title="PatchTrack Gateway", version="1.0.0", docs_url=None,
               redoc_url=None, openapi_url=None)
+install_metrics(app, APP)
+install_request_guards(app)
 
 COOKIE = "patchtrack_session"
 CSRF_HEADER = "x-patchtrack-csrf"
@@ -101,8 +107,36 @@ def _set_security(response: Response) -> Response:
 CSRF_EXEMPT = {"/api/session/login", "/api/session/bootstrap"}
 
 
+def _has_dot_segment(raw_path: bytes) -> bool:
+    """Whether a raw request path contains ``.`` or ``..`` as a whole segment.
+
+    Route matching sees the encoded path from uvicorn, while httpx resolves
+    ``..`` before sending upstream. ``/api/identity/auth/../users`` therefore
+    matched this app's generic identity route and arrived at identity as
+    ``/users`` — a way around the rule that keeps session endpoints off the
+    proxy. Check the raw path (twice unquoted, for double encoding) rather
+    than the normalised one.
+    """
+    path = raw_path.decode("latin-1")
+    for _ in range(2):
+        path = unquote(path)
+    return any(
+        segment in (".", "..") for segment in re.split(r"[/\\]", path)
+    )
+
+
+def _reject_dot_segments(raw_path: bytes) -> None:
+    if _has_dot_segment(raw_path):
+        raise HTTPException(status_code=400, detail="Invalid request path")
+
+
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
+    raw_path = request.scope.get("raw_path") or request.url.path.encode()
+    if raw_path.startswith(b"/api/") and _has_dot_segment(raw_path):
+        return _set_security(JSONResponse(
+            {"detail": "Invalid request path"}, status_code=400))
+
     if request.method in ("POST", "PUT", "PATCH", "DELETE"):
         path = request.url.path
         if path.startswith("/api/"):
@@ -307,7 +341,23 @@ def _is_loopback(request: Request) -> bool:
 
 
 @app.post("/api/session/logout")
-def logout(response: Response) -> dict[str, str]:
+async def logout(request: Request, response: Response) -> dict[str, str]:
+    token = request.cookies.get(COOKIE)
+    if token:
+        # A cookie is client-side state; deleting it does not stop a stolen
+        # copy of the token from working. Ask identity to revoke the session
+        # first, but always finish the sign-out even if identity is down.
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                await client.post(
+                    f"{_setting('identity')}/auth/revoke-session",
+                    headers={
+                        "authorization": f"Bearer {token}",
+                        "x-forwarded-for": _client_ip(request) or "",
+                    },
+                )
+        except Exception:  # noqa: BLE001 - identity outage must not trap the user
+            pass
     response.delete_cookie(COOKIE, path="/")
     response.delete_cookie(CSRF_COOKIE, path="/")
     return {"status": "logged_out"}
@@ -434,6 +484,7 @@ async def change_password(payload: ChangePasswordBody, request: Request,
                methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
 async def identity_proxy(path: str, request: Request):
     """User, role and audit administration. Session endpoints stay closed."""
+    _reject_dot_segments(path.encode())
     if path.startswith(("auth/", "bootstrap/")):
         raise HTTPException(status_code=404, detail="Not found")
     return await _proxy("identity", path, request)
@@ -442,6 +493,7 @@ async def identity_proxy(path: str, request: Request):
 @app.api_route("/api/{service}/{path:path}",
                methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
 async def proxy(service: str, path: str, request: Request):
+    _reject_dot_segments(path.encode())
     if service not in SERVICE_MAP or service == "identity":
         # Identity administration is exposed under its own route above;
         # nothing may reach the identity service through the generic proxy.

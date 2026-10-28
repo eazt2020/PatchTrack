@@ -14,9 +14,29 @@ not edit it.
 |----------|---------|---------|
 | `PATCHTRACK_ENVIRONMENT` | `development` | Free text; `production` in real deployments. Do not rely on it for security — but it does gate one dangerous setting (below). |
 | `PATCHTRACK_SESSION_COOKIE_SECURE` | `auto` | `auto` marks the session and CSRF cookies `Secure` for every host other than loopback, so an unencrypted deployment cannot hold a session. `always` forces it even on loopback. `never` is a **development-only** escape hatch for browsing by IP over plain HTTP; the service refuses to start with `never` when `PATCHTRACK_ENVIRONMENT=production`. |
-| `PATCHTRACK_APP_TIMEZONE` | `UTC` | Default timezone for schedules created without one |
+| `PATCHTRACK_APP_TIMEZONE` | — | **Removed.** The deployment timezone is a database setting, changed in **Settings → Platform**, so every service picks it up without a restart. See [Time zone](#time-zone) below. |
 | `PATCHTRACK_LOG_LEVEL` | `INFO` | Uvicorn log level |
+| `PATCHTRACK_MAX_REQUEST_BYTES` | `67108864` (64 MiB) | Largest accepted request body. Justification evidence is submitted base64-encoded, so keep this comfortably above the combined attachment size. A larger body is refused with `413` before parsing. |
 | `PATCHTRACK_VERSION` | `3.0.0` | Image tag used by compose |
+
+### Time zone
+
+`shared.app_settings.system_timezone` holds one IANA zone for the whole
+installation. It is seeded to `UTC` by migration `014_system_timezone.sql` and
+changed only through **Settings → Platform** (`PUT /api/identity/settings/timezone`),
+which requires `settings:manage` and writes an audit event.
+
+The setting decides:
+
+- the local calendar day a daily snapshot covers;
+- the first and last instant of a monthly or quarterly reporting period;
+- the default zone for newly created schedules, and the zone a schedule runs
+  in when it has none of its own;
+- how timestamps are displayed in the console and printed on generated PDFs.
+
+Instants remain stored in UTC. Changing the zone re-labels calendar
+boundaries from the next period onward; it does not rewrite existing
+snapshots or reports.
 
 ## 2. Database
 
@@ -26,8 +46,10 @@ not edit it.
 | `PATCHTRACK_DB_POOL_SIZE` | 5 | Per service |
 | `PATCHTRACK_DB_POOL_MAX_OVERFLOW` | 5 | Burst above the pool |
 | `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | — | Used by the bundled postgres container only |
-| `POSTGRES_IMAGE` | `docker.io/library/postgres:13` | Override for an air-gapped mirror, or for Red Hat's `registry.redhat.io/rhel9/postgresql-13` (needs a subscription and a terms acceptance) |
+| `POSTGRES_IMAGE` | `docker.io/library/postgres:17` | Override for an air-gapped mirror, or for Red Hat's `registry.redhat.io/rhel9/postgresql-17` (needs a subscription and a terms acceptance) |
 | `POSTGRES_DATA_DIR` | `/var/lib/postgresql/data` | Data directory inside the database image; Red Hat's image uses `/var/lib/pgsql/data` |
+| `PROMETHEUS_IMAGE` | `docker.io/prom/prometheus:v3.15.1` | Scraper image for the optional `monitoring` profile |
+| `PATCHTRACK_PROMETHEUS_PORT` | `9090` | Loopback port for the bundled Prometheus |
 
 The services refuse to start without `PATCHTRACK_DATABASE_URL`. Use
 `sslmode=require` at minimum and `verify-full` where the server certificate is
@@ -73,12 +95,39 @@ restarting anything.
 | Environment and business-service lists | empty (free text) | Placement editor vocabulary and display names |
 | Audit trail retention | 2555 days | Events older than the window are deleted by the daily job; range 30–36,500 days |
 
-Audit retention is applied by `POST /jobs/audit-purge` on the identity service
-(the hourly tick script runs it once a day). The trail is otherwise
-append-only: the API can set the window, but there is no route that edits or
-deletes an individual event. Changing the window is itself audited.
+Audit retention is applied by `POST /jobs/audit-purge` on the identity service,
+which the in-app scheduler runs once a day (`PATCHTRACK_AUDIT_PURGE_INTERVAL`).
+The trail is otherwise append-only: the API can set the window, but there is no
+route that edits or deletes an individual event. Changing the window is itself
+audited.
 
-## 5. Collection
+## 5. Scheduler
+
+Scheduled work runs inside each service; there is no external timer or cron
+entry. These settings are read at service start, so changing one requires
+restarting the service that owns the job.
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `PATCHTRACK_SCHEDULER_ENABLED` | `true` | `false` pauses all scheduled work while leaving the HTTP job endpoints usable |
+| `PATCHTRACK_SCHEDULER_POLL_SECONDS` | `15` | How often each service checks for due work |
+| `PATCHTRACK_SCHEDULER_RETRY_SECONDS` | `300` | Retry delay after a failed run |
+| `PATCHTRACK_SCHEDULER_STARTUP_DELAY_SECONDS` | `10` | Grace period before the first pass |
+| `PATCHTRACK_SYNC_ASSETEXPLORER_INTERVAL` | `21600` (6 h) | Inventory |
+| `PATCHTRACK_SYNC_SATELLITE_INTERVAL` | `21600` (6 h) | Inventory |
+| `PATCHTRACK_SYNC_SCCM_INTERVAL` | `86400` (24 h) | Inventory |
+| `PATCHTRACK_SYNC_SOLARIS_INTERVAL` | `604800` (7 d) | Inventory |
+| `PATCHTRACK_DAILY_SNAPSHOT_INTERVAL` | `86400` (24 h) | Compliance snapshot and refresh |
+| `PATCHTRACK_AUDIT_PURGE_INTERVAL` | `86400` (24 h) | Identity audit-retention purge |
+| `PATCHTRACK_REPORT_TICK_INTERVAL` | `60` (1 min) | Reporting schedules and report retention |
+
+Due times are stored in `shared.scheduled_jobs`, so a restart does not replay
+work that just ran. A failed run is retried after
+`PATCHTRACK_SCHEDULER_RETRY_SECONDS`, not after the full interval. Each job
+holds a PostgreSQL advisory lock while it runs, so replicas do not duplicate
+work.
+
+## 6. Collection
 
 | Variable | Default | Notes |
 |----------|---------|-------|
@@ -112,7 +161,7 @@ Mount credential files into the container; do not put them in `.env` if you can
 avoid it, because compose reads `.env` for interpolation and it is easy to leak
 into logs.
 
-## 6. Network and proxy
+## 7. Network and proxy
 
 | Variable | Default | Notes |
 |----------|---------|-------|
@@ -123,7 +172,7 @@ into logs.
 | `PATCHTRACK_INTERNAL_FORWARDED_IPS` | `172.16.0.0/12` | Compose only. The backend services' `PATCHTRACK_FORWARDED_IPS`: the compose network that the gateway reaches them from. Without it, audit records show the gateway container's address instead of the operator's. **Never `*`.** |
 | `PATCHTRACK_IDENTITY_URL` … `PATCHTRACK_REPORTING_URL` | loopback ports | Internal service URLs used by the gateway |
 
-## 7. TLS termination
+## 8. TLS termination
 
 The application speaks HTTP internally and expects a TLS proxy in front of the
 gateway. Minimal nginx example:
@@ -169,7 +218,7 @@ parses the raw header itself: uvicorn rewrites the peer address for trusted
 sources only, and the application records an address it cannot parse as NULL
 rather than rejecting the request.
 
-## 8. Grafana
+## 9. Grafana
 
 | Variable | Notes |
 |----------|-------|
@@ -184,7 +233,7 @@ The datasource YAML reads these with `${…}` interpolation at container start.
 Do not edit the provisioned YAML in a running instance; provisioning overwrites
 `allowUiUpdates: false` dashboards and `editable: false` datasources.
 
-## 9. Policy (not environment)
+## 10. Policy (not environment)
 
 Compliance policy is data, not configuration. It lives in
 `compliance.policy_versions` and is managed through
@@ -194,7 +243,7 @@ Compliance policy is data, not configuration. It lives in
 Keep the policy definition in version control alongside the deployment (a copy,
 not the source of truth), so a review can show what changed between quarters.
 
-## 10. Settings that are not configurable, on purpose
+## 11. Settings that are not configurable, on purpose
 
 | Behaviour | Fixed because |
 |-----------|---------------|
@@ -205,7 +254,7 @@ not the source of truth), so a review can show what changed between quarters.
 | Integrations start disabled | Requirements §C-1, §C-3 |
 | No bootstrap password | Requirements §C-1 |
 
-## 11. Changing configuration
+## 12. Changing configuration
 
 Most changes need a restart of the affected service:
 

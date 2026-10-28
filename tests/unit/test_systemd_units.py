@@ -6,6 +6,9 @@ only shows up when systemd refuses to start the service. The checks here are
 structural: each instance must get a port, the environment must come from a
 file, and the hardening that the documentation promises must actually be in
 the unit.
+
+Scheduled work is not a systemd unit. Each service runs its own in-app
+scheduler, so there is deliberately no timer here.
 """
 
 from __future__ import annotations
@@ -37,12 +40,15 @@ def read_unit(name: str) -> configparser.ConfigParser:
 
 def test_the_expected_units_are_present():
     names = {p.name for p in UNIT_DIR.iterdir()}
-    assert {
-        "patchtrack@.service",
-        "patchtrack-migrate.service",
-        "patchtrack-tick.service",
-        "patchtrack-tick.timer",
-    } <= names
+    assert {"patchtrack@.service", "patchtrack-migrate.service"} <= names
+
+
+def test_no_scheduler_timer_or_tick_unit_is_shipped():
+    # Scheduling belongs to the service process. A leftover timer would run
+    # the jobs a second time, competing for the same due state.
+    names = {p.name for p in UNIT_DIR.iterdir()}
+    assert "patchtrack-tick.service" not in names
+    assert "patchtrack-tick.timer" not in names
 
 
 def test_each_service_instance_gets_its_own_port():
@@ -114,50 +120,8 @@ def test_the_shipped_units_have_no_placeholder_port():
     assert "Environment=PORT=" not in text
 
 
-def test_the_tick_service_runs_the_shipped_script_as_the_job_user():
-    service = read_unit("patchtrack-tick.service")["Service"]
-    assert service["Type"] == "oneshot"
-    assert service["User"] == "patchtrack"
-    assert service["ExecStart"] == "/opt/patchtrack/scripts/patchtrack-tick.sh"
-    for key, value in HARDENING.items():
-        assert service.get(key) == value, f"{key} must be {value!r}"
-    assert service["ReadWritePaths"].split() == ["/var/lib/patchtrack"]
-
-
-def test_the_tick_service_waits_for_the_services_it_calls():
-    unit = read_unit("patchtrack-tick.service")
-    # The script calls these four directly; starting before them would turn
-    # every request into a connection error on boot.
-    for service in ("identity", "inventory", "compliance", "reporting"):
-        assert f"patchtrack@{service}.service" in unit["Unit"]["After"]
-
-
-def test_the_tick_service_loads_the_shared_environment():
-    text = (UNIT_DIR / "patchtrack-tick.service").read_text()
-    # The token must come from the same file the services use. No secret in
-    # the unit itself — checked on the directives only, since the header
-    # comment names the variable.
-    directives = "\n".join(
-        line for line in text.splitlines() if not line.lstrip().startswith("#")
-    )
-    # Optional for a container installation, which resolves the token inside
-    # the service container; a native installation still loads it here.
-    assert "EnvironmentFile=-/etc/patchtrack/.env\n" in text
-    assert "PATCHTRACK_SERVICE_TOKEN" not in directives
-    assert "Environment=PATCHTRACK_SERVICE_TOKEN" not in directives
-
-
-def test_the_timer_fires_hourly_and_survives_a_reboot():
-    timer = read_unit("patchtrack-tick.timer")
-    assert timer["Timer"]["OnCalendar"] == "hourly"
-    assert timer["Timer"]["Persistent"] == "true"
-    assert timer["Timer"]["Unit"] == "patchtrack-tick.service"
-    assert timer["Install"]["WantedBy"] == "timers.target"
-
-
 def test_the_job_script_covers_every_service_port():
-    # The tick runner delegates transport to the job script, which owns the
-    # port map for native installations.
+    # The manual job runner owns the port map for native installations.
     script = (UNIT_DIR.parents[1] / "scripts" / "patchtrack-job.sh").read_text()
     for service in SERVICES:
         assert f"{service}) port=" in script, f"{service} has no port fallback"

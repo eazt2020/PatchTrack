@@ -369,6 +369,7 @@ def _store_assessment(
     ).mappings().first()
     if (
         latest
+        and assessment.assessed_at is not None
         and latest["assessed_at"] == assessment.assessed_at
         and latest["total_patches"] == len(assessment.findings)
     ):
@@ -503,6 +504,7 @@ def run_patch_sync(
                 timeout_s=float(settings.get("read_timeout_s") or 60),
                 page_size=int(settings.get("page_size") or 100),
                 verify_tls=bool(settings.get("verify_tls", True)),
+                workers=int(settings.get("workers") or 1),
             ) as client:
                 assessments = client.fetch_assessments()
         elif source_key == "sccm":

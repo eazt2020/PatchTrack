@@ -55,9 +55,9 @@ Exit criterion was: sign in on a fresh database and reach every route. Met.
 | 1 | Verify each connector against a live source system; adjust `extra.field_map` | Deployment engineer | Yes |
 | 2 | Build and run the Compose stack with **Docker Engine** on RHEL 9.8 / Rocky 9.8 with SELinux enforcing (the same stack runs under Podman on this host) | Deployment engineer | Yes |
 | 3 | Run `deploy/postgres/roles/010_grafana_readonly.sql` on the target to create `patchtrack_grafana` with its own generated password (the grants are exercised on the build host; the password is per-deployment) | Deployment engineer | Only for the dashboard |
-| 4 | Run the four native systemd units on the target host (written and syntax-verified, never started here) | Deployment engineer | Only for native install |
+| 4 | Run the two native systemd units on the target host (written and syntax-verified, never started here); scheduled work is in-app and needs no unit | Deployment engineer | Only for native install |
 | 5 | Configure SMTP and test a delivery plus a forced failure | Operations | No |
-| 6 | Wire scheduled jobs and monitoring | Operations | Yes |
+| 6 | Confirm the in-app scheduled jobs advance `shared.scheduled_jobs` and appear in the audit trail | Operations | Yes |
 | 7 | Take a backup, restore it to a scratch host, and verify the digests | Operations | Yes |
 | 8 | Run the first full month, and compare the first report against the manual process | Compliance | Yes |
 | 9 | Measure collection run times at production scale; tune timeouts and page sizes | Operations | No |
@@ -72,12 +72,14 @@ Ordered by value, not committed:
    single gap for enterprise adoption.
 2. **MFA** for administrator accounts.
 3. **Per-business-group scoping** so a Viewer sees only their estate.
-4. **Prometheus metrics endpoint** per service, replacing the query-based
-   monitoring described in the runbook.
-5. **Scheduled collection inside the application.** Today the schedule lives in
-   the systemd timer. An in-app scheduler (gated by the same idempotency ledger
-   as reports) would remove an external dependency, at the cost of a second
-   scheduler to reason about.
+4. ~~**Prometheus metrics endpoint** per service.~~ **Done:** every service
+   exposes `/metrics`, with alert rules and an optional `monitoring` compose
+   profile (see `deploy/monitoring/README.md`). Business gauges (last
+   collection age, stuck reports) remain query-based.
+5. ~~**Scheduled collection inside the application.**~~ **Done:** each service
+   runs its own scheduler loop, with due state in `shared.scheduled_jobs` and a
+   PostgreSQL advisory lock per job. The systemd timer and its shell runner are
+   removed; `scripts/patchtrack-job.sh` remains only as a manual tool.
 6. **Framework mapping** (PCI DSS, APRA CPS 234, ISO 27001 control references
    against each finding category).
 7. **Asset-level change history** in the UI (the alias and conflict tables hold

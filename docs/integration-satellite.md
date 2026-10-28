@@ -28,6 +28,7 @@ inventory container ──HTTPS GET /api/v2──▶ Satellite :443
 | TLS | `verify_tls=true`; install the Satellite CA on the host |
 | Page size | `page_size` (default 100) |
 | Timeout | `read_timeout_s` (default 60) |
+| Errata concurrency | `workers` (default 1, max 8; benchmark before raising) |
 
 The service account needs only read access to hosts and errata. A least-privilege
 role with `view_hosts` and `view_errata` is sufficient; do not use the
@@ -118,8 +119,15 @@ referenced environment variable or file.
 ## Sizing and performance
 
 One errata request per host. For an estate of N RHEL hosts the run makes
-roughly `1 + N` API calls, serial. At 60 s timeout and 200 hosts this is
+roughly `1 + N` API calls. Serial, at 60 s timeout and 200 hosts this is
 minutes, not seconds.
+
+`workers` (default `1`, maximum `8`) allows bounded concurrency for the
+per-host errata requests. It is off by default because a fan-out large enough
+to help is also large enough to look like a load test: **measure first** with a
+representative host count, watch Satellite's response times and rate limiting,
+then raise it gradually. The host list itself is still fetched serially and
+assessments are returned in source order.
 
 Guidance:
 
@@ -128,6 +136,8 @@ Guidance:
 - Keep `page_size` at or below the Satellite maximum for the version.
 - If the estate exceeds a few thousand hosts, schedule the sync outside
   business hours and raise `read_timeout_s`.
+- Compare a run at `workers=1` with `workers=4` on the real appliance before
+  changing the default for that deployment.
 
 ## Verification checklist
 

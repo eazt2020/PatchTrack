@@ -29,6 +29,8 @@ ADMIN_ONLY = {
     "audit:view",
     "settings:manage",
     "integrations:manage",
+    # Producing an archived report and destroying one are separate duties.
+    "reports:delete",
 }
 
 
@@ -150,3 +152,13 @@ def test_token_without_required_claims_is_rejected():
     with pytest.raises(HTTPException) as excinfo:
         decode_token(partial)
     assert excinfo.value.status_code == 401
+
+
+def test_the_revocation_counter_travels_in_the_token():
+    token, _ = create_access_token(
+        user_id="11111111-1111-1111-1111-111111111111",
+        username="someone", role="viewer", token_version=7,
+    )
+    # Downstream services refuse the token once the account's counter moves
+    # past this value, so the claim must survive encode/decode.
+    assert decode_token(token)["ver"] == 7

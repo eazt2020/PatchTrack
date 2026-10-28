@@ -8,11 +8,13 @@ second scheduler instance a no-op instead of a duplicate report.
 from __future__ import annotations
 
 import calendar
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
+from patchtrack_common import timezones as timezone_settings
 from patchtrack_common.db import connection, fetch_all
 
 
@@ -23,7 +25,7 @@ def compute_next_run(
     """Return the next scheduled execution in UTC."""
     now = now or datetime.now(UTC)
     try:
-        tz = ZoneInfo(timezone)
+        tz = ZoneInfo(timezone or timezone_settings.system_timezone())
     except Exception:  # noqa: BLE001 - unknown tz falls back to UTC
         tz = ZoneInfo("UTC")
     local = now.astimezone(tz)
@@ -58,7 +60,12 @@ def due_schedules(*, now: datetime | None = None) -> list[dict]:
 
 
 def claim_execution(schedule_id: str, period_start) -> bool:
-    """Claim a (schedule, period) pair. False means someone else has it."""
+    """Claim a (schedule, period) pair. False means someone else has it.
+
+    Only the expected uniqueness violation is treated as "already claimed". A
+    connection, permission or timeout failure must reach the caller, otherwise
+    an infrastructure outage looks like a normal skipped run.
+    """
     try:
         with connection() as conn:
             conn.execute(
@@ -69,8 +76,11 @@ def claim_execution(schedule_id: str, period_start) -> bool:
                 {"s": schedule_id, "p": period_start},
             )
         return True
-    except Exception:  # noqa: BLE001 - unique violation means already claimed
-        return False
+    except IntegrityError as exc:
+        sqlstate = getattr(exc.orig, "sqlstate", None)
+        if sqlstate == "23505" or "duplicate key" in str(exc.orig).lower():
+            return False
+        raise
 
 
 def finish_execution(schedule_id: str, period_start, status: str, message: str,
@@ -94,19 +104,29 @@ def finish_execution(schedule_id: str, period_start, status: str, message: str,
         )
 
 
-def period_for_schedule(schedule: dict, now: datetime) -> tuple[datetime, datetime]:
-    """The period a scheduled report covers: the period that just ended."""
-    tz = ZoneInfo(schedule.get("timezone") or "UTC")
-    local = now.astimezone(tz)
-    month_start = local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    previous_end = month_start
-    if schedule["cadence"] == "quarterly":
-        quarter_month = 3 * ((month_start.month - 1) // 3)
-        previous_start = month_start.replace(
-            month=quarter_month, year=month_start.year
-        )
-        if previous_start >= month_start:
-            previous_start = previous_start.replace(year=previous_start.year - 1)
-    else:
-        previous_start = (month_start - timedelta(days=1)).replace(day=1)
-    return previous_start.astimezone(UTC), previous_end.astimezone(UTC)
+def _shift_months(first_of_month: date, months: int) -> date:
+    """Move a first-of-month date by whole months, carrying the year."""
+    index = (first_of_month.year * 12 + first_of_month.month - 1) + months
+    return date(index // 12, index % 12 + 1, 1)
+
+
+def period_for_schedule(schedule: dict, now: datetime) -> tuple[date, date]:
+    """The calendar period a scheduled report covers: the one that just ended.
+
+    The result is ``(period_start, period_end)`` as **local calendar dates**,
+    not UTC instants. A schedule's time zone decides *when* it runs; it must
+    not change *which* report period is selected. Converting the boundary to
+    UTC would move a midnight boundary in Asia/Kuala_Lumpur to the previous
+    day and make the snapshot lookup miss the period entirely.
+
+    ``period_end`` is exclusive, matching the snapshot convention: a monthly
+    run in October covers 1 September to 1 October.
+    """
+    try:
+        tz = ZoneInfo(schedule.get("timezone")
+                      or timezone_settings.system_timezone())
+    except Exception:  # noqa: BLE001 - unknown tz falls back to UTC
+        tz = ZoneInfo("UTC")
+    month_start = now.astimezone(tz).date().replace(day=1)
+    backlog = 3 if schedule["cadence"] == "quarterly" else 1
+    return _shift_months(month_start, -backlog), month_start

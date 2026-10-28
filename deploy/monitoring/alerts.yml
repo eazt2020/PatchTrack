@@ -1,0 +1,41 @@
+# Alert rules for the signals in docs/operations-runbook.md.
+#
+# These rules evaluate but do not deliver notifications on their own. Point
+# `alerting` at the organisation's Alertmanager (or use Prometheus's own
+# alert UI) so a firing rule reaches an operator.
+groups:
+  - name: patchtrack-availability
+    rules:
+      - alert: PatchTrackServiceDown
+        expr: up{job="patchtrack"} == 0
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.instance }} is not being scraped"
+          description: "The process has been unreachable for 2 minutes."
+
+      - alert: PatchTrackHighErrorRate
+        expr: |
+          sum by (service) (rate(patchtrack_http_requests_total{status=~"5.."}[5m]))
+            /
+          sum by (service) (rate(patchtrack_http_requests_total[5m])) > 0.05
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.service }} is returning 5xx for over 5% of requests"
+          description: "Check the service log and the database connection pool."
+
+      - alert: PatchTrackSlowRequests
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le, service) (rate(patchtrack_http_request_duration_seconds_bucket[5m]))
+          ) > 2
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $labels.service }} p95 latency is above 2s"
+          description: "Collection or reporting queries are likely under pressure."

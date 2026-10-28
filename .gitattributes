@@ -1,0 +1,21 @@
+# Release exports must never carry runtime state or credentials. These paths
+# are also rejected by scripts/build-release.sh if they ever become tracked.
+.env export-ignore
+.env.local export-ignore
+.env.development export-ignore
+.env.production export-ignore
+.env.staging export-ignore
+.env.test export-ignore
+.runtime export-ignore
+dist export-ignore
+*.pem export-ignore
+*.key export-ignore
+*.crt export-ignore
+*.p12 export-ignore
+*.pfx export-ignore
+*.log export-ignore
+__pycache__ export-ignore
+*.pyc export-ignore
+.pytest_cache export-ignore
+.coverage export-ignore
+htmlcov export-ignore

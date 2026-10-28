@@ -18,6 +18,7 @@ backend by `require_permission`, and mirrored in the UI only to hide controls.
 | Resolve reconciliation conflicts | — | ✓¹ | — | ✓ |
 | View, download reports | ✓ | ✓ | ✓ | ✓ |
 | Generate a report on demand | — | — | ✓ | ✓ |
+| Delete archived reports | — | — | — | ✓ |
 | Capture a compliance snapshot | — | — | ✓ | ✓ |
 | Manage schedules | — | — | ✓ | ✓ |
 | Configure integrations | — | — | — | ✓ |

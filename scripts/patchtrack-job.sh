@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# Run a single PatchTrack background job from the systemd timer (or by hand).
+# Run a single PatchTrack background job by hand.
+#
+# Scheduled work runs inside each service (see docs/configuration.md#5-scheduler).
+# This script is the manual tool for running one job immediately, for example
+# after changing an integration.
 #
 # The gateway is the only published port, and its /api routes need a browser
-# session cookie — the wrong credential for a timer. Jobs therefore call the
-# owning service directly, presenting the shared service token, exactly as the
-# gateway would on a user's behalf. Nothing here needs a user password; the
-# token is per-deployment.
+# session cookie — the wrong credential for an unattended job. Jobs therefore
+# call the owning service directly, presenting the shared service token, exactly
+# as the gateway would on a user's behalf. Nothing here needs a user password;
+# the token is per-deployment.
 #
 #   scripts/patchtrack-job.sh sync assetexplorer
 #   scripts/patchtrack-job.sh sync satellite
@@ -29,12 +33,11 @@
 # PATCHTRACK_CONTAINER_CLI=docker|podman pins the runtime when both are
 # installed.
 #
-# scripts/patchtrack-tick.sh is the "run everything that is due" variant and
-# is what patchtrack-tick.timer executes; this script runs exactly one named
-# job, either from that runner or by hand.
+# `tick` runs every reporting schedule that is due; the reporting service also
+# does this on its own interval. `purge` applies report retention. `audit-purge`
+# applies the audit-retention window and is likewise run daily by identity.
 #
-# Exit status is non-zero when the job reports a failure, so the systemd unit
-# enters a failed state and journalctl shows the reason.
+# Exit status is non-zero when the job reports a failure.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

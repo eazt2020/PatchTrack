@@ -14,7 +14,9 @@
 # writes to the image filesystem at runtime except /tmp, and the mounted
 # volumes are labelled by the compose file.
 
-ARG PYTHON_IMAGE=registry.access.redhat.com/ubi9/python-312:latest
+# Pin the base image. `:latest` is republished without notice, so two builds
+# of the same commit could ship different interpreters and libraries.
+ARG PYTHON_IMAGE=registry.access.redhat.com/ubi9/python-312:1-1762230134
 
 FROM ${PYTHON_IMAGE} AS base
 

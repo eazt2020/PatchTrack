@@ -9,6 +9,7 @@ from typing import Any
 
 from sqlalchemy import text
 
+from patchtrack_common import timezones as timezone_settings
 from patchtrack_common.db import connection, fetch_all, fetch_one
 
 from .engine import (
@@ -264,7 +265,9 @@ def create_snapshot(
 
 def daily_snapshot(now: datetime | None = None) -> dict[str, Any]:
     now = now or datetime.now(UTC)
-    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    # A "daily" snapshot belongs to a local calendar day, not a UTC one.
+    start = now.astimezone(timezone_settings.system_zone()).replace(
+        hour=0, minute=0, second=0, microsecond=0)
     return create_snapshot(
         scope="daily", period_start=start, period_end=start,
         generated_by="scheduler", now=now,
@@ -282,14 +285,15 @@ def period_snapshot(scope: str, period_start: datetime, period_end: datetime,
 def ensure_daily_snapshot(now: datetime | None = None) -> str | None:
     """Create today's snapshot if missing. Returns the snapshot id, if any."""
     now = now or datetime.now(UTC)
-    today = now.date()
+    tz = timezone_settings.system_timezone()
+    today = now.astimezone(timezone_settings.system_zone()).date()
     existing = fetch_one(
         """
         SELECT id FROM compliance.snapshots
         WHERE scope = 'daily' AND period_start = :d
-          AND (captured_at AT TIME ZONE 'UTC')::date = :d
+          AND (captured_at AT TIME ZONE :tz)::date = :d
         """,
-        d=today,
+        d=today, tz=tz,
     )
     if existing:
         return str(existing["id"])

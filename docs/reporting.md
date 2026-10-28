@@ -17,36 +17,98 @@ guarantees the PDF agrees with the dashboard and the API for that period.
 - Filename on disk: `<report-id>.pdf`; the download name is
   `patchtrack-<type>-<YYYY-MM>.pdf`.
 - Dimensions: A4 with 18 mm margins, dark header band, footer rule with
-  classification, organisation and page number.
+  classification, organisation and page number. The cover page has no running
+  header or page number.
 - Classification marking: `CONFIDENTIAL — INTERNAL USE ONLY` in the footer of
   every page. Change it in
   `services/reporting/app/service.py::build_context`.
+- Typography: section headings are left-aligned and body paragraphs are
+  justified. Every table is left-aligned and sized to the 174 mm text column,
+  so its edges line up with the headings and paragraphs above and below it.
 - File mode `0640`; the directory is on a dedicated volume.
 
 ## 3. Structure
 
-1. **Header** — organisation, period label, generation time, generated-by.
-2. **KPI table** — total servers, compliant, non-compliant, unknown, stale,
+1. **Cover** — organisation logo and name, report title, reporting period,
+   scope population, preparer, generation time and classification.
+2. **Contents** — a generated table of contents with page numbers for every
+   section and subsection. It is built from the headings themselves in a
+   second layout pass, so the numbers always match the rendered pages.
+3. **Abbreviations and definitions** — a one-page glossary of the acronyms and
+   product names used in the report (RHEL, RHSA, SCCM, CVE, FQDN, SLA, …). It
+   follows the contents page and is itself listed in the contents.
+4. **KPI table** — total servers, compliant, non-compliant, unknown, stale,
    excluded.
-3. **Executive summary** — the percentage against target, the composition of
+5. **Executive summary** — the percentage against target, the composition of
    the population, the change versus the previous period, and an explicit
    "Target not met" / "Target met" statement.
-4. **Compliance overview** — one table per dimension: operating system,
-   environment, business group, application group. Each row shows total,
-   compliant, non-compliant, unknown, stale and the group percentage.
-5. **Remediation overview** — severity distribution chart, total and critical
-   finding counts, and the 15 servers with the most outstanding patches.
-6. **Historical analysis** — monthly trend of compliance percentage against
-   the target, from immutable daily snapshots. If fewer than two points exist,
-   the report says so instead of drawing a line.
-7. **Data quality and operational health** — last inventory sync, last patch
-   sync, per-integration status and last result.
-8. **Methodology** — reporting period, population, numerator, denominator,
-   unknown treatment, freshness threshold, blocking severities, policy name,
-   and the source systems.
+6. **Compliance overview** — one table per dimension: operating system,
+   environment, business group, application group. Each table is followed by a
+   short management statement giving the number of groups, servers assessed,
+   overall percentage, the best- and worst-performing group, how many groups
+   miss the target, and the outstanding non-compliant and unknown/stale counts.
+   Each row shows total, compliant, non-compliant, unknown, stale and the group
+   percentage. The statement is derived from the same rows as its table, so the
+   two cannot disagree. The heading, table and statement are kept on one page.
+7. **Remediation overview** — severity distribution chart, total and critical
+   finding counts, and the 15 servers with the most outstanding patches. The
+   server table is followed by a management statement on the size of that
+   backlog and which hosts to remediate first.
+8. **Verified exceptions and remediation** — the whole failing population
+   (non-compliant, stale or unknown), split into two tables:
+   - **Servers with a recorded justification** — hostname, state, reason, the
+     operator's statement and remediation plan inside the table, target date,
+     evidence filenames and who recorded it.
+   - **Servers without a justification** — hostname, operating system,
+     environment, business service, state, the compliance engine's reason and
+     the outstanding patch count, so each one can be followed up.
+
+   The section states that a justification never changes the state or the
+   figures above. Only the current record per server is shown; superseded and
+   withdrawn records stay in the database for audit. It is omitted entirely
+   when no server is in a failing state.
+9. **Historical analysis** — monthly trend of compliance percentage against
+   the target, from immutable daily snapshots, followed by a management
+   statement on the change over the period and the gap to target. If fewer
+   than two points exist, the report says so instead of drawing a line.
+10. **System data integrity** — always starts a new page, and holds:
+   - **Data quality and operational health** — last inventory sync, last patch
+     sync, per-integration status and last result.
+   - **Methodology** — reporting period, population, numerator, denominator,
+     unknown treatment, freshness threshold, blocking severities, policy name,
+     and the source systems.
+11. **Approval and sign-off** — two signature blocks, **Prepared by** and
+   **Concurred by**, each with name, designation, a signature line and a date.
+   It always shares a page with the System data integrity section.
+
+Section headings carry generous space before them, and page breaks are
+conditional: a section starts a new page only when the space left is too small
+for its heading and first block, so the report has neither large blank gaps nor
+orphaned headings.
 
 The methodology section is not optional. A report without it cannot be
-defended, so it cannot be disabled by configuration.
+defended, so it cannot be disabled by configuration. The sign-off page is
+always present; when no names are configured the blocks are left blank for
+handwritten signatures.
+
+### Branding and signatories
+
+`shared.app_settings` key `organization` holds the report branding:
+
+| Field | Used for |
+|-------|----------|
+| `name` | Cover, running header, cover footer |
+| `logo_data` | Cover logo, as a PNG/JPEG data URI; `logo_filename` is the label shown in Settings |
+| `preparer_name`, `preparer_title` | Cover "Prepared by" line and sign-off block |
+| `concur_name`, `concur_title` | Cover concurrence line and sign-off block |
+
+These are edited at **Administration → Settings → Report branding** and read
+by `services/reporting/app/service.py::build_context`. The logo is stored in
+the database, not on a local path, so every reporting replica renders the same
+cover and replacing a container cannot lose it. Uploads are limited to 1 MB and
+the server verifies the image signature; a file that is not truly a PNG or JPEG
+is rejected. A save that omits the logo keeps it, and removal is explicit
+(`remove_logo`).
 
 ## 4. Numbers in the report
 
@@ -71,7 +133,7 @@ not print 0% or 100%.
    (≥ 1024 bytes) and the trailing `%%EOF` marker.
 3. The bytes are written to `<id>.pdf.tmp`, `chmod 0640`, then atomically
    renamed to `<id>.pdf`.
-4. The SHA-256 of the bytes is stored in `reporting.reports.sha256` together
+5. The SHA-256 of the bytes is stored in `reporting.reports.sha256` together
    with size and page count.
 
 A report row is `completed` only after all four steps. If any step fails the
@@ -103,7 +165,7 @@ psql -c "SELECT sha256, file_size FROM reporting.reports WHERE id='<report-id>'"
 | `cadence` | `monthly` or `quarterly` |
 | `day_of_month` | 1–28 (schema constraint) |
 | `run_hour` | 0–23, in the schedule's `timezone` |
-| `timezone` | IANA name, e.g. `Australia/Sydney` |
+| `timezone` | IANA name, e.g. `Australia/Sydney`. Omitted, the schedule uses the deployment timezone from Settings → Platform. |
 | `recipients` | Array of email addresses |
 
 Run time computation:
@@ -112,7 +174,8 @@ Run time computation:
 - clamped to the last day of the target month, so a 31st schedule runs on
   28 February and a 26th schedule stays on the 26th;
 - monthly advances one month, quarterly three;
-- unknown timezone falls back to UTC (logged).
+- unknown timezone falls back to UTC (logged); a missing one uses the
+  deployment timezone from Settings → Platform.
 
 Idempotency: the scheduler inserts a `job_executions` claim on
 `(schedule_id, period_start)`. A second instance gets a unique violation and
@@ -121,10 +184,11 @@ period permanently — the claim row exists, so an operator must retry
 explicitly; the report-level unique index permits it because `status='failed'`
 is excluded.
 
-The scheduler is driven by `POST /jobs/tick` on the reporting service. It is
-run by the shipped `patchtrack-tick.timer` through
-`scripts/patchtrack-job.sh tick`; PatchTrack does not use cron. The job calls
-the service directly with the shared service token, not through the gateway.
+The scheduler is an in-app loop in the reporting service. It calls the same
+`execute_due_schedules()` function as `POST /jobs/tick` on its own interval
+(`PATCHTRACK_REPORT_TICK_INTERVAL`, default 60 seconds), so it never goes
+through the gateway and needs no external timer or service token. The HTTP
+route remains for a manual or internal run.
 
 ## 8. Email delivery
 
@@ -146,13 +210,51 @@ the relay's CA instead.
 
 ## 9. Retention
 
-`PATCHTRACK_REPORT_RETENTION_DAYS` (default 2555 = 7 years) governs the file,
-not the row. `purge_expired` deletes files past `expires_at` and reports the
-count. Archived metadata and the digest remain.
+The retention window governs the file, not the row. It is stored in
+`shared.app_settings` under `report_retention_days` (default 2,555 days — about
+seven years; accepted range 30–36,500 days) and edited at **Administration →
+Settings → Retention → Report file retention**. The environment value
+`PATCHTRACK_REPORT_RETENTION_DAYS` is only the default used until an
+administrator saves a window.
+
+Saving the setting applies it immediately, with no restart:
+
+1. every completed report's `expires_at` is recomputed from its
+   `completed_at` plus the new window;
+2. `purge_expired` runs in the same request, so lowering the window deletes
+   already-expired files at once rather than waiting for the daily tick;
+3. the change is audited as `settings.updated` with the new window and the
+   number of files purged.
+
+A newly generated report records `expires_at` at completion using the value in
+force at that moment. The daily maintenance job keeps purging later, so the
+window is enforced even if no one opens Settings.
+
+`purge_expired` deletes files past `expires_at` and reports the count. Archived
+metadata, the SHA-256 and the size remain, with the row marked as purged, so an
+archived period stays identifiable after its file is gone.
 
 Set the retention to match the organisation's record-keeping obligation. Seven
 years is a common default for financial-services environments and is what the
 example configuration assumes.
+
+### Administrative deletion
+
+An administrator holding `reports:delete` can remove archived reports from
+**Reports → Report history**, one row at a time or by selecting the rows shown
+by the current search and filters. `POST /reports/bulk-delete` takes up to 200
+ids and `DELETE /reports/{id}` removes one.
+
+- The PDF is unlinked before the row is deleted, and only when it lies inside
+  the configured archive directory. A file that cannot be removed leaves the
+  row intact rather than orphaning metadata.
+- Queued and generating reports are refused with `409`, so a deletion cannot
+  pull the file from under the worker.
+- Delivery attempts cascade with the report. Each deletion is audited as
+  `report.deleted`, with a `report.bulk_deleted` summary of requested, deleted,
+  refused and not-found counts.
+- Deletion is permanent and is not a retention control. Retention still governs
+  ordinary expiry; the two paths are recorded separately in the audit trail.
 
 ## 10. The dashboard
 

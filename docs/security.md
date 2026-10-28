@@ -22,13 +22,17 @@
 | Password hashing | Argon2id via `argon2-cffi`, `time_cost=3`, `memory_cost=65536` (64 MiB), `parallelism=4` |
 | Password policy | Minimum 12 characters enforced by the request model; no maximum below 512 (the server never truncates silently) |
 | Account lockout | 5 consecutive failures → 15-minute lock, stored on the user row |
-| Enumeration resistance | Unknown user, wrong password and inactive account all return the same 401 body; the lockout check happens after the credential check |
-| Access token | JWT HS256, 30 minutes, claims `sub`, `username`, `role`, `name`, `pwd_change_required`, `iat`, `exp`, `iss=patchtrack-identity`, `aud=patchtrack`; all required claims verified on decode |
+| Sign-in throttling | 10 failures per 15 minutes for one address/account pair, or 50 for one address, answer **429** with `Retry-After`. This covers spraying one password across many accounts, which never reaches a single account's lockout threshold |
+| Enumeration resistance | Unknown, inactive, locked and single-sign-on accounts all return the same **401** body and take the same Argon2 verification time (a dummy hash is verified when there is no real one); the lockout and throttling checks happen before any credential is examined |
+| Access token | JWT HS256, 30 minutes, claims `sub`, `username`, `role`, `name`, `pwd_change_required`, `ver`, `iat`, `exp`, `iss=patchtrack-identity`, `aud=patchtrack`; all required claims verified on decode |
+| Session revocation | `identity.users.token_version` is embedded in every token as `ver`; sign-out, password change, administrator password reset, role change and deactivation increment it, and every service refuses a token whose `ver` no longer matches. Sign-out therefore invalidates the access token itself, not just the browser cookie |
 | Refresh token | 48-byte URL-safe opaque value; only its SHA-256 is stored; revocable; 8-hour lifetime |
 | Session cookie | `patchtrack_session`, `HttpOnly`, `SameSite=Strict`, `Secure` on any non-loopback host, path `/` |
 | CSRF token | Second cookie `patchtrack_csrf` (readable by the SPA), compared with the `x-patchtrack-csrf` header in constant-ish equality on every state-changing API call |
 | Origin check | Every state-changing `/api/*` request with an `Origin` header must match the request host exactly (scheme + host + port); suffix matching is not used |
-| Forced rotation | `must_change_password` is set on creation and on administrator reset, carried in the access token as `pwd_change_required`; the gateway answers **403** on every proxied route until the user sets a new password. Satisfied by `POST /auth/change-password`, which requires the current password (a stolen cookie is not enough) and revokes all other refresh tokens |
+| Forced rotation | `must_change_password` is set on creation and on administrator reset, carried in the access token as `pwd_change_required`; the gateway answers **403** on every proxied route until the user sets a new password. Satisfied by `POST /auth/change-password`, which requires the current password (a stolen cookie is not enough), revokes all other refresh tokens and increments the token version so the old session cannot be replayed |
+| Request limits | Bodies over 64 MiB (`PATCHTRACK_MAX_REQUEST_BYTES`) are refused with **413** whether the size is declared or streamed; a payload deep enough to raise `RecursionError` during parsing is answered with **422**, never an unhandled 500 |
+| Path normalisation | `/api/*` paths containing `.` or `..` segments, including percent- and double-percent-encoded forms, are refused with **400** before routing, so an encoded traversal cannot turn `auth/../users` into a closed identity endpoint upstream |
 
 ### First-run bootstrap
 
@@ -68,8 +72,9 @@ role is rejected with 403 rather than defaulted.
 | `compliance:view` | server lists, snapshots, policy read |
 | `findings:view` | remediation view |
 | `integrations:view`, `integrations:manage` | integration health / configuration |
-| `sync:run` | manual collection, daily job, scheduler tick |
+| `sync:run` | manual collection, daily job, scheduled work |
 | `reports:view`, `reports:download`, `reports:generate` | report listing, download, generation |
+| `reports:delete` | permanent removal of archived reports and their PDFs (administrator only) |
 | `schedules:manage` | schedule CRUD |
 | `settings:manage` | organisation branding and the environment / business-service picker (`/settings/*`) |
 | `users:manage`, `audit:view`, `policies:manage` | administration |
@@ -143,6 +148,23 @@ form is refused with an explanation rather than stored.
 Rotate all of them after any suspected exposure, and on the schedule required
 by the organisation's policy.
 
+### If an archive left the host
+
+A previous release ZIP contained `.env`, a TLS private key, PostgreSQL data and
+Grafana runtime state. Deleting the ZIP afterwards is not enough: treat every
+secret in it as disclosed. Rotate, in this order, and record the rotation in
+the audit register:
+
+1. PostgreSQL application role password (and any Grafana DB role password).
+2. `PATCHTRACK_JWT_SECRET` and `PATCHTRACK_SERVICE_TOKEN`.
+3. Grafana admin password and any integration credentials in `.env`.
+4. Re-issue the TLS certificate and key if the key was inside the archive.
+5. Check PostgreSQL and Grafana access logs for use of the old credentials.
+
+New releases are built with `scripts/build-release.sh`, which archives only
+committed files and refuses `.env`, private keys, database data, runtime state
+and logs.
+
 ## 7. Audit trail
 
 Append-only, enforced by a database trigger that raises on `UPDATE` and on any
@@ -156,7 +178,8 @@ without leaving evidence of who did it.
 
 Recorded events include:
 
-- `auth.login` (success and failure, with reason), lockout;
+- `auth.login` (success and failure, with reason), lockout, throttling and
+  `auth.logout` (which also revokes the session);
 - every user create/update/password reset;
 - `integration.updated`, `integration.tls_verification_disabled`, `sync.requested`;
 - `policy.created`, `policy.version_created`, `policy.activated`;
@@ -214,13 +237,29 @@ If a volume write fails with `EACCES` under enforcing, the fix is a label or a
 - **No OIDC implementation.** The schema has `auth_source='oidc'` and the login
   path refuses such accounts with a clear message, but no provider integration
   is present.
-- **No automatic session revocation on role change.** A role change takes
-  effect at the next sign-in (access tokens are 30 minutes).
 - **JWTs are symmetric (HS256).** Every service holds the signing key. For a
   larger deployment, move to RS256/EdDSA with a key per issuer.
-- **No rate limiting at the application layer** other than per-account lockout.
-  Add proxy-level rate limiting for internet-facing deployments.
+- **Sign-out ends every session for the account.** Revocation is a per-account
+  counter, not a per-device token list; signing out on one device also ends
+  sessions on other devices. Deployments that need independent per-device
+  sessions would add a token identifier (jti) revocation list.
+- **Application-layer throttling is per source address**, not per user. Behind
+  a reverse proxy, configure the trusted forwarded-address list so all clients
+  do not appear as one address; keep proxy-level rate limiting as
+  defence-in-depth for internet-facing deployments.
 - **The gateway's CSRF token is not tied to the session.** It is a
   double-submit cookie, which is adequate for the same-origin deployment
   described here but would need to be bound to the session for a
   cross-domain setup.
+
+## Verification evidence
+
+Evidence attached to a server justification is stored in
+`inventory.justification_evidence` and served only through
+`GET /inventory/assets/{id}/justifications/{jid}/evidence/{eid}`, which
+requires an authenticated session with `inventory:detail` and checks that the
+evidence belongs to the requested asset. Recording, attaching and withdrawing
+require `compliance:justify` (Operations and Administrators) and are written
+to the audit trail with the actor, reason and evidence count. Evidence is
+bounded to five files of 5 MB each per justification and to a fixed list of
+document and image types.

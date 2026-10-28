@@ -1,5 +1,164 @@
 # Release notes
 
+## Unreleased — security and integrity corrections
+
+### Scheduling
+
+- **Scheduled work now runs inside the services.** Inventory collection,
+  the daily compliance snapshot, report schedules and both retention purges are
+  executed by an in-app scheduler loop in the owning service. The
+  `patchtrack-tick.timer` and `patchtrack-tick.service` units and
+  `scripts/patchtrack-tick.sh` are removed; a deployment must remove any
+  installed copies (`systemctl disable --now patchtrack-tick.timer`) after
+  upgrading, or it will run the old external runner alongside the new loop.
+- Due state is stored in `shared.scheduled_jobs` (migration
+  `017_scheduled_jobs.sql`), so restarting a service does not replay jobs that
+  just ran. A failed job is retried after
+  `PATCHTRACK_SCHEDULER_RETRY_SECONDS` (default 300) rather than waiting for
+  its full interval.
+- A PostgreSQL advisory lock is held for the duration of each job, so two
+  replicas cannot execute it at the same time.
+- Cadence is configured with `PATCHTRACK_*_INTERVAL` environment variables
+  (see [configuration.md](configuration.md#5-scheduler)). `/etc/patchtrack/tick.env`
+  is no longer read. `scripts/patchtrack-job.sh` remains as a manual tool for
+  running one job immediately.
+
+### Session and sign-in
+
+- **Signing out now revokes the access token.** Previously the gateway only
+  deleted the browser cookie, so a copied token kept working until it expired.
+  Every token carries `identity.users.token_version`; signing out, changing or
+  resetting a password, changing a role and deactivating an account increment
+  it, and all services refuse a token that carries an old value. Migration
+  `016_user_token_version.sql` adds the column. Existing sessions are invalid
+  after the upgrade and users sign in once more.
+- Administrator password resets and role/deactivation changes also revoke the
+  account's refresh tokens, not only its access token.
+- Failed sign-ins no longer reveal whether an account exists. Unknown,
+  inactive, locked and single-sign-on accounts receive the same **401** body,
+  and a dummy password hash is verified for accounts that cannot sign in so
+  response timing matches too.
+- Failed sign-ins are throttled to 10 per address/account pair and 50 per
+  address in 15 minutes, answering **429** with `Retry-After`. Spraying one
+  password across many accounts no longer bypasses the per-account lockout.
+
+### Report rendering and export
+
+- Group names, hostnames and branding text are XML-escaped before ReportLab
+  parses them, so markup in imported inventory or Settings cannot corrupt or
+  inject into a generated PDF.
+- CSV exports neutralise cells beginning with `=`, `+`, `-`, `@`, tab or
+  carriage return by prefixing an apostrophe, so an imported value cannot
+  execute as a spreadsheet formula when an analyst opens the file.
+
+### Request handling
+
+- Request bodies are capped at 64 MiB (`PATCHTRACK_MAX_REQUEST_BYTES`), counted
+  as they stream rather than trusted from `Content-Length`. A parser
+  `RecursionError` from a deeply nested payload returns **422**.
+- `/api/*` paths containing dot segments (including encoded and
+  double-encoded forms) are rejected with **400**, closing a route-normalisation
+  gap where `auth/../users` could reach a closed identity endpoint.
+
+### Reporting periods
+
+- A quarterly report now covers the **previous calendar quarter**. The old
+  calculation produced a two-month window and raised `ValueError` in January.
+- The reporting period is a local calendar date. A schedule's time zone
+  decides *when* the report runs, never *which* period it selects, so a
+  midnight run in Asia/Kuala_Lumpur can no longer look up the previous day and
+  miss its snapshot.
+- A duplicate claim is still treated as "already running", but a connection,
+  permission or timeout failure is now raised instead of silently skipping a
+  scheduled report.
+
+### Data integrity
+
+- Satellite and SCCM no longer substitute `datetime.now()` for a missing or
+  malformed assessment timestamp. The timestamp is stored as `NULL` ("unknown")
+  and the compliance engine evaluates it as unknown, not fresh. Migration
+  `013_optional_assessed_at` makes the column nullable; any existing fabricated
+  timestamps cannot be distinguished and should be treated as suspect during
+  verification.
+- An assessment with no timestamp is always re-evaluated rather than deduplicated
+  against the previous row.
+
+### Reports
+
+- While a report is queued or generating, **Report history** refreshes its own
+  table every few seconds and stops once the report finishes, so the status
+  changes from *generating* to *completed* without a browser reload or
+  navigating away and back. The operator's search, sort and selection are
+  preserved because only the table is repainted.
+- Administrators can select archived reports in **Reports → Report history**
+  and delete them, individually or with a select-all over the rows currently
+  shown. The PDF and metadata are removed together, delivery history cascades,
+  and every deletion is audited. A report still queued or generating is
+  refused. `reports:delete` is administrator-only; Report Manager keeps
+  generation and scheduling but cannot destroy the archive.
+
+### Security
+
+- Chart legends and tooltips render inventory and organisation values as text
+  nodes. A business-service name containing HTML can no longer execute script
+  in the dashboard.
+- PostgreSQL default is now 17 (13 is end-of-life), Grafana default is 13.0.2
+  (10.2 is end-of-life), and the UBI Python base image is pinned to a build tag
+  instead of `:latest`.
+- `scripts/build-release.sh` builds a release archive from a committed tree and
+  rejects `.env`, private keys, database data, runtime state and logs. Never
+  ship a hand-made ZIP of the working directory again: archives already
+  distributed may contain credentials and must be rotated (database password,
+  `PATCHTRACK_JWT_SECRET`, `PATCHTRACK_SERVICE_TOKEN`, Grafana admin/DB
+  credentials, and any TLS key that was inside the archive).
+
+### Operations
+
+- Every service exposes Prometheus metrics at `/metrics`, with alert rules and
+  an optional `monitoring` compose profile (`deploy/monitoring/`).
+
+### System timezone
+
+- **Settings → Platform** now chooses one IANA timezone for the whole
+  installation. It sets the local day a daily snapshot covers, the calendar
+  boundaries of monthly and quarterly periods, the default zone for new
+  schedules, and the timestamps shown in the console and generated PDFs.
+- Instants stay stored in UTC; the setting changes interpretation, not
+  storage. Existing snapshots and reports are not rewritten.
+- The obsolete `PATCHTRACK_APP_TIMEZONE` environment variable has been
+  removed; the database setting is authoritative for every service.
+
+### Verification and justification
+
+- A non-compliant, stale or unknown server can now carry a recorded
+  verification from Operations or an Administrator: reason, statement,
+  remediation plan and target date, plus up to five evidence files (PDF,
+  image, text, CSV or Office, 5 MB each).
+- Records are versioned. Posting a new verification supersedes the previous
+  one and withdrawal retains the history, so the claim that applied when a
+  report was produced can still be recovered. Evidence downloads stay behind
+  authentication and the `inventory:detail` permission, and every action is
+  audited.
+- A justification explains a failing state; it does not change the state, the
+  dashboard figures or the report numbers.
+- Generated reports now contain a **Verified exceptions and remediation**
+  section. It lists every failing server in two tables: those with a current
+  justification (statement, remediation plan, target, recorder and evidence
+  inside the table) and those without one (state, compliance reason and patch
+  count). The section is omitted when no server is failing.
+
+### Reports
+
+- Generated PDFs include an **Abbreviations and definitions** page immediately
+  after the contents, and the contents lists it. The abbreviation table is
+  static; report-specific terms are still defined where they first appear.
+
+### Dashboard
+
+- TV mode now hides the header as well as the navigation, leaving only the
+  dashboard on a wall display. Hovering the top edge of the window (or moving
+  keyboard focus into it) reveals the header again.
+
 ## 3.0.0 — 2026-10-26
 
 First release.
@@ -48,11 +207,23 @@ First release.
 - **Immutable history.** Daily snapshots with a per-day unique constraint;
   monthly, quarterly and on-demand snapshots; a trend derived from snapshots.
 - **Reporting.** Monthly management, quarterly compliance and inventory register
-  PDFs, with an executive summary, breakdowns, remediation overview, trend,
-  data-quality statement and methodology. Validated before publication,
+  PDFs, with a generated table of contents, executive summary, breakdowns,
+  remediation overview, trend, data-quality statement and methodology.
+  Every breakdown, the top-server table and the trend are followed by a
+  management statement derived from the same figures, and data quality and
+  methodology sit together under **System data integrity**. Validated before publication,
   archived with a SHA-256. Monthly and quarterly schedules with idempotent
   execution. Email delivery tracked separately; a failed send never invalidates
-  a report.
+  a report. Reports open with a branded cover — the organisation logo and name,
+  title, period and classification — and close with an **Approval and
+  sign-off** page carrying separate **Prepared by** and **Concurred by**
+  blocks. The organisation name, logo (PNG/JPEG, up to 1 MB, stored in
+  `shared.app_settings`) and both signatories are configured in **Settings →
+  Report branding**; the logo is verified as an image before it can be
+  embedded, and a name-only save preserves it. Report file retention is set at
+  **Settings → Retention → Report file retention** and applied immediately — saving
+  recalculates the expiry of existing reports and purges already-expired files
+  without a restart, while the metadata and SHA-256 remain as a tombstone.
 - **Dashboard.** A vanilla-ES-module SPA served by the gateway, plus a
   provisioned Grafana dashboard reading the same tables through a read-only
   role. The application works with Grafana stopped. The executive view offers a
@@ -81,7 +252,7 @@ First release.
   the term and a whitelisted sort key to the API, whose SQL matches the same
   set of columns, so the whole result set is filtered and ordered, not just the
   25 rows on screen.
-- **Audit retention.** The retention window is set in **Settings → Audit trail
+- **Audit retention.** The retention window is set in **Settings → Retention → Audit trail
   retention** (30–36,500 days, default 2,555) and stored in
   `shared.app_settings`, so a change needs no restart. A daily job deletes
   events older than the cutoff through `shared.purge_audit_events()`; the
@@ -357,9 +528,12 @@ recorded because each one changed a published figure or a stored record.
 - No MFA and no OIDC/enterprise sign-in (the schema accommodates the latter;
   the login path refuses such accounts with an explanatory message).
 - Role model is global: a Viewer sees the whole estate.
-- Collection scheduling is external (the shipped systemd timer), not in-app.
-  Cron scheduling is deliberately not supported.
-- No Prometheus exporter; monitoring is query-based.
+- Scheduled work runs in-app; cron and external timers are deliberately not
+  supported. (An earlier release used a systemd timer; see the Unreleased
+  section for the upgrade step.)
+- Business-level Prometheus gauges (collection age, stuck reports) are not
+  exported yet; only HTTP, uptime and scrape health are. See
+  `deploy/monitoring/README.md`.
 - The four systemd units in `deploy/systemd/` are written but have never been
   started: this host has no `patchtrack` account, no `/etc/patchtrack` and no
   system postgresql-13 service. They are validated with

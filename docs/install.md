@@ -187,35 +187,27 @@ Per-source detail: [AssetExplorer](integration-assetexplorer.md),
 
 ## 11. Schedule collection, snapshots and reports
 
-Scheduling is done by the shipped **systemd timer**. Do not add a crontab or
-an `/etc/cron.d` entry: PatchTrack does not support cron scheduling, and the
-timer is the single place the cadence is configured.
+Scheduling is built into the services. Each one runs a small scheduler loop in
+its own process and executes the jobs it owns: inventory collects from its
+configured sources, compliance captures the daily snapshot and refreshes the
+evaluation, reporting evaluates report schedules and applies report retention,
+and identity applies the audit-retention window. Nothing has to be installed or
+enabled for this, and there is no systemd timer, crontab or `/etc/cron.d`
+entry to add.
 
-```bash
-sudo install -m 0644 deploy/systemd/patchtrack-tick.service \
-  deploy/systemd/patchtrack-tick.timer /etc/systemd/system/
-sudo install -m 0755 scripts/patchtrack-tick.sh scripts/patchtrack-job.sh \
-  /opt/patchtrack/scripts/
-sudo install -d -m 0750 -o patchtrack -g patchtrack /var/lib/patchtrack/state
-sudo systemctl daemon-reload
-sudo systemctl enable --now patchtrack-tick.timer
-```
+The interval settings live in the service environment
+([configuration.md](configuration.md#scheduler)); the defaults are six-hourly
+AssetExplorer and Satellite collection, daily SCCM, weekly Solaris, a daily
+snapshot and audit purge, and a report tick every minute. Due times are stored
+in `shared.scheduled_jobs`, so restarting a service does not replay a job that
+just ran. A failed job is retried after `PATCHTRACK_SCHEDULER_RETRY_SECONDS`
+rather than waiting for its full interval.
 
-`patchtrack-tick.timer` fires hourly and `scripts/patchtrack-tick.sh` runs only
-what is due, so every cadence lives in `/etc/patchtrack/tick.env` rather than
-in the schedule. The runner delegates the request to
-`scripts/patchtrack-job.sh`, which works for both deployments: it executes
-inside the service container when one is running, and calls
-`127.0.0.1:$PORT` for a native installation. In both cases it presents the
-shared service token — never a human account and never the gateway, whose
-`/api` routes need a browser session.
-
-A container installation needs the `patchtrack` account to be able to reach
-the container runtime (for example membership of the `docker` group) and the
-compose project directory, since the job script execs into the container.
-
-See [operations-runbook.md](operations-runbook.md#3-scheduled-jobs) for what
-each job does, the available cadences, and the credential it uses.
+`scripts/patchtrack-job.sh` remains available to an operator who needs to run
+one job immediately (`sync <integration>`, `daily`, `tick`, `purge`,
+`audit-purge`). It is a manual tool, not the scheduler. See
+[operations-runbook.md](operations-runbook.md#3-scheduled-jobs) for what each
+job does and the credential it uses.
 
 ## 12. Optional: start the Grafana dashboard
 
@@ -272,34 +264,27 @@ provided for the latter; the operator still supplies the SELinux contexts for
 `/var/lib/patchtrack` and the TLS termination. See
 [operations-runbook.md](operations-runbook.md#5-running-natively-under-systemd).
 
-Four unit files ship in `deploy/systemd/`:
+Two unit files ship in `deploy/systemd/`:
 
 | File | Installs as | Purpose |
 |------|-------------|---------|
 | `patchtrack-migrate.service` | `/etc/systemd/system/` | One-shot migration; every service instance requires it |
 | `patchtrack@.service` | `/etc/systemd/system/` | One instance per service; `%i` is `identity`, `inventory`, `compliance`, `reporting` or `gateway` |
-| `patchtrack-tick.service` | `/etc/systemd/system/` | One run of `scripts/patchtrack-tick.sh`; every step not yet due is skipped |
-| `patchtrack-tick.timer` | `/etc/systemd/system/` | Fires the job unit hourly |
 
-The timer is the only supported scheduler — never a crontab or
-`/etc/cron.d` entry. It is not started until you enable it, but it is shipped
-so the schedule is reproducible rather than hand-written. The per-integration
-cadences are configuration, in `/etc/patchtrack/tick.env` (see
-[operations-runbook.md](operations-runbook.md#3-scheduled-jobs)).
+Scheduled jobs are not a unit: each service instance runs its own scheduler
+loop. The per-integration cadences and the scheduler switch are configuration
+in the service environment (see
+[configuration.md](configuration.md#scheduler)), not in a timer environment
+file.
 
 ```bash
 sudo install -m 0644 deploy/systemd/patchtrack@.service \
-  deploy/systemd/patchtrack-migrate.service \
-  deploy/systemd/patchtrack-tick.service deploy/systemd/patchtrack-tick.timer \
-  /etc/systemd/system/
-sudo install -m 0755 scripts/patchtrack-tick.sh /opt/patchtrack/scripts/
-sudo install -d -m 0750 -o patchtrack -g patchtrack /var/lib/patchtrack/state
+  deploy/systemd/patchtrack-migrate.service /etc/systemd/system/
+sudo install -m 0755 scripts/patchtrack-job.sh /opt/patchtrack/scripts/
 sudo systemctl daemon-reload
 sudo systemctl enable --now patchtrack-migrate.service
 sudo systemctl enable --now patchtrack@identity patchtrack@inventory \
   patchtrack@compliance patchtrack@reporting patchtrack@gateway
-# The only scheduler: collection, snapshots, reports and audit retention.
-sudo systemctl enable --now patchtrack-tick.timer
 ```
 
 Each instance reads its port from `/etc/patchtrack/ports/<instance>` (`PORT=8001`

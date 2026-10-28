@@ -40,7 +40,7 @@ class PatchAssessment:
     ip_address: str | None
     os_name: str
     os_version: str
-    assessed_at: datetime
+    assessed_at: datetime | None
     status: str
     findings: tuple[NormalisedFinding, ...] = field(default_factory=tuple)
     source_reference: str = ""

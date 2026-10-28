@@ -51,8 +51,16 @@ class Settings(BaseSettings):
         ),
     )
     app_name: str = "PatchTrack"
-    app_timezone: str = "UTC"
     log_level: str = "INFO"
+    max_request_bytes: int = Field(
+        64 * 1024 * 1024,
+        ge=1024,
+        description=(
+            "Largest accepted request body. Evidence attachments arrive "
+            "base64-encoded inside a JSON request, so this must comfortably "
+            "exceed the combined attachment size."
+        ),
+    )
 
     report_dir: Path = Path("/var/lib/patchtrack/reports")
     report_retention_days: int = 2555
@@ -69,6 +77,22 @@ class Settings(BaseSettings):
     solaris_inbox: Path = Path("/var/lib/patchtrack/solaris-inbox")
 
     grafana_url: str = "http://127.0.0.1:3000"
+
+    # In-app scheduler. Each service runs a background loop for the jobs it
+    # owns, so no external timer or cron entry is required. Intervals are in
+    # seconds; a failed run is retried after scheduler_retry_seconds rather
+    # than waiting a full interval.
+    scheduler_enabled: bool = True
+    scheduler_poll_seconds: int = Field(15, ge=1, le=3600)
+    scheduler_retry_seconds: int = Field(300, ge=1)
+    scheduler_startup_delay_seconds: int = Field(10, ge=0, le=600)
+    sync_assetexplorer_interval: int = Field(21600, ge=60)
+    sync_satellite_interval: int = Field(21600, ge=60)
+    sync_sccm_interval: int = Field(86400, ge=60)
+    sync_solaris_interval: int = Field(604800, ge=60)
+    daily_snapshot_interval: int = Field(86400, ge=300)
+    audit_purge_interval: int = Field(86400, ge=300)
+    report_tick_interval: int = Field(60, ge=10)
 
     identity_url: str = "http://127.0.0.1:8001"
     inventory_url: str = "http://127.0.0.1:8002"

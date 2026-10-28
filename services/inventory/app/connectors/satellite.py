@@ -9,6 +9,7 @@ degraded instead of treating the host as compliant.
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
 import httpx
@@ -45,9 +46,15 @@ class SatelliteClient:
         page_size: int = 100,
         verify_tls: bool = True,
         client: httpx.Client | None = None,
+        workers: int = 1,
     ) -> None:
         self.base_url = base_url.rstrip("/") + "/api/v2"
         self.page_size = page_size
+        # Per-host errata is the expensive part (one or more requests each).
+        # Concurrency is opt-in: benchmark against the real Satellite first,
+        # because an unbounded fan-out is indistinguishable from a load test
+        # and can trip the appliance's rate limits.
+        self.workers = max(1, min(int(workers), 8))
         self._client = client or httpx.Client(
             timeout=httpx.Timeout(timeout_s),
             verify=verify_tls,
@@ -103,13 +110,18 @@ class SatelliteClient:
                 break
             page += 1
 
+        usable = [h for h in hosts if h.get("id") and h.get("name")]
+        if self.workers > 1:
+            with ThreadPoolExecutor(max_workers=self.workers) as pool:
+                errata_by_host = list(
+                    pool.map(lambda h: self._host_errata(int(h["id"])), usable))
+        else:
+            errata_by_host = [self._host_errata(int(h["id"])) for h in usable]
+
         assessments: list[PatchAssessment] = []
-        for host in hosts:
+        for host, errata in zip(usable, errata_by_host, strict=True):
             host_id = host.get("id")
             hostname = host.get("name")
-            if not host_id or not hostname:
-                continue
-            errata = self._host_errata(int(host_id))
             findings = tuple(self._to_finding(e) for e in errata)
             assessments.append(
                 PatchAssessment(
@@ -160,11 +172,17 @@ class SatelliteClient:
         )
 
 
-def _parse_time(value: str | None) -> datetime:
+def _parse_time(value: str | None) -> datetime | None:
+    """Parse a source timestamp, or return None when the source has none.
+
+    Substituting the current time would make an undated assessment look
+    freshly collected, so a missing or malformed value stays unknown.
+    """
     if not value:
-        return datetime.now(UTC)
+        return None
     try:
         parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
     except ValueError:
-        return datetime.now(UTC)
+        log.warning("Satellite returned an unparseable timestamp: %r", value)
+        return None

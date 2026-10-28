@@ -14,7 +14,16 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text
 
+from patchtrack_common import timezones as timezone_settings
+from patchtrack_common.metrics import install as install_metrics
+from patchtrack_common.request_guards import install as install_request_guards
+from patchtrack_common.scheduler import (
+    SCHEDULER_PRINCIPAL,
+    ScheduledJob,
+    install as install_scheduler,
+)
 from patchtrack_common.audit import record_audit
+from patchtrack_common.config import get_settings
 from patchtrack_common.db import connection, execute, fetch_all, fetch_one
 from patchtrack_common.net import client_ip
 from patchtrack_common.security import Principal, PrincipalDep, require_permission
@@ -42,6 +51,8 @@ from .evaluator import (
 
 APP = "compliance"
 app = FastAPI(title="PatchTrack Compliance", version="1.0.0", docs_url="/docs")
+install_metrics(app, APP)
+install_request_guards(app)
 
 FILTER_FIELDS = {
     "os_family": "a.os_family",
@@ -452,7 +463,8 @@ def trends(
     """
     unit, default_points, noun = TREND_PERIODS[period]
     count = points or default_points
-    cutoff = _shift_back(_truncate(datetime.now(UTC), unit), unit, count - 1)
+    local_now = datetime.now(UTC).astimezone(timezone_settings.system_zone())
+    cutoff = _shift_back(_truncate(local_now, unit), unit, count - 1)
     series_rows = fetch_all(
         """
         SELECT date_trunc(:unit, period_start)::date AS period_start,
@@ -485,10 +497,11 @@ def trends(
                count(*) AS samples
         FROM compliance.snapshots
         WHERE scope = 'daily'
-          AND period_start >= (date_trunc('month', now()) - make_interval(months => :m))::date
+          AND period_start >= (date_trunc('month', CAST(:local_now AS date))
+                               - make_interval(months => :m))::date
         GROUP BY 1 ORDER BY 1
         """,
-        m=months,
+        m=months, local_now=local_now.date(),
     )
     quarterly = fetch_all(
         """
@@ -910,7 +923,9 @@ def take_snapshot(
     principal: Annotated[Principal, Depends(require_permission("reports:generate"))],
 ) -> dict[str, Any]:
     try:
-        start, end = period_bounds(payload.reporting_month, payload.quarter)
+        start, end = period_bounds(
+            payload.reporting_month, payload.quarter,
+            tz=timezone_settings.system_timezone())
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     scope = payload.scope if payload.scope in (
@@ -967,19 +982,30 @@ def get_snapshot(
 
 
 # --------------------------------------------------------------------------- daily job
-@app.post("/jobs/daily")
-def daily_job(
-    request: Request,
-    principal: Annotated[Principal, Depends(require_permission("sync:run"))],
+def execute_daily_job(
+    principal: Principal, *, source_ip: str | None = None
 ) -> dict[str, Any]:
+    """Capture the daily snapshot and refresh compliance.
+
+    Shared by the in-app scheduler and ``POST /jobs/daily``. Safe to repeat:
+    the snapshot is keyed by period and the evaluation is derived state.
+    """
     snapshot_id = ensure_daily_snapshot()
     result = refresh_compliance()
     record_audit(
         event_type="compliance.daily_job", outcome="success", principal=principal,
         target_type="snapshot", target_id=snapshot_id or "",
-        source_ip=_client_ip(request), service=APP,
+        source_ip=source_ip, service=APP,
     )
-    return {"snapshot_id": snapshot_id, **result}
+    return {"status": "success", "snapshot_id": snapshot_id, **result}
+
+
+@app.post("/jobs/daily")
+def daily_job(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_permission("sync:run"))],
+) -> dict[str, Any]:
+    return execute_daily_job(principal, source_ip=_client_ip(request))
 
 
 class SolarisRecord(BaseModel):
@@ -988,7 +1014,7 @@ class SolarisRecord(BaseModel):
     ip_address: str | None = None
     os_name: str = "Oracle Solaris"
     os_version: str = ""
-    assessed_at: datetime
+    assessed_at: datetime | None = None
     patches: list[dict[str, Any]] = Field(default_factory=list)
 
 
@@ -1024,3 +1050,13 @@ def solaris_uploads(
     return fetch_all(
         "SELECT * FROM compliance.solaris_uploads ORDER BY received_at DESC LIMIT 50"
     )
+
+
+# --------------------------------------------------------------------------- in-app scheduler
+install_scheduler(app, [
+    ScheduledJob(
+        name="compliance.daily",
+        interval_seconds=get_settings().daily_snapshot_interval,
+        run=lambda: execute_daily_job(SCHEDULER_PRINCIPAL),
+    ),
+])

@@ -40,10 +40,10 @@ x-service-defaults: &service-defaults
 services:
   postgres:
     # The default pulls anonymously. Red Hat's own image is
-    # registry.redhat.io/rhel9/postgresql-13, which requires a subscription and
+    # registry.redhat.io/rhel9/postgresql-17, which requires a subscription and
     # a terms acceptance; to use it set POSTGRES_IMAGE and POSTGRES_DATA_DIR
     # (see docs/configuration.md).
-    image: ${POSTGRES_IMAGE:-docker.io/library/postgres:13}
+    image: ${POSTGRES_IMAGE:-docker.io/library/postgres:17}
     restart: unless-stopped
     environment:
       # Both spellings are set so either image works: the official image reads
@@ -166,8 +166,38 @@ services:
       reporting:
         condition: service_healthy
 
+  prometheus:
+    # Optional metrics scraper. Start with: docker compose --profile monitoring up -d
+    image: ${PROMETHEUS_IMAGE:-docker.io/prom/prometheus:v3.15.1}
+    restart: unless-stopped
+    profiles: ["monitoring"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --web.enable-lifecycle=false
+    volumes:
+      - ./deploy/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro,Z
+      - ./deploy/monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro,Z
+      - prometheus-data:/prometheus:Z
+    ports:
+      - "${PATCHTRACK_BIND_ADDRESS:-127.0.0.1}:${PATCHTRACK_PROMETHEUS_PORT:-9090}:9090"
+    depends_on:
+      identity:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
   grafana:
-    image: docker.io/grafana/grafana-oss:10.2.6
+    # Grafana 13 is the current supported line; 10.2 is end-of-life.
+    image: ${GRAFANA_IMAGE:-docker.io/grafana/grafana-oss:13.0.2}
     restart: unless-stopped
     profiles: ["dashboards"]
     environment:
@@ -199,3 +229,4 @@ volumes:
   reports:
   solaris-inbox:
   grafana-data:
+  prometheus-data:

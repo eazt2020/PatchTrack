@@ -1,8 +1,10 @@
 """The scheduled-job runners must use a service credential, not a human one.
 
-A timer has no user session. If these scripts ever grew a password or a
-gateway cookie, scheduling would silently require a person's account. They are
-checked structurally because the real ones need a running deployment.
+A scheduled job has no user session. The in-app scheduler calls the service
+functions directly, but the manual runner still ships for operators; if it
+ever grew a password or a gateway cookie, running a job would silently
+require a person's account. It is checked structurally because the real one
+needs a running deployment.
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ from pathlib import Path
 import pytest
 
 SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
-RUNNERS = ["patchtrack-job.sh", "patchtrack-tick.sh"]
+RUNNERS = ["patchtrack-job.sh"]
 
 
 @pytest.mark.parametrize("name", RUNNERS)
@@ -27,16 +29,6 @@ def test_the_job_script_authenticates_as_the_scheduler():
     assert '"x-patchtrack-internal"' in text or "'x-patchtrack-internal'" in text
     assert "PATCHTRACK_SERVICE_TOKEN" in text
     assert '"scheduler"' in text or "'scheduler'" in text
-
-
-def test_the_tick_script_delegates_to_the_job_script():
-    # The tick runner owns due-state only. Credentials, ports and the
-    # container/native choice live in one place, so the systemd timer works
-    # for both deployments.
-    text = (SCRIPTS / "patchtrack-tick.sh").read_text()
-    assert "patchtrack-job.sh" in text
-    assert 'JOB="${PATCHTRACK_JOB_SCRIPT:-$ROOT/scripts/patchtrack-job.sh}"' in text
-    assert "x-patchtrack-internal" not in text
 
 
 def executable_lines(name: str) -> str:
@@ -59,14 +51,6 @@ def test_the_script_never_uses_a_human_credential(name: str):
 def test_the_job_script_fails_on_a_reported_failure():
     text = (SCRIPTS / "patchtrack-job.sh").read_text()
     assert '"status"' in text and '"failed"' in text
-
-
-def test_the_tick_script_fails_when_a_step_fails():
-    # It does not parse the response itself; it trusts the job script's exit
-    # status and turns any failure into its own non-zero exit.
-    text = (SCRIPTS / "patchtrack-tick.sh").read_text()
-    assert '"$JOB" "$@"' in text
-    assert 'exit "$FAILED"' in text
 
 
 def test_the_job_script_works_in_both_deployments():
@@ -102,20 +86,3 @@ def test_the_native_transport_isolates_the_interpreter():
     assert '"$PYTHON" -I -' in text
 
 
-def test_the_tick_script_writes_a_stamp_only_after_success():
-    text = (SCRIPTS / "patchtrack-tick.sh").read_text()
-    # The stamp call sits inside the success branch of due_run, so a failed
-    # collection is retried on the next tick instead of waiting a full
-    # interval.
-    runner = text[text.index("due_run() {"):text.index("collection() {")]
-    assert runner.index('"$JOB" "$@"') < runner.index("stamp ")
-    assert runner.index("stamp ") > runner.index("then")
-
-
-def test_the_tick_script_isolates_a_failing_step():
-    text = (SCRIPTS / "patchtrack-tick.sh").read_text()
-    # A dead source system must not stop the daily snapshot or the report
-    # tick: every step is run through step(), which records the failure and
-    # continues.
-    assert "FAILED=1" in text
-    assert "exit \"$FAILED\"" in text

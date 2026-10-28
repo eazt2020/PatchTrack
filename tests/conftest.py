@@ -22,3 +22,7 @@ for relative in ("services/common", "services"):
 # database override the URL; unit tests only need the object to construct.
 os.environ.setdefault("PATCHTRACK_JWT_SECRET", "test-only-jwt-secret-not-for-production")
 os.environ.setdefault("PATCHTRACK_DATABASE_URL", "postgresql+psycopg://invalid@/invalid")
+# Tests drive jobs explicitly; a background loop would add database work and
+# timing noise to unrelated assertions. Individual scheduler tests call the
+# runner directly.
+os.environ.setdefault("PATCHTRACK_SCHEDULER_ENABLED", "false")

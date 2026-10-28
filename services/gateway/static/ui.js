@@ -53,13 +53,44 @@ export function fmtPct(value, digits = 1) {
   return `${Number(value).toFixed(digits)}%`;
 }
 
+/* The deployment's timezone, set once at boot and after a Settings change.
+ * Instants arrive in UTC; calendar labels and clock times are shown in the
+ * timezone the rest of PatchTrack uses for periods and snapshots. */
+let displayTimeZone = null;
+
+export function setDisplayTimeZone(zone) {
+  displayTimeZone = zone || null;
+}
+
+function zonedCalendar(date) {
+  if (displayTimeZone) {
+    try {
+      const parts = new Intl.DateTimeFormat("en-CA", {
+        timeZone: displayTimeZone, year: "numeric", month: "2-digit",
+      }).formatToParts(date);
+      const value = Object.fromEntries(parts.map((p) => [p.type, p.value]));
+      return { year: Number(value.year), month: Number(value.month) };
+    } catch { /* an unknown zone falls back to the browser clock */ }
+  }
+  return { year: date.getFullYear(), month: date.getMonth() + 1 };
+}
+
 export function fmtDate(value, withTime = false) {
   if (!value) return "—";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return String(value);
   const opts = { year: "numeric", month: "short", day: "2-digit" };
   if (withTime) Object.assign(opts, { hour: "2-digit", minute: "2-digit" });
+  if (displayTimeZone) opts.timeZone = displayTimeZone;
   return date.toLocaleString(undefined, opts);
+}
+
+export function fmtTime(value = new Date()) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  const opts = { hour: "2-digit", minute: "2-digit", second: "2-digit" };
+  if (displayTimeZone) opts.timeZone = displayTimeZone;
+  return date.toLocaleTimeString(undefined, opts);
 }
 
 export function fmtRelative(value) {
@@ -169,8 +200,16 @@ function csvText(columns, rows) {
   // Action-only columns are dropped entirely, header included, rather than
   // exported as a nameless column of empty cells.
   const exported = columns.filter((col) => col.export !== false);
-  const escape = (value) =>
-    /[",\n\r]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+  // A spreadsheet treats a cell beginning with one of these as a formula,
+  // even when it arrived in a CSV quoted field. Prefixing an apostrophe makes
+  // the value literal text, so an imported hostname cannot execute against
+  // the analyst who opens the export.
+  const literal = (value) =>
+    /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+  const escape = (original) => {
+    const value = literal(original);
+    return /[",\n\r]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+  };
   const lines = [exported.map((col) => escape(col.label)).join(",")];
   for (const row of rows) {
     lines.push(exported.map((col) => {
@@ -328,9 +367,11 @@ export function debounce(fn, wait = 250) {
 }
 
 export function toMonthInput(date = new Date()) {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+  const { year, month } = zonedCalendar(date);
+  return `${year}-${String(month).padStart(2, "0")}`;
 }
 
 export function quarterLabel(date = new Date()) {
-  return `${date.getFullYear()}-Q${Math.floor(date.getMonth() / 3) + 1}`;
+  const { year, month } = zonedCalendar(date);
+  return `${year}-Q${Math.floor((month - 1) / 3) + 1}`;
 }

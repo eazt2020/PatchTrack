@@ -77,7 +77,7 @@ grouped, and how often the page reloads itself:
 |---------|--------|-------|
 | Timeframe | Live · monthly trend (12 points), Live · quarterly trend (8), Live · yearly trend (5), then every month, quarter and year with a recorded snapshot in its own group; the picker reaches back five years (60 months, 20 quarters, 5 years) | The single control answers both questions. A Live choice shows today's estate and groups the trend by the granularity named in the option. A recorded month, quarter or year shows the tiles and breakdowns as they were recorded in that period — the latest daily snapshot captured inside it — and groups the trend by that period's own kind (month → monthly, quarter → quarterly, year → yearly). |
 | Auto-refresh | Off, 30 seconds, 1 minute, 5 minutes | Reloads the tiles and charts in place. It pauses while the browser tab is hidden and while a dialog is open, and resumes on the next tick. |
-| TV mode | on / off | Hides the left navigation and lets the content use the whole screen. |
+| TV mode | on / off | Hides the left navigation and the header so the dashboard fills the screen. Move the pointer to the very top edge (or press Tab) to reveal the header again. |
 
 **Historical periods.** Choosing a month, quarter or year replaces the
 freshness line with the provenance of the snapshot it is showing — for example
@@ -110,6 +110,10 @@ reload. TV mode is presentation only: it does not change what your role may
 see.
 
 - Press **K** to toggle TV mode and **Esc** to leave it.
+- In TV mode the header (title, freshness line, refresh interval and buttons)
+  slides off screen. Hover the top edge of the window to bring it back; it
+  hides again when the pointer leaves. Keyboard focus reveals it too, so the
+  controls remain reachable without a mouse.
 - `#/dashboard?tv=1` opens the dashboard already in TV mode for a bookmarked
   NOC/SOC display; the parameter applies to that visit and does not overwrite
   the stored preference.
@@ -200,6 +204,33 @@ The **reason** column on the detail page explains the state in a sentence, for
 example "Assessment is 51.2h old; freshness threshold is 48h". That sentence is
 the one to quote in an audit.
 
+### Verifying and justifying a failing server
+
+A server that is non-compliant, stale or unknown needs a person to verify it.
+Open its detail and use **Verification and justification**:
+
+- Choose a **reason**: accepted risk, compensating control, remediation
+  scheduled, false positive, decommissioning, collection gap or under
+  investigation.
+- State **what you verified** (at least 20 characters) and, where relevant,
+  the remediation plan and target date.
+- Attach **evidence** — up to five files of 5 MB each; PDF, PNG/JPEG, text,
+  CSV, Word or Excel.
+
+Recording a verification does **not** change the compliance state or the
+numbers; it explains them and keeps the evidence beside them. Recording a new
+one supersedes the old record but keeps it in the history with its evidence.
+A justification can be withdrawn; history is retained either way. Operations
+and Administrators can record or withdraw; anyone who can open the server can
+read and download the evidence.
+
+Every report produced while a server is failing lists it in the **Verified
+exceptions and remediation** section. Servers with a recorded verification
+show the statement, remediation plan, target date, recorder and evidence
+filenames inside the table; servers without one appear in a second table with
+their state, compliance reason and outstanding patch count. This records the
+explanation alongside the figures it explains; it does not alter them.
+
 ## 5. Remediation
 
 **Compliance → Remediation** lists individual outstanding patch findings with
@@ -262,7 +293,7 @@ administrators can correct either locally without touching AssetExplorer:
 4. Press **Save override**.
 
 The values in those lists are maintained by an administrator in
-**Settings → Inventory placement values**, not typed per server. That is what
+**Settings → Inventory placement**, not typed per server. That is what
 keeps `Production` from being entered three ways in a week. If a needed value is
 missing, ask an administrator to add it; until the list for a field is
 configured, the editor falls back to free text.
@@ -320,8 +351,24 @@ requested by and digest.
   one from the same screen.
 - **Download** retrieves the archived PDF.
 - **Retry** applies to a failed report. It never replaces a completed one.
+- **Delete** (administrators only) removes the selected archived reports and
+  their PDFs permanently. Tick individual rows or use the header checkbox to
+  select every row currently shown by the search and filters, then choose
+  *Delete selected* and confirm. A report that is queued or still generating
+  cannot be deleted. Deletion is audited per report and cannot be undone;
+  retention remains the normal way for archived reports to expire.
 - The **SHA-256** shown against a report lets an auditor verify that the copy
   they hold is the copy you issued.
+
+Every report opens with a cover page carrying the organisation name and logo,
+the report title, the reporting period, the preparer and the classification,
+followed by a generated **Contents** page whose page numbers match the printed
+report. The final page is an **Approval and sign-off** page with separate **Prepared
+by** and **Concurred by** blocks — name, designation, signature line and date —
+so the printed copy can be signed and retained with the archive. Configure the
+names, designations and logo under **Administration → Settings → Report
+branding**; the logo must be PNG or JPEG and no larger than 1 MB, and it is
+stored with the settings so it survives a redeploy.
 
 Report contents are described in [reporting.md](reporting.md). Every report
 states its own methodology, population and denominator.
@@ -329,7 +376,8 @@ states its own methodology, population and denominator.
 ### Schedules
 
 **Reporting → Schedules** creates recurring reports: monthly or quarterly, a
-day of the month (1–28), an hour, a timezone and a recipient list.
+day of the month (1–28), an hour, a timezone and a recipient list. If no
+timezone is chosen, the deployment timezone applies (see below).
 
 - The report covers the period that **ended**, not the one in progress.
 - A scheduled period runs at most once, even if two scheduler instances race.
@@ -345,7 +393,7 @@ day of the month (1–28), an hour, a timezone and a recipient list.
 | Users & roles | Administrator | Accounts, roles, password resets |
 | Audit trail | Administrator | Who did what, when |
 | Operational health | Operations | Integration status and manual collection |
-| Settings | Administrator | Organisation name on reports; environment and business-service lists; audit trail retention |
+| Settings | Administrator | Report branding (organisation name, logo, preparer and concurrence); environment and business-service lists; report file retention; audit trail retention |
 
 ### Testing an integration
 
@@ -387,7 +435,7 @@ never by email with a report. The account must change it at first sign-in.
 
 ### Managing the placement lists
 
-**Settings → Inventory placement values** holds the environment and business
+**Settings → Inventory placement** holds the environment and business
 service values an operator can choose when correcting a server.
 
 - **Add** a value: type it and press **Add** (or Enter). Duplicates are refused
@@ -419,9 +467,27 @@ The list starts as the distinct values already present in the inventory, and
 the AssetExplorer sync never writes to it. If a list is emptied, the placement
 editor falls back to free text rather than blocking the correction.
 
+### Configuring report file retention
+
+**Settings → Retention → Report file retention** sets how many days generated PDFs are
+kept. The default is 2,555 days (about seven years); the accepted range is 30
+to 36,500 days. The card shows how many reports are archived and how many
+already await purge.
+
+Saving applies the window immediately, with no restart: the expiry of every
+completed report is recalculated from its completion date, and any file already
+past the new window is deleted in the same request. Future reports record their
+expiry when they complete, and the daily maintenance job continues to enforce
+the window.
+
+Only the PDF is deleted. The report record, its SHA-256, size and status remain
+as an archive tombstone, so "this is the report we issued for October" is still
+verifiable after the file is gone. Lengthening the window cannot restore a file
+that was already purged. Every change is audited as `settings.updated`.
+
 ### Configuring audit trail retention
 
-**Settings → Audit trail retention** sets how many days of audit events are
+**Settings → Retention → Audit trail retention** sets how many days of audit events are
 kept. The default is 2,555 days (about seven years); the accepted range is 30
 to 36,500 days. The card shows how many events are stored and the date of the
 oldest one.
@@ -457,6 +523,15 @@ it cannot bring deleted events back.
 - Status is conveyed with a text label as well as colour.
 - The page is designed for a desktop browser at 1280 px or wider. There is no
   mobile layout.
+
+## System timezone
+
+An administrator sets the deployment timezone in **Settings → Platform**. It
+is the single zone PatchTrack uses to decide the local day of a daily
+snapshot, the calendar boundaries of reporting periods, the default timezone
+for new schedules, and the timestamps shown on screen and in generated PDFs.
+Instants are still stored in UTC; changing the setting does not rewrite
+existing snapshots or reports.
 
 ## 13. Getting help
 
