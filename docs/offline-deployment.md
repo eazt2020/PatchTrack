@@ -80,7 +80,7 @@ Every line must read `OK`. Do not proceed on a mismatch; re-transfer.
 ```bash
 docker load -i patchtrack-app-3.0.0.tar
 docker load -i ubi9-python-312.tar
-docker load -i postgres-13.tar
+docker load -i postgres-17.tar
 docker load -i grafana-oss-13.0.2.tar
 docker images | grep -E 'patchtrack|postgres|grafana'
 ```
