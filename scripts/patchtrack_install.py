@@ -1004,7 +1004,11 @@ def docker_proxy_unit(cfg: Config) -> str:
         # '%' starts a systemd specifier even inside a quoted Environment value.
         value = environment[name].replace("%", "%%")
         definitions.append(f'"{name}={value}"')
-    return "[Service]\nEnvironment=" + " ".join(definitions) + "\n"
+    return (
+        "[Service]\nEnvironment=" + " ".join(definitions) + "\n"
+        "# Managed by the PatchTrack guided installer; remove with uninstall.sh\n"
+        "# --remove-proxy-config when the host no longer needs this proxy.\n"
+    )
 
 
 class DockerProxyConfig(RollbackAction):
@@ -1448,6 +1452,8 @@ class Installer:
         self.gid = 0
         self.admin_created = False
         self.completed = False
+        self.created_user = False
+        self.created_group = False
         self._data_dir = Path("/var/lib/docker" if runtime.runtime == "docker" else "/var/lib/containers")
         self._data_existed = self._data_dir.exists()
 
@@ -1560,6 +1566,16 @@ class Installer:
 
     def create_account(self) -> None:
         step("Creating the service account and directories")
+        try:
+            grp.getgrnam(self.cfg.service_user)
+            self.created_group = False
+        except KeyError:
+            self.created_group = True
+        try:
+            pwd.getpwnam(self.cfg.service_user)
+            self.created_user = False
+        except KeyError:
+            self.created_user = True
         self.gid = ensure_group(self.cfg.service_user, self.actions)
         ensure_user(
             self.cfg.service_user, self.cfg.service_user, self.cfg.install_dir,
@@ -1618,6 +1634,11 @@ class Installer:
             "config_dir": str(self.cfg.config_dir),
             "secrets_dir": str(self.cfg.secrets_dir),
             "runtime": self.plan.runtime,
+            "service_user": self.cfg.service_user,
+            "created_user": self.created_user,
+            "created_group": self.created_group,
+            "image": self.cfg.image,
+            "compose_project": "patchtrack",
             "gateway_url": self.cfg.public_url,
             "admin_username": self.cfg.admin_username if self.cfg.create_admin else None,
             "verified": False,

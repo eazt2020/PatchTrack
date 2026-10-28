@@ -29,6 +29,13 @@
   proxy URL's credentials are redacted from all output, and rollback removes
   the drop-in and restarts Docker.
 - `install.sh --check` runs the same preflight without changing the host.
+- `uninstall.sh` reverses an installation from its manifest. It prechecks the
+  manifest, paths, runtime, compose project, image, account and configuration
+  leftovers; removes the containers, network, image, application tree and only
+  the installer-created configuration; keeps an account that pre-dated the
+  installation and any operator-created file. Data volumes are preserved unless
+  `--purge-data` is given. Post-uninstallation checks verify each removal and
+  report preserved volumes and files.
 
 ### Secret files for bootstrap credentials
 

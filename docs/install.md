@@ -68,6 +68,10 @@ Run the dependency checks alone, without changing the host:
 sudo ./install.sh --check
 ```
 
+To remove an installation later, use the
+[guided uninstallation](#guided-uninstallation-recommended); it preserves data
+volumes unless you explicitly ask to delete them.
+
 The installer does not open a firewall port. Permit TCP/8005 (or the port you
 chose) in the host firewall before users connect. It also does not enable the
 optional Grafana dashboard; see [Optional: start the Grafana
@@ -429,7 +433,7 @@ loopback or behind the proxy with authentication.
 | `docker compose stop grafana` | Application, API and reports unaffected |
 | `sudo ausearch -m avc -ts recent` | No denials mentioning patchtrack containers |
 
-## 14. Uninstall
+## 14. Manual uninstallation
 
 ```bash
 cd /opt/patchtrack
@@ -439,6 +443,62 @@ docker volume ls | grep patchtrack
 # Take a backup first, then, only if you really mean to destroy the data:
 #   sudo -u patchtrack docker compose down -v
 ```
+
+## Guided uninstallation (recommended)
+
+`uninstall.sh` uses the manifest written by `install.sh`. Run it from the
+unpacked release directory as root:
+
+```bash
+sudo ./uninstall.sh --check     # prechecks and the removal plan only
+sudo ./uninstall.sh             # asks for confirmation
+sudo ./uninstall.sh --purge-data
+```
+
+It refuses to run when the manifest is missing, when the paths in it are not
+absolute or overlap, when the application directory no longer looks like a
+PatchTrack deployment, when the container runtime or Compose is unavailable,
+or when the configuration directory is a symbolic link. If the installer used
+a non-default configuration directory, pass `--config-dir /path` so it can
+find `install.json`.
+
+By default it removes:
+
+- the Compose containers and network;
+- the `patchtrack:<version>` image;
+- the application directory;
+- only the configuration files the installer created: `.env`,
+  `secrets/postgres_password`, `secrets/database_url`, `secrets/jwt_secret`,
+  `secrets/service_token` and `install.json`;
+- the service user and group, but only if this installation created them and
+  no application or configuration files remain. An account that existed
+  before installation is kept.
+
+It preserves by default:
+
+- every named data volume, including PostgreSQL, reports, the Solaris inbox,
+  the gateway TLS certificate and Grafana data (`--purge-data` deletes them,
+  after a separate confirmation);
+- configuration files it did not create, such as an operator's
+  `secrets/satellite.password`; the configuration directory is left in place
+  and the files are listed;
+- the Docker or Podman packages and the Docker proxy drop-in. Use
+  `--remove-proxy-config` only when the proxy drop-in written by the installer
+  is no longer needed; it is removed only when it carries the installer's
+  marker, and Docker is restarted.
+
+Other options: `--keep-image`, `--keep-account`, `--yes` (non-interactive;
+combine with `--purge-data` only when you intend to destroy the data). There
+is no rollback, because uninstallation deletes state — run `--check` first.
+
+After removal, the uninstaller verifies that the application directory,
+managed configuration, containers, network and image are gone, that the
+account is gone when it was removed, and that volumes are either purged or
+still present. It exits non-zero if any check fails and prints anything it
+could not remove.
+
+Back up the database and reports first if you will use `--purge-data`; see
+[backup-restore.md](backup-restore.md).
 
 ## Native installation (no containers)
 
