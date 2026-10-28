@@ -294,6 +294,28 @@
   dashboard on a wall display. Hovering the top edge of the window (or moving
   keyboard focus into it) reveals the header again.
 
+## 3.0.1 — 2026-10-29
+
+Post-release hardening for the guided installer's air-gap support.
+
+- Bundle verification now requires the application and PostgreSQL archives to
+  be listed in `SHA256SUMS`. An empty or partial checksum file can no longer
+  vouch for nothing, and a removed optional artifact (pinned base, Grafana,
+  source archive or wheels) no longer invalidates an otherwise complete
+  bundle.
+- A bundle installation always loads the application and PostgreSQL images
+  from the verified archives. A stale local image carrying the same tag can no
+  longer replace the verified image.
+- The installer and uninstaller refuse a bundle directory that overlaps the
+  application or configuration directory. Uninstalling the application can no
+  longer delete the only copy of the bundle on an air-gapped host.
+- Declining air-gap mode interactively now clears any bundle directory carried
+  over from options or environment variables.
+- Removed the unreachable air-gap local-build fallback and redundant runtime
+  probes.
+
+`install.sh` now defaults to version 3.0.1, as does `docker-compose.yml`.
+
 ## 3.0.0 — 2026-10-26
 
 First release.

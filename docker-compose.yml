@@ -15,7 +15,7 @@
 name: patchtrack
 
 x-service-defaults: &service-defaults
-  image: patchtrack:${PATCHTRACK_VERSION:-3.0.0}
+  image: patchtrack:${PATCHTRACK_VERSION:-3.0.1}
   build:
     context: .
     dockerfile: deploy/container/Dockerfile

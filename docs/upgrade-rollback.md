@@ -102,7 +102,7 @@ that predates `upgrade.sh`.
 
 ```bash
 cd /opt/patchtrack
-old_version=$(grep -oP 'PATCHTRACK_VERSION=\K.*' .env || echo 3.0.0)
+old_version=$(grep -oP 'PATCHTRACK_VERSION=\K.*' .env || echo 3.0.1)
 echo "$old_version" > /var/lib/patchtrack/previous-version
 
 # 1. Back up
