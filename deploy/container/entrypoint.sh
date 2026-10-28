@@ -32,8 +32,13 @@ fi
 # start over letter case.
 LOG_LEVEL="$(printf '%s' "${PATCHTRACK_LOG_LEVEL:-info}" | tr '[:upper:]' '[:lower:]')"
 
-exec python -m uvicorn "app.main:app" \
+# The launcher is a thin uvicorn wrapper. For the gateway it also terminates
+# TLS (generating a self-signed certificate on first start when
+# PATCHTRACK_TLS_ENABLED is set), which plain `uvicorn` cannot do while still
+# allowing a certificate uploaded later to take effect without a restart.
+export PATCHTRACK_SERVICE="$SERVICE"
+exec python -m patchtrack_common.serve "app.main:app" \
   --app-dir "/opt/patchtrack/services/${SERVICE}" \
   --host 0.0.0.0 --port "$PORT" \
   --proxy-headers --forwarded-allow-ips "${PATCHTRACK_FORWARDED_IPS:-127.0.0.1}" \
-  --no-server-header --log-level "$LOG_LEVEL"
+  --log-level "$LOG_LEVEL"

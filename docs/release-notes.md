@@ -2,6 +2,70 @@
 
 ## Unreleased — security and integrity corrections
 
+### Secret files for bootstrap credentials
+
+- `PATCHTRACK_DATABASE_URL`, `PATCHTRACK_JWT_SECRET`,
+  `PATCHTRACK_SECRETS_KEY`, `PATCHTRACK_SERVICE_TOKEN` and the SMTP password
+  fallback may now be supplied by a `*_FILE` sibling variable. The file value
+  wins over the plain variable; a missing or unreadable file stops start-up
+  rather than falling back, and an empty `_FILE` value means "not configured".
+  Files readable by group/others are logged without their content. Existing
+  `.env` deployments are unchanged.
+- `docker-compose.secrets.yml` is an opt-in override that mounts the database
+  URL, JWT secret, service token and PostgreSQL password as Compose secrets and
+  masks the plain variables in the container environment. Native deployments
+  can use `LoadCredential` / `LoadCredentialEncrypted` with the same
+  variables. See [security.md](security.md#secret-files).
+
+### HTTPS from first start
+
+- **The gateway now serves HTTPS itself.** With `PATCHTRACK_TLS_ENABLED=true`
+  (the value in `.env.example`, so new installations get it), the first start
+  generates a self-signed certificate in `PATCHTRACK_TLS_DIR` (default
+  `/var/lib/patchtrack/tls`), so a fresh installation is never exposed over
+  plain HTTP. Browsers warn until the organisation's certificate is installed.
+- **Administrators can install their own certificate in the UI.** **Settings →
+  HTTPS certificate** accepts a PEM certificate (with chain) and unencrypted
+  key. The pair is validated before replacing anything, written atomically
+  (key mode 0600), loaded into the live listener without a restart, and
+  audited as `settings.tls_updated` with public metadata only. `GET/PUT
+  /api/tls`; only the `administrator` role may upload, and the session is
+  re-confirmed with identity.
+- A missing or mismatched half of the pair is refused rather than regenerated,
+  and a passphrase-protected key is refused. TLS 1.2 is the floor; HSTS is now
+  emitted by the application when a request arrives over HTTPS.
+- The gateway and systemd entrypoints use the new
+  `python -m patchtrack_common.serve` launcher, which is what applies a
+  replaced certificate to the running listener. A gateway started with the
+  plain uvicorn CLI still stores the files but requires a restart. An upgraded
+  deployment that keeps an external proxy must set
+  `PATCHTRACK_TLS_ENABLED=false` in its existing `.env`; unset means the
+  previous plain-HTTP behaviour, so upgrades are not switched silently.
+- Container and compose changes: the image creates `/var/lib/patchtrack/tls`,
+  compose mounts the `tls` volume, and the health check uses HTTPS for the
+  gateway. No database migration is required. `starlette` is now an explicit
+  image dependency because the gateway imports it directly.
+
+### Email delivery
+
+- **Scheduled reports can now be emailed through an SMTP relay configured in
+  the UI.** **Settings → Email delivery** stores host, port, STARTTLS,
+  username, password and sender in `shared.app_settings` under `smtp_relay`;
+  a saved change applies to the next delivery without a restart. The
+  `PATCHTRACK_SMTP_*` environment variables remain the fallback until a relay
+  is saved, and the first save carries over an unchanged environment username
+  and password.
+- The SMTP password is write-only and encrypted at rest with Fernet. The key is
+  derived from the new optional `PATCHTRACK_SECRETS_KEY`, falling back to
+  `PATCHTRACK_JWT_SECRET`; it is never stored beside the ciphertext. Rotating
+  either key makes the saved password unreadable, and delivery reports that
+  instead of falling back to unauthenticated mail.
+- New endpoints `GET/PUT /settings/smtp` and `POST /settings/smtp/test`
+  (`settings:manage`). The test route sends a short message without saving
+  anything, and audit events record the host and whether the password changed —
+  never the password itself.
+- No migration is required: `shared.app_settings` already exists.
+
 ### Scheduling
 
 - **Scheduled work now runs inside the services.** Inventory collection,
@@ -18,6 +82,10 @@
   its full interval.
 - A PostgreSQL advisory lock is held for the duration of each job, so two
   replicas cannot execute it at the same time.
+- Every job's interval and enabled flag can now be changed at **Reporting →
+  Schedules → System jobs** (administrators). The stored value takes effect on
+  the next poll without a restart and is recorded as `scheduler.updated`.
+  Migration `019_scheduler_ui.sql` adds `enabled` and `updated_by`.
 - Cadence is configured with `PATCHTRACK_*_INTERVAL` environment variables
   (see [configuration.md](configuration.md#5-scheduler)). `/etc/patchtrack/tick.env`
   is no longer read. `scripts/patchtrack-job.sh` remains as a manual tool for

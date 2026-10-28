@@ -54,6 +54,16 @@ def test_the_log_level_is_lowercased():
     assert "tr '[:upper:]' '[:lower:]'" in text
 
 
+def test_the_service_starts_through_the_tls_capable_launcher():
+    # Plain `uvicorn` cannot reload a certificate uploaded in Settings, so
+    # every service must start through the wrapper, with its own name exported
+    # for the launcher's gateway-only TLS decision.
+    text = ENTRYPOINT.read_text()
+    assert 'export PATCHTRACK_SERVICE="$SERVICE"' in text
+    assert 'python -m patchtrack_common.serve "app.main:app"' in text
+    assert not text.rstrip().endswith("uvicorn app.main:app")
+
+
 def test_the_build_elevates_only_for_the_ownership_step():
     # Red Hat's UBI python image sets USER 1001, so the chmod/chown step fails
     # without an explicit USER root. The image must still finish as 1001.

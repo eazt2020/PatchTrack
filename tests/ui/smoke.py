@@ -5,7 +5,7 @@ application itself needs no browser). It signs in, visits every route and fails
 on: console errors, unhandled rejections, a rendered error alert, a blank view,
 or too few dashboard tiles/charts.
 
-    PATCHTRACK_URL=http://127.0.0.1:8005 \
+    PATCHTRACK_URL=https://127.0.0.1:8005 \
     PATCHTRACK_USER=admin PATCHTRACK_PASSWORD=... \
     python tests/ui/smoke.py --screenshot .runtime/dashboard.png
 
@@ -29,7 +29,7 @@ ROUTES = [
     "health", "settings",
 ]
 
-BASE = os.environ.get("PATCHTRACK_URL", "http://127.0.0.1:8005")
+BASE = os.environ.get("PATCHTRACK_URL", "https://127.0.0.1:8005")
 USER = os.environ.get("PATCHTRACK_USER", "admin")
 PASSWORD = os.environ.get("PATCHTRACK_PASSWORD", "")
 
@@ -56,7 +56,14 @@ def main() -> int:
             print(f"chromium is not available ({exc}); skipping browser smoke test")
             return 0
 
-        page = browser.new_page(viewport={"width": 1600, "height": 1000})
+        # The development stack serves HTTPS with a self-signed certificate;
+        # accepting it here is the browser equivalent of curl -k and is limited
+        # to this throwaway test context.
+        browser_context = browser.new_context(
+            viewport={"width": 1600, "height": 1000},
+            ignore_https_errors=True,
+        )
+        page = browser_context.new_page()
         console_errors: list[str] = []
 
         page.on("console",
@@ -551,11 +558,12 @@ def main() -> int:
             print("ok  settings exposes logo upload and both signatories")
         tabs = page.get_by_role("tab")
         tab_labels = [tab.inner_text() for tab in tabs.all()]
-        if tab_labels != ["Report branding", "Retention",
-                          "Inventory placement", "Platform"]:
+        if tab_labels != ["Report branding", "Retention", "Email delivery",
+                          "HTTPS", "Inventory placement", "Platform"]:
             fail(f"settings: unexpected tabs {tab_labels}")
         else:
-            print("ok  settings is split into branded, retention, placement and platform tabs")
+            print("ok  settings is split into branding, retention, email delivery, "
+                  "HTTPS, placement and platform tabs")
         page.get_by_role("tab", name="Retention").click()
         page.wait_for_timeout(200)
         if not page.locator("#report-retention-days").is_visible():
@@ -573,6 +581,30 @@ def main() -> int:
             fail("settings: the timezone selector has no zones")
         else:
             print("ok  the Platform tab offers the system timezone selector")
+        page.get_by_role("tab", name="Email delivery").click()
+        page.wait_for_timeout(200)
+        smtp_fields = ["#smtp-host", "#smtp-port", "#smtp-username",
+                       "#smtp-password", "#smtp-sender", "#smtp-test-to"]
+        missing = [selector for selector in smtp_fields
+                   if page.locator(f"#view {selector}").count() != 1]
+        if missing:
+            fail(f"settings: SMTP relay controls missing: {missing}")
+        elif not page.locator("#smtp-password").get_attribute("type") == "password":
+            fail("settings: the SMTP password field is not masked")
+        else:
+            print("ok  the Email delivery tab shows the masked relay settings")
+        page.get_by_role("tab", name="HTTPS").click()
+        page.wait_for_timeout(200)
+        tls_controls = ["#tls-cert", "#tls-key"]
+        missing = [selector for selector in tls_controls
+                   if page.locator(f"#view {selector}").count() != 1]
+        if missing:
+            fail(f"settings: HTTPS certificate controls missing: {missing}")
+        elif not page.locator("#view").get_by_role(
+                "button", name="Install certificate").count():
+            fail("settings: the certificate install button is missing")
+        else:
+            print("ok  the HTTPS tab offers certificate and key upload")
         page.get_by_role("tab", name="Inventory placement").click()
         page.wait_for_timeout(300)
         env_input = page.locator("#view input[placeholder='New environment value']")
@@ -710,6 +742,7 @@ def main() -> int:
             page.screenshot(path=args.screenshot, full_page=True)
             print(f"screenshot: {args.screenshot}")
 
+        browser_context.close()
         browser.close()
 
     if failures:

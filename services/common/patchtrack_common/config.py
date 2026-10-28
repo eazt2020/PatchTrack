@@ -13,6 +13,8 @@ from pathlib import Path
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .secret_files import secret_file_settings
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -30,6 +32,15 @@ class Settings(BaseSettings):
     database_pool_max_overflow: int = 5
 
     jwt_secret: str = Field(..., min_length=32)
+    secrets_key: str = Field(
+        "",
+        description=(
+            "Optional key for encrypting credentials saved through the UI "
+            "(currently the SMTP password). Falls back to jwt_secret. Changing "
+            "either key makes stored credentials unreadable and they must be "
+            "entered again."
+        ),
+    )
     jwt_algorithm: str = "HS256"
     access_token_minutes: int = 30
     refresh_token_hours: int = 8
@@ -64,6 +75,31 @@ class Settings(BaseSettings):
 
     report_dir: Path = Path("/var/lib/patchtrack/reports")
     report_retention_days: int = 2555
+
+    # TLS termination inside the gateway. When enabled, the gateway serves
+    # HTTPS on its normal port instead of HTTP, so a first installation is
+    # encrypted without a separate proxy. A self-signed certificate is
+    # generated on first start; an administrator can upload the organisation's
+    # own certificate from Settings afterwards. Set enabled=false when an
+    # external reverse proxy terminates TLS.
+    tls_enabled: bool = False
+    tls_dir: Path = Path("/var/lib/patchtrack/tls")
+    tls_cert_file: str = Field(
+        "",
+        description="Certificate path; relative names resolve under tls_dir",
+    )
+    tls_key_file: str = Field(
+        "",
+        description="Private-key path; relative names resolve under tls_dir",
+    )
+    tls_hostname: str = Field(
+        "",
+        description=(
+            "DNS name placed in the generated self-signed certificate; the "
+            "host's name is used when empty"
+        ),
+    )
+
     smtp_host: str = ""
     smtp_port: int = 587
     smtp_username: str = ""
@@ -99,6 +135,26 @@ class Settings(BaseSettings):
     inventory_url: str = "http://127.0.0.1:8002"
     compliance_url: str = "http://127.0.0.1:8003"
     reporting_url: str = "http://127.0.0.1:8004"
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings,
+        env_settings,
+        dotenv_settings,
+        file_secret_settings,
+    ):
+        # A *_FILE value is a deliberate choice to take the credential out of
+        # the environment, so it outranks the plain variable. Explicit
+        # constructor arguments (used by tests and tooling) still win.
+        return (
+            init_settings,
+            secret_file_settings,
+            env_settings,
+            dotenv_settings,
+            file_secret_settings,
+        )
 
     @model_validator(mode="after")
     def _refuse_insecure_cookies_in_production(self) -> "Settings":

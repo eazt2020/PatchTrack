@@ -142,9 +142,12 @@ A single host, Docker Compose (or Podman Compose), with:
 - a one-shot `migrate` container gating the rest;
 - optional `grafana` under the `dashboards` profile.
 
-A TLS-terminating reverse proxy sits in front of the gateway. The services
-speak HTTP only on a loopback or private network; no service other than the
-gateway is published.
+The gateway terminates TLS itself: on first start it generates a self-signed
+certificate, and an administrator can install the organisation's certificate
+from Settings, which is loaded into the live listener. Services behind it speak
+HTTP only on a loopback or private network; no service other than the gateway
+is published. Setting `PATCHTRACK_TLS_ENABLED=false` leaves termination to an
+external reverse proxy instead.
 
 See [install.md](install.md) and [offline-deployment.md](offline-deployment.md).
 

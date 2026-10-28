@@ -43,6 +43,23 @@ function remember(key, value) {
   try { localStorage.setItem(key, String(value)); } catch { /* optional */ }
 }
 
+function fmtInterval(seconds) {
+  const value = Number(seconds) || 0;
+  if (value >= 86400 && value % 86400 === 0) {
+    const days = value / 86400;
+    return `${days} day${days === 1 ? "" : "s"}`;
+  }
+  if (value >= 3600 && value % 3600 === 0) {
+    const hours = value / 3600;
+    return `${hours} hour${hours === 1 ? "" : "s"}`;
+  }
+  if (value >= 60 && value % 60 === 0) {
+    const minutes = value / 60;
+    return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+  }
+  return `${value} second${value === 1 ? "" : "s"}`;
+}
+
 /* A tab strip with one panel visible at a time. `panels` is a list of
  * [key, label, content]; `state.key` remembers the selection for the session so
  * navigating away and back does not reset it. Keyboard: arrows, Home and End. */
@@ -2207,7 +2224,9 @@ async function renderReports() {
 async function renderSchedules() {
   mount(view, spinnerRows(3));
   const data = await api("reporting/schedules");
+  const jobs = await api("reporting/scheduler/jobs");
   const manage = can("schedules:manage");
+  const configureJobs = can("settings:manage");
   const rows = listPanel("schedules", {
     title: "Scheduled reports",
     subtitle: "Persisted in PostgreSQL; survive restarts",
@@ -2300,9 +2319,70 @@ async function renderSchedules() {
       },
     }, "Add schedule"));
 
+  const jobRows = jobs.map((job) => {
+    const interval = h("input", {
+      type: "number", min: "10", value: String(job.interval_seconds),
+      style: { width: "110px" }, disabled: !configureJobs,
+      "aria-label": `${job.label} interval in seconds`,
+    });
+    const enabled = h("input", {
+      type: "checkbox", checked: Boolean(job.enabled), disabled: !configureJobs,
+      "aria-label": `${job.label} enabled`,
+    });
+    const save = h("button", {
+      class: "btn btn-sm", disabled: !configureJobs,
+      onclick: async () => {
+        const seconds = Number(interval.value);
+        if (!Number.isInteger(seconds) || seconds < 10) {
+          window.alert("The interval must be at least 10 seconds.");
+          return;
+        }
+        save.disabled = true;
+        save.textContent = "Saving…";
+        try {
+          await api(`reporting/scheduler/jobs/${encodeURIComponent(job.name)}`, {
+            method: "PATCH",
+            body: { interval_seconds: seconds, enabled: enabled.checked },
+          });
+          await renderSchedules();
+        } catch (error) {
+          save.disabled = false;
+          save.textContent = "Save";
+          window.alert(error.message);
+        }
+      },
+    }, "Save");
+    return {
+      ...job,
+      intervalControl: h("div", { class: "row" },
+        interval,
+        h("span", { class: "muted small" }, fmtInterval(job.interval_seconds))),
+      enabledControl: enabled,
+      saveControl: save,
+    };
+  });
+
+  const jobsTable = table([
+    { label: "Job", render: (r) => h("div", {},
+      h("div", {}, r.label),
+      h("div", { class: "muted small" }, r.description)) },
+    { label: "Interval", export: false, render: (r) => r.intervalControl },
+    { label: "Enabled", export: false, render: (r) => r.enabledControl },
+    { label: "Next run", render: (r) => fmtDate(r.next_run_at, true) },
+    { label: "Last result", render: (r) => (r.last_status
+      ? h("span", { title: r.last_message || "" }, pill(r.last_status, r.last_status))
+      : h("span", { class: "muted" }, "never run")) },
+    { label: "", export: false, render: (r) => r.saveControl },
+  ], jobRows, { compact: true, export: false, empty: "No scheduled jobs." });
+
   mount(view, h("div", { class: "stack" },
     manage ? card("New schedule", "Runs are idempotent per period", form) : null,
-    rows));
+    rows,
+    card("System jobs",
+      configureJobs
+        ? "Collection, snapshots, retention and report ticks — saved changes apply on the next poll"
+        : "Collection, snapshots, retention and report ticks — administrators can change these",
+      jobsTable)));
 }
 
 /* ------------------------------------------------------------------ integrations */
@@ -2966,6 +3046,35 @@ async function renderSettings() {
     type: "number", min: "30", max: "36500", step: "1",
   });
   const reportRetentionStatus = h("div", { class: "muted small" });
+  const smtpHost = h("input", {
+    id: "smtp-host", type: "text", placeholder: "relay.example.com",
+  });
+  const smtpPort = h("input", {
+    id: "smtp-port", type: "number", min: "1", max: "65535", step: "1",
+  });
+  const smtpStarttls = h("input", { id: "smtp-starttls", type: "checkbox" });
+  const smtpUsername = h("input", {
+    id: "smtp-username", type: "text", autocomplete: "off",
+  });
+  const smtpPassword = h("input", {
+    id: "smtp-password", type: "password", autocomplete: "new-password",
+  });
+  const smtpClear = h("input", { id: "smtp-clear-password", type: "checkbox" });
+  const smtpSender = h("input", {
+    id: "smtp-sender", type: "text", placeholder: "patchtrack@example.com",
+  });
+  const smtpTestTo = h("input", {
+    id: "smtp-test-to", type: "text", placeholder: "your.address@example.com",
+  });
+  const smtpStatus = h("div", { class: "muted small" });
+  const tlsCertFile = h("input", {
+    id: "tls-cert", type: "file", accept: ".pem,.crt,.cer,application/x-pem-file",
+  });
+  const tlsKeyFile = h("input", {
+    id: "tls-key", type: "file", accept: ".pem,.key,application/x-pem-file",
+  });
+  const tlsDetails = h("dl", { class: "kv" });
+  const tlsStatus = h("div", { class: "muted small" });
   const timezoneInput = h("select", { id: "system-timezone" });
   const timezoneStatus = h("div", { class: "muted small" });
   let placement = { environments: [], business_groups: [] };
@@ -3050,6 +3159,80 @@ async function renderSettings() {
       `${value.completed.toLocaleString()} archived reports`
       + (value.expired ? `, ${value.expired} awaiting purge` : "");
   } catch { /* the server default still applies */ }
+  const describeSmtpPassword = (value) => {
+    smtpPassword.placeholder = value.password_unreadable
+      ? "Saved password cannot be decrypted — enter it again"
+      : value.password_set
+        ? "•••••• saved — leave blank to keep"
+        : "No password saved";
+  };
+  try {
+    const value = await api("reporting/settings/smtp");
+    smtpHost.value = value.host || "";
+    smtpPort.value = String(value.port);
+    smtpStarttls.checked = Boolean(value.starttls);
+    smtpUsername.value = value.username || "";
+    smtpSender.value = value.sender || "";
+    describeSmtpPassword(value);
+    smtpStatus.textContent = value.source === "database"
+      ? "Saved on this screen"
+        + (value.updated_by ? ` by ${value.updated_by}` : "")
+        + (value.updated_at
+          ? ` on ${new Date(value.updated_at).toLocaleString()}` : "")
+        + ". Scheduled reports use this relay immediately."
+      : "Using the deployment's environment settings until a relay is saved "
+        + "here. Saving makes the values on this screen authoritative.";
+  } catch (error) {
+    smtpStatus.textContent = `Relay settings unavailable: ${error.message}`;
+  }
+  const readFileText = (file) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("The file could not be read."));
+    reader.readAsText(file);
+  });
+  let tlsState = null;
+  const renderTlsState = (value) => {
+    tlsState = value;
+    const rows = [];
+    if (!value?.enabled) {
+      tlsStatus.textContent =
+        "The gateway is not terminating TLS in this deployment. An external "
+        + "reverse proxy manages HTTPS and its certificate; nothing can be "
+        + "uploaded here.";
+    } else if (value.error) {
+      tlsStatus.textContent = `Stored certificate problem: ${value.error}`;
+    } else if (value.certificate) {
+      const cert = value.certificate;
+      rows.push(
+        h("dt", {}, "Common name"), h("dd", {}, cert.common_name || "—"),
+        h("dt", {}, "Issuer"), h("dd", {}, cert.issuer),
+        h("dt", {}, "Valid until"),
+        h("dd", {}, new Date(cert.not_after).toLocaleString()),
+        h("dt", {}, "SHA-256 fingerprint"), h("dd", {}, cert.sha256),
+        h("dt", {}, "Alternative names"), h("dd", {}, cert.san.join(", ") || "—"),
+      );
+      tlsStatus.textContent = cert.self_signed
+        ? "The gateway is using a generated self-signed certificate. Browsers "
+          + "warn until you upload a certificate your clients trust."
+        : "A CA-issued certificate is installed.";
+      if (!value.serving) {
+        tlsStatus.textContent +=
+          " TLS is not active in this process; restart the gateway to serve "
+          + "HTTPS with the stored files.";
+      }
+    } else {
+      tlsStatus.textContent =
+        "TLS is enabled but no certificate has been generated yet. Restart the "
+        + "gateway, or upload a certificate and key below.";
+    }
+    tlsDetails.replaceChildren(...rows);
+  };
+  try {
+    renderTlsState(await api("tls"));
+  } catch (error) {
+    tlsStatus.textContent = `Certificate status unavailable: ${error.message}`;
+  }
   try {
     const value = await api("identity/settings/timezone");
     const zones = value?.zones?.length ? value.zones : [value.timezone];
@@ -3179,6 +3362,147 @@ async function renderSettings() {
               },
             }, "Save")),
           retentionStatus)))],
+    ["email", "Email delivery", card(
+      "Email delivery (SMTP relay)",
+      "Scheduled reports are emailed through this relay. The password is "
+      + "encrypted at rest and is never returned by the API; leave the field "
+      + "blank to keep the saved one. Saving applies to the next scheduled "
+      + "run without a restart.",
+      h("div", { class: "stack" },
+        h("div", { class: "row", style: { alignItems: "flex-end" } },
+          h("div", { class: "field", style: { minWidth: "280px", flex: "2" } },
+            h("label", { for: "smtp-host" }, "Relay host"), smtpHost),
+          h("div", { class: "field", style: { width: "120px" } },
+            h("label", { for: "smtp-port" }, "Port"), smtpPort)),
+        h("label", { class: "row", style: { gap: "6px" } },
+          smtpStarttls, "Use STARTTLS"),
+        h("div", { class: "field" },
+          h("label", { for: "smtp-username" }, "Username (optional)"),
+          smtpUsername),
+        h("div", { class: "field" },
+          h("label", { for: "smtp-password" }, "Password (write-only)"),
+          smtpPassword,
+          h("label", { class: "row", style: { gap: "6px" } },
+            smtpClear, "Remove the saved password")),
+        h("div", { class: "field" },
+          h("label", { for: "smtp-sender" }, "Sender address"), smtpSender),
+        h("div", { class: "field" },
+          h("label", { for: "smtp-test-to" }, "Test recipient"), smtpTestTo),
+        h("div", { class: "row" },
+          h("button", {
+            class: "btn btn-primary",
+            onclick: async () => {
+              smtpStatus.replaceChildren();
+              const body = {
+                host: smtpHost.value.trim(),
+                port: Number(smtpPort.value) || 587,
+                starttls: smtpStarttls.checked,
+                username: smtpUsername.value.trim(),
+                sender: smtpSender.value.trim(),
+              };
+              if (smtpClear.checked) body.clear_password = true;
+              else if (smtpPassword.value) body.password = smtpPassword.value;
+              try {
+                const value = await api("reporting/settings/smtp", {
+                  method: "PUT", body,
+                });
+                smtpPassword.value = "";
+                smtpClear.checked = false;
+                describeSmtpPassword(value);
+                smtpStatus.appendChild(alert("ok",
+                  "Relay saved. Scheduled reports use it from the next run."));
+              } catch (error) {
+                smtpStatus.appendChild(alert("error", error.message));
+              }
+            },
+          }, "Save relay"),
+          h("button", {
+            class: "btn",
+            onclick: async (event) => {
+              smtpStatus.replaceChildren();
+              const recipient = smtpTestTo.value.trim();
+              if (!recipient) {
+                smtpStatus.appendChild(alert("error",
+                  "Enter an address to send the test to."));
+                return;
+              }
+              const button = event.currentTarget;
+              button.disabled = true;
+              button.textContent = "Sending…";
+              try {
+                await api("reporting/settings/smtp/test", {
+                  method: "POST", body: { recipient },
+                });
+                smtpStatus.appendChild(alert("ok",
+                  `Test message accepted by the relay for ${recipient}.`));
+              } catch (error) {
+                smtpStatus.appendChild(alert("error", error.message));
+              } finally {
+                button.disabled = false;
+                button.textContent = "Send test email";
+              }
+            },
+          }, "Send test email")),
+        smtpStatus))],
+    ["https", "HTTPS", card(
+      "HTTPS certificate",
+      "The gateway terminates TLS itself, so the console is served over HTTPS "
+      + "from the first installation. A self-signed certificate is generated "
+      + "on first start; upload the organisation's certificate here to replace "
+      + "it. The key is written beside the certificate with owner-only "
+      + "permissions and is never returned by the API. The new certificate is "
+      + "used for new connections immediately.",
+      h("div", { class: "stack" },
+        tlsDetails,
+        h("div", { class: "field" },
+          h("label", { for: "tls-cert" },
+            "Certificate (PEM; include intermediate certificates)"),
+          tlsCertFile),
+        h("div", { class: "field" },
+          h("label", { for: "tls-key" }, "Private key (PEM, unencrypted)"),
+          tlsKeyFile),
+        h("button", {
+          class: "btn btn-primary",
+          onclick: async (event) => {
+            tlsStatus.replaceChildren();
+            if (!tlsState?.enabled) {
+              tlsStatus.appendChild(alert("error",
+                "The gateway is not terminating TLS in this deployment."));
+              return;
+            }
+            const certificate = tlsCertFile.files && tlsCertFile.files[0];
+            const privateKey = tlsKeyFile.files && tlsKeyFile.files[0];
+            if (!certificate || !privateKey) {
+              tlsStatus.appendChild(alert("error",
+                "Choose both the certificate and its private key."));
+              return;
+            }
+            const button = event.currentTarget;
+            button.disabled = true;
+            button.textContent = "Installing…";
+            try {
+              const value = await api("tls", {
+                method: "PUT",
+                body: {
+                  certificate: await readFileText(certificate),
+                  private_key: await readFileText(privateKey),
+                },
+              });
+              tlsCertFile.value = "";
+              tlsKeyFile.value = "";
+              renderTlsState(value);
+              tlsStatus.appendChild(alert("ok", value.applied
+                ? "Certificate installed. New connections use it now."
+                : "Certificate saved. Restart the gateway to serve it."));
+            } catch (error) {
+              tlsStatus.appendChild(alert("error", error.message));
+            } finally {
+              button.disabled = false;
+              button.textContent = "Install certificate";
+            }
+          },
+        }, "Install certificate"),
+        tlsStatus))],
     ["placement", "Inventory placement", card(
       "Inventory placement values",
       "The picker offered when an operator corrects environment or business "

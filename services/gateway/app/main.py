@@ -10,8 +10,11 @@ Responsibilities:
 * Convert the authenticated session into trusted gateway headers consumed by
   backend services via ``PATCHTRACK_SERVICE_TOKEN``.
 * Add security headers and CSRF defence (origin check + custom header).
+* Terminate TLS when enabled, and let an administrator replace the certificate
+  from Settings.
 
-The gateway holds no business logic. It never contacts the database.
+The gateway holds no business logic. It touches the database only to append the
+audit event for a certificate change; everything else is proxied.
 """
 
 from __future__ import annotations
@@ -28,7 +31,10 @@ from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
+from patchtrack_common import tls as tls_settings
+from patchtrack_common.audit import record_audit
 from patchtrack_common.config import get_settings
 from patchtrack_common.metrics import install as install_metrics
 from patchtrack_common.request_guards import install as install_request_guards
@@ -163,6 +169,13 @@ async def security_middleware(request: Request, call_next):
         # pick up a changed screen. Revalidation is cheap: ETag/Last-Modified
         # still answer 304 when nothing changed.
         response.headers.setdefault("Cache-Control", "no-cache")
+    if request.url.scheme == "https":
+        # Only over TLS: a browser ignores HSTS received over plain HTTP, and
+        # behind a proxy uvicorn derives the scheme from the trusted
+        # X-Forwarded-Proto header rather than this process's listener.
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+        )
     return _set_security(response)
 
 
@@ -375,6 +388,116 @@ def me(request: Request) -> dict[str, Any]:
         "permissions": sorted(PERMISSIONS.get(role, set())),
         "must_change_password": bool(payload.get("pwd_change_required")),
     }
+
+
+# --------------------------------------------------------------------------- TLS
+class TLSUploadBody(BaseModel):
+    certificate: str = Field(min_length=1, max_length=65536)
+    private_key: str = Field(min_length=1, max_length=65536)
+
+
+async def _tls_admin(request: Request) -> dict[str, Any]:
+    """An administrator whose session is still current.
+
+    The signed cookie proves the role, but a revoked session must not be able
+    to replace the certificate, so identity is asked to confirm the token and
+    account state — the same check proxied calls get.
+    """
+    payload = _session(request)
+    if payload.get("pwd_change_required"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Password change required before continuing",
+        )
+    if payload.get("role") != "administrator":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Administrator permission required",
+        )
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        try:
+            response = await client.get(
+                f"{_setting('identity')}/auth/me",
+                headers={
+                    "authorization": f"Bearer {request.cookies.get(COOKIE)}"
+                },
+            )
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="identity service is temporarily unavailable",
+            ) from exc
+    if response.status_code >= 400:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session is no longer valid",
+        )
+    user = response.json()
+    if user.get("role") != "administrator" or not user.get("is_active", True):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Administrator permission required",
+        )
+    return payload
+
+
+@app.get("/api/tls")
+async def tls_status(request: Request) -> dict[str, Any]:
+    await _tls_admin(request)
+    return tls_settings.status(APP)
+
+
+@app.put("/api/tls")
+async def upload_tls_certificate(
+    payload: TLSUploadBody, request: Request,
+) -> dict[str, Any]:
+    """Replace the gateway certificate with the organisation's own.
+
+    The key is written beside the certificate with mode 0600 and is never
+    returned; only the leaf's public metadata appears in the response and the
+    audit event.
+    """
+    session = await _tls_admin(request)
+    current = tls_settings.status(APP)
+    if not current["enabled"]:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "TLS termination is not enabled on the gateway "
+                "(PATCHTRACK_TLS_ENABLED). An external proxy manages the "
+                "certificate in this deployment."
+            ),
+        )
+    try:
+        info, applied = tls_settings.install_material(
+            payload.certificate, payload.private_key
+        )
+    except tls_settings.TLSConfigError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    try:
+        await run_in_threadpool(
+            record_audit,
+            event_type="settings.tls_updated",
+            outcome="success",
+            actor=str(session.get("username", "")),
+            actor_role=str(session.get("role", "")),
+            target_type="setting",
+            target_id="tls_certificate",
+            context={
+                "subject": info.subject,
+                "issuer": info.issuer,
+                "not_after": info.not_after,
+                "sha256": info.sha256,
+                "applied": applied,
+            },
+            source_ip=_client_ip(request),
+            service=APP,
+        )
+    except Exception:  # noqa: BLE001 - the certificate is already installed
+        log.exception("certificate installed but its audit event was not written")
+
+    return {**tls_settings.status(APP), "applied": applied}
 
 
 # --------------------------------------------------------------------------- proxy

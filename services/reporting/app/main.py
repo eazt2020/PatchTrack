@@ -4,7 +4,7 @@ schedules and the background job tick."""
 from __future__ import annotations
 
 import logging
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
 from uuid import UUID
@@ -18,7 +18,9 @@ from patchtrack_common import timezones as timezone_settings
 from patchtrack_common.metrics import install as install_metrics
 from patchtrack_common.request_guards import install as install_request_guards
 from patchtrack_common.scheduler import (
+    JOB_DEFINITIONS,
     SCHEDULER_PRINCIPAL,
+    JobDefinition,
     ScheduledJob,
     install as install_scheduler,
 )
@@ -34,6 +36,14 @@ from .scheduler import (
     due_schedules,
     finish_execution,
     period_for_schedule,
+)
+from .mailer import send_test_email
+from .smtp_config import (
+    SMTP_KEY,
+    decrypt_password,
+    encrypt_password,
+    load_stored,
+    resolve_smtp,
 )
 from .service import (
     REPORT_RETENTION_KEY,
@@ -153,6 +163,176 @@ def set_report_retention(
         source_ip=_client_ip(request), service=APP,
     )
     return {"days": payload.days, "purged_reports": purged}
+
+
+# ------------------------------------------------------------------------ SMTP
+class SmtpSettingsUpdate(BaseModel):
+    """Saved relay settings. The password is write-only: it is accepted here,
+    encrypted at rest, and never returned by any endpoint."""
+
+    host: str = Field("", max_length=255)
+    port: int = Field(587, ge=1, le=65535)
+    starttls: bool = True
+    username: str = Field("", max_length=320)
+    password: str | None = Field(None, max_length=1024)
+    clear_password: bool = False
+    sender: str = Field("", max_length=320)
+
+
+class SmtpTestRequest(BaseModel):
+    recipient: str = Field(min_length=3, max_length=320)
+
+
+def _smtp_view() -> dict[str, Any]:
+    config = resolve_smtp()
+    stored = load_stored()
+    token = str((stored or {}).get("password") or "")
+    unreadable = bool(token) and decrypt_password(token) is None
+    if stored is None:
+        password_set = bool(config.password)
+    else:
+        password_set = bool(token) and not unreadable
+    return {
+        "host": config.host,
+        "port": config.port,
+        "starttls": config.starttls,
+        "username": config.username,
+        "sender": config.sender,
+        "source": config.source,
+        "password_set": password_set,
+        "password_unreadable": unreadable,
+        "updated_at": None,
+        "updated_by": None,
+    }
+
+
+@app.get("/settings/smtp")
+def get_smtp_settings(
+    _: Annotated[Principal, Depends(require_permission("settings:manage"))],
+) -> dict[str, Any]:
+    view = _smtp_view()
+    row = fetch_one(
+        "SELECT updated_at, updated_by FROM shared.app_settings WHERE key = :key",
+        key=SMTP_KEY,
+    )
+    if row:
+        view["updated_at"] = row["updated_at"]
+        view["updated_by"] = row["updated_by"]
+    return view
+
+
+@app.put("/settings/smtp")
+def set_smtp_settings(
+    payload: SmtpSettingsUpdate,
+    request: Request,
+    principal: Annotated[Principal, Depends(require_permission("settings:manage"))],
+) -> dict[str, Any]:
+    """Save the relay. The saved row is authoritative over the environment.
+
+    Omitting the password keeps the one already saved (or, on the first save,
+    carries over the environment password when the username is unchanged), so
+    editing the host does not silently drop authentication.
+    """
+    import json
+
+    host = payload.host.strip()
+    sender = payload.sender.strip()
+    username = payload.username.strip()
+    if host and "@" not in sender:
+        raise HTTPException(
+            status_code=422, detail="A sender address is required"
+        )
+    if payload.clear_password and payload.password:
+        raise HTTPException(
+            status_code=422,
+            detail="Provide a password or clear it, not both",
+        )
+
+    existing = load_stored() or {}
+    token = str(existing.get("password") or "")
+    password_changed = False
+    if payload.clear_password:
+        password_changed = bool(token)
+        token = ""
+    elif payload.password:
+        token = encrypt_password(payload.password)
+        password_changed = True
+    elif not token:
+        fallback = get_settings()
+        if not host:
+            token = ""
+        elif fallback.smtp_password and username == fallback.smtp_username:
+            # First save: keep the working password rather than quietly
+            # switching the relay to unauthenticated delivery.
+            token = encrypt_password(fallback.smtp_password)
+            password_changed = True
+
+    with connection() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO shared.app_settings "
+                "(key, value, updated_at, updated_by) "
+                "VALUES (:key, CAST(:v AS jsonb), now(), :by) "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, "
+                "    updated_at = now(), updated_by = EXCLUDED.updated_by"
+            ),
+            {
+                "key": SMTP_KEY,
+                "v": json.dumps(
+                    {
+                        "host": host,
+                        "port": payload.port,
+                        "starttls": payload.starttls,
+                        "username": username,
+                        "password": token,
+                        "sender": sender,
+                    }
+                ),
+                "by": principal.username,
+            },
+        )
+    record_audit(
+        event_type="settings.updated", outcome="success", principal=principal,
+        target_type="setting", target_id=SMTP_KEY,
+        context={
+            "host": host,
+            "port": payload.port,
+            "starttls": payload.starttls,
+            "sender": sender,
+            "password_changed": password_changed,
+        },
+        source_ip=_client_ip(request), service=APP,
+    )
+    return _smtp_view()
+
+
+@app.post("/settings/smtp/test")
+def send_smtp_test(
+    payload: SmtpTestRequest,
+    request: Request,
+    principal: Annotated[Principal, Depends(require_permission("settings:manage"))],
+) -> dict[str, Any]:
+    """Send a test message using the saved (or environment) relay."""
+    config = resolve_smtp()
+    if not config.host:
+        raise HTTPException(status_code=409, detail="SMTP is not configured")
+    status, detail = send_test_email(recipient=payload.recipient, config=config)
+    record_audit(
+        event_type="settings.smtp_tested",
+        outcome="success" if status == "sent" else "failure",
+        principal=principal,
+        target_type="setting", target_id=SMTP_KEY,
+        context={
+            "status": status,
+            "host": config.host,
+            "port": config.port,
+            "source": config.source,
+        },
+        source_ip=_client_ip(request), service=APP,
+    )
+    if status != "sent":
+        raise HTTPException(status_code=502, detail=detail or "Delivery failed")
+    return {"status": status}
 
 
 # --------------------------------------------------------------------------- reports
@@ -623,6 +803,142 @@ def delete_schedule(
         source_ip=_client_ip(request), service=APP,
     )
     return {"status": "deleted"}
+
+
+# --------------------------------------------------------------------------- system jobs
+class SchedulerJobUpdate(BaseModel):
+    enabled: bool | None = None
+    interval_seconds: int | None = Field(None, ge=10, le=31_536_000)
+
+
+def _job_view(
+    definition: JobDefinition | None, row: dict[str, Any] | None,
+    default_interval: int,
+) -> dict[str, Any]:
+    row = row or {}
+    return {
+        "name": definition.name if definition else row["name"],
+        "label": definition.label if definition else row["name"],
+        "description": (
+            definition.description if definition
+            else "This job is not defined by the current release."
+        ),
+        "interval_seconds": int(row.get("interval_seconds") or default_interval),
+        "default_interval_seconds": default_interval,
+        "enabled": bool(row["enabled"]) if "enabled" in row else True,
+        "next_run_at": row.get("next_run_at"),
+        "last_started_at": row.get("last_started_at"),
+        "last_finished_at": row.get("last_finished_at"),
+        "last_status": row.get("last_status"),
+        "last_message": row.get("last_message") or "",
+        "updated_at": row.get("updated_at"),
+        "updated_by": row.get("updated_by") or "",
+    }
+
+
+def scheduler_job_views() -> list[dict[str, Any]]:
+    """Every known job, including ones that have never run.
+
+    The registry supplies the label, description and environment default, so
+    the screen is complete immediately after installation. A row left by an
+    older release is still shown rather than silently hidden.
+    """
+    rows = {
+        row["name"]: row
+        for row in fetch_all("SELECT * FROM shared.scheduled_jobs ORDER BY name")
+    }
+    settings = get_settings()
+    known = {definition.name for definition in JOB_DEFINITIONS}
+    views = [
+        _job_view(
+            definition, rows.get(definition.name),
+            int(getattr(settings, definition.interval_setting)),
+        )
+        for definition in JOB_DEFINITIONS
+    ]
+    for name, row in rows.items():
+        if name not in known:
+            views.append(_job_view(None, row, int(row["interval_seconds"])))
+    return views
+
+
+@app.get("/scheduler/jobs")
+def list_scheduler_jobs(
+    _: Annotated[Principal, Depends(require_permission("reports:view"))],
+) -> list[dict[str, Any]]:
+    return scheduler_job_views()
+
+
+@app.patch("/scheduler/jobs/{name}")
+def update_scheduler_job(
+    name: str,
+    payload: SchedulerJobUpdate,
+    request: Request,
+    principal: Annotated[Principal, Depends(require_permission("settings:manage"))],
+) -> dict[str, Any]:
+    """Change one job's interval or enabled flag.
+
+    The row is the authoritative configuration from then on; the environment
+    variable is only the default used before a row exists. A new interval takes
+    effect from now, so setting six hours schedules the next run six hours out
+    rather than inheriting an old due time.
+    """
+    definition = next((d for d in JOB_DEFINITIONS if d.name == name), None)
+    if definition is None:
+        raise HTTPException(status_code=404, detail="Unknown scheduled job")
+    if payload.enabled is None and payload.interval_seconds is None:
+        raise HTTPException(status_code=422, detail="Nothing to update")
+
+    current = fetch_one(
+        "SELECT * FROM shared.scheduled_jobs WHERE name = :name", name=name
+    )
+    default_interval = int(getattr(get_settings(), definition.interval_setting))
+    current_interval = int(
+        current["interval_seconds"] if current else default_interval
+    )
+    current_enabled = bool(current["enabled"]) if current else True
+    interval = (
+        payload.interval_seconds
+        if payload.interval_seconds is not None else current_interval
+    )
+    enabled = payload.enabled if payload.enabled is not None else current_enabled
+    reset_due = interval != current_interval or (enabled and not current_enabled)
+    next_run = (
+        datetime.now(UTC) + timedelta(seconds=interval)
+        if reset_due else (current["next_run_at"] if current else None)
+    )
+
+    with connection() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO shared.scheduled_jobs (
+                    name, interval_seconds, enabled, next_run_at,
+                    updated_by, updated_at
+                ) VALUES (:name, :interval, :enabled, :next_run, :by, now())
+                ON CONFLICT (name) DO UPDATE SET
+                    interval_seconds = EXCLUDED.interval_seconds,
+                    enabled = EXCLUDED.enabled,
+                    next_run_at = EXCLUDED.next_run_at,
+                    updated_by = EXCLUDED.updated_by,
+                    updated_at = now()
+                """
+            ),
+            {
+                "name": name, "interval": interval, "enabled": enabled,
+                "next_run": next_run, "by": principal.username,
+            },
+        )
+    record_audit(
+        event_type="scheduler.updated", outcome="success", principal=principal,
+        target_type="scheduled_job", target_id=name,
+        context={"enabled": enabled, "interval_seconds": interval},
+        source_ip=_client_ip(request), service=APP,
+    )
+    row = fetch_one(
+        "SELECT * FROM shared.scheduled_jobs WHERE name = :name", name=name
+    )
+    return _job_view(definition, row, default_interval)
 
 
 # --------------------------------------------------------------------------- scheduler tick

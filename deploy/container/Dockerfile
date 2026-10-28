@@ -43,6 +43,7 @@ COPY deploy/container/entrypoint.sh /opt/patchtrack/entrypoint.sh
 USER root
 RUN chmod 0755 /opt/patchtrack/entrypoint.sh \
     && mkdir -p /var/lib/patchtrack/reports /var/lib/patchtrack/solaris-inbox \
+                 /var/lib/patchtrack/tls \
     && chown -R 1001:0 /var/lib/patchtrack /opt/patchtrack
 
 # UID 1001 is the unprivileged user shipped in the UBI python image. Running
@@ -53,8 +54,12 @@ USER 1001
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD python -c "import os,sys,urllib.request; \
+    CMD python -c "import os,ssl,sys,urllib.request; \
 port=os.environ.get('PORT','8000'); \
-sys.exit(0 if urllib.request.urlopen(f'http://127.0.0.1:{port}/healthz', timeout=4).status==200 else 1)"
+tls=(os.environ.get('PATCHTRACK_SERVICE')=='gateway' \
+     and os.environ.get('PATCHTRACK_TLS_ENABLED','').lower() in ('1','true','yes','on')); \
+url=('https' if tls else 'http')+f'://127.0.0.1:{port}/healthz'; \
+ctx=ssl._create_unverified_context() if tls else None; \
+sys.exit(0 if urllib.request.urlopen(url, timeout=4, context=ctx).status==200 else 1)"
 
 ENTRYPOINT ["/opt/patchtrack/entrypoint.sh"]

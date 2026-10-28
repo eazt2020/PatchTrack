@@ -65,7 +65,7 @@ the migration file.
 | Check | How |
 |-------|-----|
 | Services healthy | `docker compose ps` all `healthy` |
-| Gateway responding | `curl -fsS http://127.0.0.1:8005/healthz` |
+| Gateway responding | `curl -fsSk https://127.0.0.1:8005/healthz` |
 | Sign-in works | Sign in in a browser |
 | Figures unchanged | `GET /api/compliance/summary` matches the value recorded before the upgrade |
 | Reports still download | Download the most recent report; its SHA-256 matches `reporting.reports.sha256` |

@@ -190,6 +190,15 @@ The scheduler is an in-app loop in the reporting service. It calls the same
 through the gateway and needs no external timer or service token. The HTTP
 route remains for a manual or internal run.
 
+### System jobs in the UI
+
+**Reporting → Schedules → System jobs** lists all eight in-app jobs across the
+services, not only report schedules. An administrator can change any job's
+interval or disable it; the values live in `shared.scheduled_jobs` under
+`GET/PATCH /scheduler/jobs`, take effect on the next poll and are audited as
+`scheduler.updated`. Report schedule rows remain under `/schedules` and are
+managed separately.
+
 ## 8. Email delivery
 
 Delivery is independent of generation:
@@ -198,15 +207,37 @@ Delivery is independent of generation:
 |---------|-------------|---------------|
 | Sent | `delivery_attempts.status='sent'` | stays `completed` |
 | SMTP not configured | `skipped`, "SMTP is not configured" | stays `completed` |
+| Saved password unreadable after a key change | `failed`, asking for the password to be re-entered | stays `completed` |
 | No recipients | `skipped` | stays `completed` |
 | SMTP error | `failed` with the error | **stays `completed`** |
 
 A failed email never invalidates a report. Re-send is a manual operation
 (re-request delivery) and the file remains downloadable regardless.
 
+The relay is configured at **Administration → Settings → Email delivery**:
+host, port, STARTTLS, username, password and sender. Saving writes
+`shared.app_settings.smtp_relay` and applies to the next delivery without a
+restart; there is no need to edit `.env` or restart the service. The stored
+password is write-only and encrypted at rest (see
+[security.md](security.md#6-secrets)); **Send test email** sends a short
+message without saving anything. These endpoints require `settings:manage`:
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/settings/smtp` | Effective relay with `password_set`, never the password |
+| `PUT` | `/settings/smtp` | Save the relay; omit `password` to keep the saved one, set `clear_password` to remove it |
+| `POST` | `/settings/smtp/test` | Send a test message to a supplied recipient |
+
+Until an administrator saves a relay, the `PATCHTRACK_SMTP_*` environment
+variables are used, so existing installations keep working after the upgrade.
+Saving the first relay carries over an unchanged environment username and
+password, so changing only the host does not silently drop authentication.
+
 SMTP uses STARTTLS with the default certificate context (`smtp_starttls=true`,
 the default). Do not set it to false to work around an internal relay; install
-the relay's CA instead.
+the relay's CA instead. A saved password that cannot be decrypted after a key
+change is reported as a failed delivery telling the operator to re-enter it,
+rather than attempting an unauthenticated send.
 
 ## 9. Retention
 

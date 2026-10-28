@@ -179,9 +179,15 @@ FROM reporting.delivery_attempts d JOIN reporting.reports r ON r.id = d.report_i
 ORDER BY d.attempted_at DESC LIMIT 5;
 ```
 
-`skipped / SMTP is not configured` — set `PATCHTRACK_SMTP_HOST` and restart.
+`skipped / SMTP is not configured` — save a relay at **Settings → Email
+delivery**, or set `PATCHTRACK_SMTP_HOST` and restart if the installation uses
+the environment fallback.
+`failed / The SMTP password is not available` — the saved password cannot be
+decrypted, usually after a secrets-key or JWT-secret rotation. Re-enter it in
+Settings.
 `failed` — the detail names the SMTP error. Check relay allow-listing for the
-sender address.
+sender address. **Send test email** on the same screen isolates relay
+connectivity from report generation.
 
 The report is `completed` regardless. This is intentional: a failed email never
 invalidates a report.
@@ -201,6 +207,44 @@ volume from the same backup point (see
 - The cookie is `SameSite=Strict`; opening PatchTrack in an iframe or from a
   cross-site link requires a fresh navigation.
 - Clock skew between the browser and the server makes the JWT appear expired.
+
+### The browser warns the certificate is not trusted
+
+Expected until the organisation's certificate is installed: the first start
+generated a self-signed one. Sign in, open **Settings → HTTPS certificate** and
+upload the issued certificate with its chain and the matching unencrypted key.
+The warning disappears on the next connection, without a restart. Do not work
+around it by clicking through in production, and do not turn off redirects or
+the `Secure` cookie policy.
+
+If the certificate shown is not the one you uploaded, check whether the
+gateway was started with an external process (for example the plain uvicorn
+CLI rather than `python -m patchtrack_common.serve`) or with TLS disabled: the
+files are stored, but only the launcher reloads the live listener. Restart the
+gateway, or use the certificate at the proxy when one terminates TLS.
+
+### The gateway does not start: `incomplete TLS material`
+
+The certificate and key must be replaced together. If one file is missing, the
+gateway refuses to start rather than overwrite the other half. Restore the pair
+from backup, install a pair through Settings, or — only if the existing
+certificate is disposable — remove both files so a fresh self-signed pair is
+generated on the next start. Check the key's mode is 0600 and that the service
+account can read the directory.
+
+### `PUT /api/tls` returns 409
+
+The gateway is not terminating TLS (`PATCHTRACK_TLS_ENABLED=false`); an
+external proxy or load balancer is responsible for certificates. Install it
+there. Uploading through PatchTrack would store files that nothing serves.
+
+### `422` when uploading a certificate
+
+The pair was rejected before anything was written; the existing certificate is
+still in use. The message names the reason: malformed PEM, a key that does not
+match the certificate, an expired or not-yet-valid certificate, or a
+passphrase-protected key. Export the key unencrypted (PKCS#9/`BEGIN PRIVATE
+KEY`) and retry with the full chain.
 
 ### `403 CSRF validation failed`
 

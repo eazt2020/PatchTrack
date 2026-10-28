@@ -156,6 +156,11 @@ services:
       PATCHTRACK_REPORTING_URL: http://reporting:8000
     ports:
       - "${PATCHTRACK_BIND_ADDRESS:-127.0.0.1}:${PATCHTRACK_GATEWAY_PORT:-8005}:8000"
+    volumes:
+      # The self-signed certificate generated on first start, and any
+      # certificate an administrator uploads in Settings, must outlive the
+      # container. The key is written 0600 on the volume.
+      - tls:/var/lib/patchtrack/tls:Z
     depends_on:
       identity:
         condition: service_healthy
@@ -230,3 +235,4 @@ volumes:
   solaris-inbox:
   grafana-data:
   prometheus-data:
+  tls:

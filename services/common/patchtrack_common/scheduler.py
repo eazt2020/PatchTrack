@@ -66,6 +66,65 @@ SCHEDULER_PRINCIPAL = Principal(
 )
 
 
+@dataclass(frozen=True)
+class JobDefinition:
+    """A job the scheduler knows about, including how it is presented.
+
+    The registry is used by the Schedules screen to list every job before it
+    has ever run and to show the environment default for its interval. The
+    service that owns the job still decides what the job does.
+    """
+
+    name: str
+    label: str
+    description: str
+    interval_setting: str
+
+
+JOB_DEFINITIONS: tuple[JobDefinition, ...] = (
+    JobDefinition(
+        "inventory.assetexplorer", "AssetExplorer collection",
+        "Imports servers and their patch state from AssetExplorer.",
+        "sync_assetexplorer_interval",
+    ),
+    JobDefinition(
+        "inventory.satellite", "Satellite collection",
+        "Imports patch assessments from Satellite.",
+        "sync_satellite_interval",
+    ),
+    JobDefinition(
+        "inventory.sccm", "SCCM collection",
+        "Imports patch assessments from SCCM.",
+        "sync_sccm_interval",
+    ),
+    JobDefinition(
+        "inventory.solaris", "Solaris collection",
+        "Processes approved Solaris assessment files from the inbox.",
+        "sync_solaris_interval",
+    ),
+    JobDefinition(
+        "compliance.daily", "Daily compliance snapshot",
+        "Captures the daily snapshot and refreshes every asset assessment.",
+        "daily_snapshot_interval",
+    ),
+    JobDefinition(
+        "identity.audit_purge", "Audit retention purge",
+        "Deletes audit events older than the configured retention window.",
+        "audit_purge_interval",
+    ),
+    JobDefinition(
+        "reporting.tick", "Report schedules",
+        "Generates and delivers reports whose schedule is due.",
+        "report_tick_interval",
+    ),
+    JobDefinition(
+        "reporting.retention", "Report file retention",
+        "Deletes archived report files past their retention date.",
+        "report_purge_interval",
+    ),
+)
+
+
 def _is_due(conn: Any, name: str) -> bool:
     row = conn.execute(
         text(
@@ -78,6 +137,24 @@ def _is_due(conn: Any, name: str) -> bool:
     return row is None or bool(row[0])
 
 
+def _configuration(conn: Any, job: ScheduledJob) -> tuple[bool, int]:
+    """The enabled flag and interval currently configured for a job.
+
+    The database row is authoritative once it exists: the Schedules screen
+    edits it, and the environment value is only the initial default.
+    """
+    row = conn.execute(
+        text(
+            "SELECT enabled, interval_seconds FROM shared.scheduled_jobs "
+            "WHERE name = :name"
+        ),
+        {"name": job.name},
+    ).first()
+    if row is None:
+        return True, job.interval_seconds
+    return bool(row[0]), int(row[1])
+
+
 def _mark_started(conn: Any, job: ScheduledJob) -> None:
     conn.execute(
         text(
@@ -86,7 +163,6 @@ def _mark_started(conn: Any, job: ScheduledJob) -> None:
                 (name, interval_seconds, last_started_at, updated_at)
             VALUES (:name, :interval, now(), now())
             ON CONFLICT (name) DO UPDATE SET
-                interval_seconds = EXCLUDED.interval_seconds,
                 last_started_at = now(),
                 updated_at = now()
             """
@@ -101,7 +177,6 @@ def _mark_finished(conn: Any, job: ScheduledJob, *, status: str,
         text(
             """
             UPDATE shared.scheduled_jobs SET
-                interval_seconds = :interval,
                 next_run_at = :next_run,
                 last_finished_at = now(),
                 last_status = :status,
@@ -112,7 +187,6 @@ def _mark_finished(conn: Any, job: ScheduledJob, *, status: str,
         ),
         {
             "name": job.name,
-            "interval": job.interval_seconds,
             "next_run": next_run,
             "status": status,
             "message": message[:1000],
@@ -152,13 +226,18 @@ def due_jobs(jobs: Iterable[ScheduledJob]) -> list[ScheduledJob]:
     with get_engine().connect() as conn:
         rows = conn.execute(
             text(
-                "SELECT name, next_run_at IS NULL OR next_run_at <= now() AS due "
+                "SELECT name, enabled, "
+                "       next_run_at IS NULL OR next_run_at <= now() AS due "
                 "FROM shared.scheduled_jobs WHERE name = ANY(:names)"
             ),
             {"names": [job.name for job in jobs]},
         ).all()
-    state = {row[0]: bool(row[1]) for row in rows}
-    return [job for job in jobs if state.get(job.name, True)]
+    state = {row[0]: (bool(row[1]), bool(row[2])) for row in rows}
+    # A job with no row has never run and is enabled by default.
+    return [
+        job for job in jobs
+        if state.get(job.name, (True, True)) == (True, True)
+    ]
 
 
 def run_scheduled_job(job: ScheduledJob, *,
@@ -186,6 +265,9 @@ def run_scheduled_job(job: ScheduledJob, *,
             # Another replica may have finished while we waited for the lock.
             if not _is_due(conn, job.name):
                 return {"job": job.name, "status": "not_due"}
+            enabled, interval = _configuration(conn, job)
+            if not enabled:
+                return {"job": job.name, "status": "disabled"}
             _mark_started(conn, job)
             conn.commit()
 
@@ -202,7 +284,7 @@ def run_scheduled_job(job: ScheduledJob, *,
                 return {"job": job.name, "status": "failure", "error": str(exc)}
 
             status = "failure" if _failed(result) else "success"
-            delay = retry_seconds if status == "failure" else job.interval_seconds
+            delay = retry_seconds if status == "failure" else interval
             next_run = datetime.now(UTC) + timedelta(seconds=delay)
             _mark_finished(
                 conn, job, status=status, message=_message_for(result),

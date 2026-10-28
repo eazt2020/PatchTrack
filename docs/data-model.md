@@ -70,8 +70,15 @@ the record of the purge cannot be removed by the same run.
 
 Key/value jsonb. Holds the organisation name used on reports and
 `audit_retention_days` (`{"days": N}`, default 2555 when absent), plus
-whatever runtime configuration must survive restarts. Secrets are **not**
-stored here, or anywhere else in the database.
+whatever runtime configuration must survive restarts: the system timezone,
+report file retention, and the SMTP relay under `smtp_relay`
+(`{"host", "port", "starttls", "username", "password", "sender"}`).
+
+The SMTP password is the one credential in the database. It is stored as a
+Fernet token encrypted with a key derived from `PATCHTRACK_SECRETS_KEY` (or the
+JWT secret when unset); the key is not stored here. No endpoint or screen
+returns the token or the plaintext. Every other secret remains outside the
+database (environment or `secret_ref` files).
 
 ### `shared.scheduled_jobs`
 
@@ -88,6 +95,11 @@ delay. Persisting it stops a service restart from replaying long-interval
 work. The row is not a lock: execution is serialised by a PostgreSQL advisory
 lock held for the duration of the run, which releases automatically if the
 process dies.
+
+`enabled` and `interval_seconds` are editable from **Reporting → Schedules →
+System jobs**; once a row exists it is authoritative over the environment
+default. `updated_by` records the administrator who last changed it, and every
+change is also written to the audit trail as `scheduler.updated`.
 
 ## identity
 

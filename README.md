@@ -51,23 +51,30 @@ scripts/dev-run.sh start      # migrations + five services on 8001-8005
 scripts/dev-run.sh status
 ```
 
-Open <http://127.0.0.1:8005>. On a fresh database the login page shows a
-one-time "create administrator" form. There is no shipped default password.
+Open <https://127.0.0.1:8005>. The development stack serves HTTPS with a
+self-signed certificate generated under `.runtime/tls`, so the browser warns
+until you accept it (or install the organisation's certificate in Settings).
+On a fresh database the login page shows a one-time "create administrator"
+form. There is no shipped default password.
 
 To browse from another machine, publish the gateway on this host's address
 instead of loopback. Only the gateway moves; the four backends stay on
 127.0.0.1 so the session, CSRF and permission checks cannot be bypassed.
 
 ```bash
-PATCHTRACK_BIND_ADDRESS=<this host's IP> \
-PATCHTRACK_SESSION_COOKIE_SECURE=never \
-  scripts/dev-run.sh start
+PATCHTRACK_BIND_ADDRESS=<this host's IP> scripts/dev-run.sh start
 ```
 
-`never` is required over plain HTTP because browsers discard `Secure` cookies,
-and it is accepted only while `PATCHTRACK_ENVIRONMENT` is not `production`.
-For anything beyond a development test, put TLS in front of the gateway and
-leave the policy at its default `auto`.
+The generated certificate includes the bind address in its SANs, so browsing
+by IP matches the certificate. Set `PATCHTRACK_TLS_ENABLED=false` to develop
+over plain HTTP; the launcher then sets the cookie policy to `never`
+automatically, because browsers discard `Secure` cookies over HTTP.
+For anything beyond a development test, run the gateway with
+`PATCHTRACK_TLS_ENABLED=true` (the default in `.env.example`): it serves HTTPS
+with a certificate generated at first start, which an administrator replaces
+with the organisation's own at **Settings → HTTPS certificate**. With an
+external proxy, set it to `false`. Leave the cookie policy at its default
+`auto`.
 
 Optional demo data (synthetic, never production figures):
 
@@ -136,6 +143,6 @@ at a database holding real data.
 Browser smoke test (needs Playwright and Chromium, development only):
 
 ```bash
-PATCHTRACK_URL=http://127.0.0.1:8005 PATCHTRACK_USER=admin \
+PATCHTRACK_URL=https://127.0.0.1:8005 PATCHTRACK_USER=admin \
 PATCHTRACK_PASSWORD=... python tests/ui/smoke.py
 ```

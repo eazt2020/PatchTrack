@@ -87,6 +87,52 @@ def test_a_reported_failure_is_not_a_success(engine):
     assert job_state(engine, name)["last_status"] == "failure"
 
 
+def test_the_configured_interval_wins_over_the_code_default(engine):
+    name = "test.scheduler.configured"
+    clear_job(engine, name)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO shared.scheduled_jobs "
+                "(name, interval_seconds, next_run_at) "
+                "VALUES (:n, 120, now() - interval '1 minute')"
+            ),
+            {"n": name},
+        )
+
+    run_scheduled_job(
+        ScheduledJob(name=name, interval_seconds=86400,
+                     run=lambda: {"status": "success"})
+    )
+
+    state = job_state(engine, name)
+    assert state["interval_seconds"] == 120
+    assert state["next_run_at"] < datetime.now(UTC) + timedelta(minutes=5)
+
+
+def test_a_disabled_job_is_not_run_even_when_due(engine):
+    name = "test.scheduler.disabled"
+    clear_job(engine, name)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO shared.scheduled_jobs "
+                "(name, interval_seconds, enabled, next_run_at) "
+                "VALUES (:n, 60, false, now() - interval '1 hour')"
+            ),
+            {"n": name},
+        )
+    calls: list[int] = []
+
+    outcome = run_scheduled_job(
+        ScheduledJob(name=name, interval_seconds=60,
+                     run=lambda: calls.append(1) or {"status": "success"})
+    )
+
+    assert outcome["status"] == "disabled"
+    assert calls == []
+
+
 def test_due_jobs_selects_missing_and_past_in_one_query(engine):
     missing = ScheduledJob("test.scheduler.due.missing", 60, lambda: None)
     future = ScheduledJob("test.scheduler.due.future", 60, lambda: None)

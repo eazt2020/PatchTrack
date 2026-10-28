@@ -32,7 +32,7 @@ Exit criterion was: sign in on a fresh database and reach every route. Met.
 | Item | Verdict |
 |------|---------|
 | PDF renderer with validation and SHA-256 | Done; layout not asserted |
-| Schedules, idempotent execution, delivery isolation | Done; SMTP untested |
+| Schedules, idempotent execution, delivery isolation | Done; SMTP configurable and testable in Settings, live relay still deployment-verified |
 | Retention purge | Done |
 | Executive dashboard (vanilla SPA) | Done; smoke-tested in a browser |
 | Provisioned Grafana dashboard and read-only role | Done; role script awaits operator execution |

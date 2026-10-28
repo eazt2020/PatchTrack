@@ -16,6 +16,7 @@ from patchtrack_common.db import connection, fetch_all, fetch_one
 
 from .mailer import send_report_email
 from .pdf import ReportContext, render_report, sha256_of, validate_pdf
+from .smtp_config import resolve_smtp
 from patchtrack_common import timezones as timezone_settings
 
 log = logging.getLogger(__name__)
@@ -423,7 +424,7 @@ def deliver_report(report_id: str, recipients: list[str]) -> dict[str, Any]:
     )
     if report is None or report["status"] != "completed":
         return {"status": "skipped", "detail": "report not completed"}
-    settings = get_settings()
+    smtp = resolve_smtp()
     subject = (
         f"{REPORT_TITLES.get(report['report_type'], 'PatchTrack report')}: "
         f"{report['period_start']} to {report['period_end']}"
@@ -441,6 +442,7 @@ def deliver_report(report_id: str, recipients: list[str]) -> dict[str, Any]:
         body=body,
         pdf_path=Path(report["file_path"]),
         filename=report["filename"],
+        config=smtp,
     )
     with connection() as conn:
         conn.execute(
@@ -452,7 +454,10 @@ def deliver_report(report_id: str, recipients: list[str]) -> dict[str, Any]:
             {"r": report_id, "rec": list(recipients or []), "s": status,
              "d": detail[:1000]},
         )
-    log.info("report %s delivery: %s (%s)", report_id, status, settings.smtp_host)
+    log.info(
+        "report %s delivery: %s (relay %s from %s)",
+        report_id, status, smtp.host or "unset", smtp.source,
+    )
     return {"status": status, "detail": detail}
 
 

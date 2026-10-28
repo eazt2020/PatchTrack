@@ -12,8 +12,10 @@
    filesystem.
 4. **Verify, do not disable.** TLS verification is on by default and turning it
    off is an explicit, audited act.
-5. **Record, do not retain secrets.** Audit context is scrubbed; credentials
-   are referenced, not stored.
+5. **Record, do not retain secrets.** Audit context is scrubbed; integration
+   credentials are referenced, not stored. The sole exception is the SMTP
+   password saved in Settings, which the relay must use unattended; it is
+   encrypted at rest, write-only through the API, and documented in §6.
 
 ## 2. Identity and authentication
 
@@ -88,8 +90,17 @@ See [roles.md](roles.md) for the human-facing description.
 
 ## 5. Transport
 
-- All external traffic terminates TLS at a reverse proxy. The gateway sets HSTS
-  at the proxy layer; the application emits `X-Content-Type-Options`,
+- All external traffic terminates TLS at the gateway by default
+  (`PATCHTRACK_TLS_ENABLED=true`). On first start the gateway generates a
+  self-signed certificate so an installation is never exposed over plain HTTP;
+  an administrator replaces it with the organisation's certificate in
+  **Settings → HTTPS certificate**. The upload is validated (parseable,
+  currently valid, key matches), written atomically with the key mode 0600,
+  loaded into the live listener, and audited as `settings.tls_updated` with
+  public metadata only. TLS 1.2 is the floor. Alternatively an external proxy
+  terminates TLS (`PATCHTRACK_TLS_ENABLED=false`).
+- The gateway emits `Strict-Transport-Security` itself whenever a request
+  arrives over HTTPS; the application also emits `X-Content-Type-Options`,
   `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`,
   `Permissions-Policy` and a strict `Content-Security-Policy`
   (`default-src 'self'`, no inline scripts, `frame-ancestors 'none'`).
@@ -119,13 +130,84 @@ the host — not to disable verification. See
 
 | Secret | Where it lives |
 |--------|----------------|
-| Database password | `.env` / compose secret, mode 0600, loaded via `POSTGRES_PASSWORD` |
-| `PATCHTRACK_JWT_SECRET` | 32+ bytes hex, generated at install |
-| `PATCHTRACK_SERVICE_TOKEN` | 32+ bytes hex, generated at install |
+| Database password | `.env` / compose secret, mode 0600, loaded via `POSTGRES_PASSWORD`, or a `PATCHTRACK_DATABASE_URL_FILE` secret |
+| `PATCHTRACK_JWT_SECRET` | 32+ bytes hex, generated at install; environment or `PATCHTRACK_JWT_SECRET_FILE` |
+| `PATCHTRACK_SERVICE_TOKEN` | 32+ bytes hex, generated at install; environment or `PATCHTRACK_SERVICE_TOKEN_FILE` |
 | Integration credentials | Referenced by `secret_ref` (`env:NAME` or `file:/path`), resolved at collection time |
-| SMTP password | Environment only |
+| SMTP password | Encrypted in `shared.app_settings` (`smtp_relay`) when saved in Settings; write-only. Environment fallback for installations that have not saved one |
+| TLS private key | `PATCHTRACK_TLS_DIR` (default `/var/lib/patchtrack/tls`), mode 0600, never in the database and never returned by the API |
 | Grafana DB password | Set when creating the read-only role; supplied at role creation, never defaulted |
 | Grafana admin password | `GF_ADMIN_PASSWORD` at install |
+
+The SMTP password is the one credential stored in the database, because the
+relay must authenticate unattended. It is encrypted with Fernet before it is
+written: the key is derived from `PATCHTRACK_SECRETS_KEY`, falling back to the
+JWT secret, and is never stored beside the ciphertext. The API accepts the
+password on write only and never returns it; audit events record that it
+changed, not its value. Rotating either key makes the saved password
+unreadable — the next delivery reports a missing password and Settings asks for
+it again. An installation that does not want this credential in the database
+can leave the Settings relay unsaved and continue to supply
+`PATCHTRACK_SMTP_PASSWORD` from the environment.
+
+### Secret files
+
+Storing a credential in `.env` also places it in every service's environment,
+where it is visible to `docker inspect` and `/proc/<pid>/environ`. The
+following variables have a `_FILE` sibling that reads the value from a mounted
+file instead:
+
+`PATCHTRACK_DATABASE_URL_FILE`, `PATCHTRACK_JWT_SECRET_FILE`,
+`PATCHTRACK_SECRETS_KEY_FILE`, `PATCHTRACK_SERVICE_TOKEN_FILE` and
+`PATCHTRACK_SMTP_PASSWORD_FILE`.
+
+The file value takes precedence over the plain variable. A missing or
+unreadable file aborts start-up rather than silently falling back; an empty
+`_FILE` variable means the option is not configured. Files with group or other
+permissions are logged (never their content). The setting is still decrypted
+into process memory, so this reduces the number of places a credential is
+written, not the authority of root on a running host.
+
+**Containers.** `docker-compose.secrets.yml` is an opt-in override:
+
+```bash
+sudo install -d -m 0750 -o root -g patchtrack /etc/patchtrack/secrets
+# create database_url, jwt_secret, service_token and postgres_password,
+# mode 0640 root:patchtrack (the directory is group-traversable), then:
+docker compose -f docker-compose.yml -f docker-compose.secrets.yml up -d
+```
+
+The four files are mounted read-only at `/run/secrets/`, the application reads
+the `*_FILE` variables, and the plain variables are masked in the container
+environment. Remove the plain values from `.env` afterwards so the credentials
+are not retained there. The official PostgreSQL image uses
+`POSTGRES_PASSWORD_FILE`; Red Hat's image is not documented to support the file
+form, so keep `POSTGRES_PASSWORD` in `.env` if you use that image.
+
+**Native systemd.** A drop-in per deployment can expose ordinary files:
+
+```ini
+# /etc/systemd/system/patchtrack@.service.d/secrets.conf
+[Service]
+LoadCredential=database_url:/etc/patchtrack/secrets/database_url
+LoadCredential=jwt_secret:/etc/patchtrack/secrets/jwt_secret
+LoadCredential=service_token:/etc/patchtrack/secrets/service_token
+Environment=PATCHTRACK_DATABASE_URL_FILE=%d/database_url
+Environment=PATCHTRACK_JWT_SECRET_FILE=%d/jwt_secret
+Environment=PATCHTRACK_SERVICE_TOKEN_FILE=%d/service_token
+```
+
+`%d` is the unit's private credential directory. For encryption at rest,
+create the credentials with `systemd-creds encrypt --name=<name> <plain>
+<plain>.cred` (optionally `--with-key=host+tpm2`) and use
+`LoadCredentialEncrypted=` instead of `LoadCredential=`; systemd decrypts them
+for this host only. The plain source files can then be removed. Without a TPM,
+the host key protects backups and stolen disks, not a live root compromise.
+
+Neither approach protects against root on the running host: a file-based
+secret is read by the service account, and the value is present in process
+memory while the service runs. The benefit is that it is no longer in `.env`,
+in `docker inspect`, or in a copy of the environment.
 
 `secrets.validate_reference` rejects any `secret_ref` that is not empty and does
 not start with `env:` or `file:`, so a credential pasted into the integration
@@ -143,6 +225,7 @@ form is refused with an explanation rather than stored.
 | Service token | Restart every service with the new value; the gateway and backends must agree. |
 | Database password | Update `.env` and the PostgreSQL role, then restart. |
 | Integration credential | Update the referenced environment/file; no restart needed. |
+| `PATCHTRACK_SECRETS_KEY` or the JWT secret used as its fallback | Saved UI credentials (the SMTP password) can no longer be decrypted; re-enter the password in Settings. |
 | Grafana DB password | `ALTER ROLE`, update `.env`, restart Grafana. |
 
 Rotate all of them after any suspected exposure, and on the schedule required
@@ -158,7 +241,9 @@ the audit register:
 1. PostgreSQL application role password (and any Grafana DB role password).
 2. `PATCHTRACK_JWT_SECRET` and `PATCHTRACK_SERVICE_TOKEN`.
 3. Grafana admin password and any integration credentials in `.env`.
-4. Re-issue the TLS certificate and key if the key was inside the archive.
+4. Re-issue the TLS certificate and key if the key was inside the archive,
+   then install the pair at **Settings → HTTPS certificate**; the replaced key
+   was readable by whoever held the archive, so it must not be reused.
 5. Check PostgreSQL and Grafana access logs for use of the old credentials.
 
 New releases are built with `scripts/build-release.sh`, which archives only
@@ -186,7 +271,8 @@ Recorded events include:
 - `compliance.snapshot_created`, `compliance.daily_job`;
 - asset exclude/include, reconciliation resolution;
 - `report.requested`, report generation and delivery outcome;
-- `schedule.executed`, `settings.updated`.
+- `schedule.executed`, `settings.updated`, `scheduler.updated`,
+  `settings.smtp_tested`, `settings.tls_updated` (certificate metadata only).
 
 Each row carries actor, role, target, outcome, source IP, service and time. No
 request body is stored.

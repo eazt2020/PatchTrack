@@ -43,11 +43,11 @@ Environment=PATCHTRACK_SERVICE=%i
 Environment=PYTHONPATH=/opt/patchtrack/services/common:/opt/patchtrack/services
 WorkingDirectory=/opt/patchtrack
 
-ExecStart=/opt/patchtrack-venv/bin/python -m uvicorn app.main:app \
+ExecStart=/opt/patchtrack-venv/bin/python -m patchtrack_common.serve app.main:app \
     --app-dir /opt/patchtrack/services/%i \
     --host 127.0.0.1 --port ${PORT} \
     --proxy-headers --forwarded-allow-ips ${PATCHTRACK_FORWARDED_IPS} \
-    --no-server-header --log-level ${PATCHTRACK_LOG_LEVEL}
+    --log-level ${PATCHTRACK_LOG_LEVEL}
 
 Restart=on-failure
 RestartSec=5

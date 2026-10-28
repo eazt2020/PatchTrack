@@ -66,9 +66,39 @@ Grafana, psql and maintenance. If you run several instances of anything, raise
 |----------|-------|
 | `PATCHTRACK_JWT_SECRET` | Required, ≥ 32 characters. Rotating invalidates access tokens only. |
 | `PATCHTRACK_SERVICE_TOKEN` | Required in production. Empty disables trusted-header auth (fails closed). |
+| `PATCHTRACK_SECRETS_KEY` | Optional. Encrypts credentials saved through the UI (currently the SMTP password); falls back to `PATCHTRACK_JWT_SECRET`. Set a distinct value so rotating the JWT secret does not invalidate the saved SMTP password. |
 
 Generate with `openssl rand -hex 32`. Both must be identical across all five
 services.
+
+### Secret files
+
+Any of the values above, plus the SMTP environment fallback, can be supplied
+from a file instead of the environment. Set the `_FILE` sibling and the file's
+content becomes the value; the trailing newline is removed. A file value wins
+over the plain variable, and explicit constructor arguments still win over
+both.
+
+| Plain variable | File variable |
+|----------------|---------------|
+| `PATCHTRACK_DATABASE_URL` | `PATCHTRACK_DATABASE_URL_FILE` |
+| `PATCHTRACK_JWT_SECRET` | `PATCHTRACK_JWT_SECRET_FILE` |
+| `PATCHTRACK_SECRETS_KEY` | `PATCHTRACK_SECRETS_KEY_FILE` |
+| `PATCHTRACK_SERVICE_TOKEN` | `PATCHTRACK_SERVICE_TOKEN_FILE` |
+| `PATCHTRACK_SMTP_PASSWORD` | `PATCHTRACK_SMTP_PASSWORD_FILE` |
+
+The database URL file must contain the complete SQLAlchemy URL, including the
+password. A missing, unreadable, non-UTF-8 or oversized file stops the service
+at start-up rather than falling back to the plain variable; an empty
+`*_FILE` variable means "not configured". Files readable by group or other
+users are reported in the log without their content.
+
+For Compose, the opt-in `docker-compose.secrets.yml` mounts
+`/etc/patchtrack/secrets/{database_url,jwt_secret,service_token,postgres_password}`
+as secrets and masks the plain variables. For systemd, use
+`LoadCredential=` or `LoadCredentialEncrypted=` and point the `_FILE`
+variables at `%d/<name>`; see
+[security.md](security.md#secret-files).
 
 ## 4. Reporting
 
@@ -76,12 +106,20 @@ services.
 |----------|---------|-------|
 | `PATCHTRACK_REPORT_DIR` | `/var/lib/patchtrack/reports` | Must be the mounted volume path in containers |
 | `PATCHTRACK_REPORT_RETENTION_DAYS` | 2555 | File retention; metadata is kept |
-| `PATCHTRACK_SMTP_HOST` | empty | Empty disables delivery; reports still generate |
-| `PATCHTRACK_SMTP_PORT` | 587 | |
-| `PATCHTRACK_SMTP_USERNAME` | empty | |
-| `PATCHTRACK_SMTP_PASSWORD` | empty | Environment only, never the database |
-| `PATCHTRACK_SMTP_STARTTLS` | `true` | Do not turn off; install the relay CA instead |
-| `PATCHTRACK_SMTP_SENDER` | `patchtrack@localhost` | Must be accepted by your relay |
+| `PATCHTRACK_SMTP_HOST` | empty | Fallback only: empty disables delivery until a relay is saved in Settings; reports still generate |
+| `PATCHTRACK_SMTP_PORT` | 587 | Fallback only |
+| `PATCHTRACK_SMTP_USERNAME` | empty | Fallback only |
+| `PATCHTRACK_SMTP_PASSWORD` | empty | Fallback only; a password saved in Settings is encrypted at rest |
+| `PATCHTRACK_SMTP_STARTTLS` | `true` | Fallback only. Do not turn off; install the relay CA instead |
+| `PATCHTRACK_SMTP_SENDER` | `patchtrack@localhost` | Fallback only. Must be accepted by your relay |
+
+The SMTP relay is normally configured at **Administration → Settings → Email
+delivery**. The saved row in `shared.app_settings` (`smtp_relay`) is
+authoritative over the environment and applies to the next delivery without a
+restart. The password is write-only: it is encrypted with
+`PATCHTRACK_SECRETS_KEY` (or the JWT secret when that is unset) and no endpoint
+returns it. Changing either key makes the stored password unreadable; the
+Settings screen reports that and asks for the password again.
 
 ### Dynamic settings (database, no restart)
 
@@ -94,6 +132,9 @@ restarting anything.
 | Organisation name | empty | PDF report branding |
 | Environment and business-service lists | empty (free text) | Placement editor vocabulary and display names |
 | Audit trail retention | 2555 days | Events older than the window are deleted by the daily job; range 30–36,500 days |
+| Report file retention | 2555 days | Files older than the window are deleted by the daily report-retention job |
+| SMTP relay | environment values | Host, port, STARTTLS, username, password (encrypted) and sender used for scheduled report email |
+| System timezone | UTC | Calendar day used by schedules, snapshots, period boundaries and report timestamps |
 
 Audit retention is applied by `POST /jobs/audit-purge` on the identity service,
 which the in-app scheduler runs once a day (`PATCHTRACK_AUDIT_PURGE_INTERVAL`).
@@ -127,6 +168,11 @@ work that just ran. A failed run is retried after
 `PATCHTRACK_SCHEDULER_RETRY_SECONDS`, not after the full interval. Each job
 holds a PostgreSQL advisory lock while it runs, so replicas do not duplicate
 work.
+
+These values are **initial defaults**. Administrators change a job's interval
+and enabled flag at **Reporting → Schedules → System jobs**; the stored row is
+then authoritative and a restart does not reset it. Editing the environment
+variable affects only a job whose row has not yet been created.
 
 ## 6. Collection
 
@@ -175,8 +221,57 @@ into logs.
 
 ## 8. TLS termination
 
-The application speaks HTTP internally and expects a TLS proxy in front of the
-gateway. Minimal nginx example:
+New installations ship with `PATCHTRACK_TLS_ENABLED=true`, so the **gateway
+terminates TLS itself** and serves HTTPS on its published port. Backend
+services still speak HTTP on the private network; only the gateway is
+published. An upgraded deployment whose existing `.env` predates the setting
+stays on plain HTTP until it adds the variable; a reverse proxy deployment
+sets it to `false` deliberately.
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `PATCHTRACK_TLS_ENABLED` | `true` in `.env.example`; `false` when unset | Gateway serves HTTPS. Set `false` only when a reverse proxy terminates TLS; set it explicitly in an upgraded deployment's `.env` (new installation files ship `true`) |
+| `PATCHTRACK_TLS_DIR` | `/var/lib/patchtrack/tls` | Directory holding the certificate and key; mount it as a volume |
+| `PATCHTRACK_TLS_CERT_FILE` | `server.crt` | Relative names resolve under `PATCHTRACK_TLS_DIR` |
+| `PATCHTRACK_TLS_KEY_FILE` | `server.key` | Relative names resolve under `PATCHTRACK_TLS_DIR`; must not be readable by others |
+| `PATCHTRACK_TLS_HOSTNAME` | host name | DNS name placed in the generated certificate |
+
+### First start
+
+On the first start with TLS enabled and no material present, the gateway
+generates a self-signed certificate (RSA 2048, SHA-256, 825 days, valid for
+`PATCHTRACK_TLS_HOSTNAME`, `localhost`, `127.0.0.1` and `::1`) and writes the
+key as mode 0600. A new installation therefore never serves the sign-in page
+over plain HTTP. The browser warns that the certificate is not trusted until
+the organisation's own certificate is installed.
+
+The generated certificate is **not** replaced on later starts. If only one of
+the two files exists, the gateway refuses to start rather than overwrite the
+remaining half; restore the pair or empty the directory deliberately.
+
+### Install your own certificate
+
+**Administration → Settings → HTTPS certificate** accepts a PEM certificate
+(chain included if applicable) and its unencrypted PEM private key (PKCS#8 or
+traditional). Before writing anything the gateway checks that the certificate
+parses, is currently valid, and matches the key; a passphrase-protected key is
+refused. Both files are replaced atomically, the key is written mode 0600, and
+the new certificate is loaded into the live listener — new connections use it
+without a restart. The public metadata (subject, issuer, validity, SHA-256) is
+shown in Settings and written to the `settings.tls_updated` audit event; the
+key is never returned or logged.
+
+TLS 1.2 is the floor. HSTS is sent by the gateway whenever a request arrives
+over HTTPS. No TLS material is stored in the database.
+
+The same files can be replaced out of band in `PATCHTRACK_TLS_DIR`; restart the
+gateway afterwards.
+
+### External reverse proxy
+
+Set `PATCHTRACK_TLS_ENABLED=false` when a reverse proxy terminates TLS. The
+gateway then speaks HTTP on its port as before, and the HTTPS tab reports that
+certificates are managed externally. Minimal nginx example:
 
 ```nginx
 server {

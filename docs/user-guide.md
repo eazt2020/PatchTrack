@@ -382,7 +382,25 @@ timezone is chosen, the deployment timezone applies (see below).
 - The report covers the period that **ended**, not the one in progress.
 - A scheduled period runs at most once, even if two scheduler instances race.
 - Email delivery is recorded separately. If the mail fails, the report is still
-  generated and downloadable; ask for a resend rather than regenerating.
+  generated and downloadable; ask for a resend rather than regenerating. The
+  relay itself is set under **Settings → Email delivery**.
+
+**System jobs** on the same screen lists every background job: the four
+collection connectors, the daily compliance snapshot, the audit-retention
+purge, the report schedule tick and report-file retention. Each row shows its
+interval, whether it is enabled, its next run and its last result.
+
+An administrator can change a job's interval (in seconds, minimum 10) or switch
+it off, then press **Save**. The change is stored in the database and takes
+effect on the scheduler's next poll — no restart is required. A new interval is
+counted from the moment it is saved. Disabling a job does not delete collected
+data; it stops new runs until it is enabled again, when the next run is
+scheduled one interval out.
+
+The interval shown initially comes from the service environment
+(`PATCHTRACK_*_INTERVAL`). Once a job has been edited in the screen, the stored
+value is authoritative and the environment variable is only the default for a
+fresh installation.
 
 ## 10. Administration
 
@@ -393,7 +411,7 @@ timezone is chosen, the deployment timezone applies (see below).
 | Users & roles | Administrator | Accounts, roles, password resets |
 | Audit trail | Administrator | Who did what, when |
 | Operational health | Operations | Integration status and manual collection |
-| Settings | Administrator | Report branding (organisation name, logo, preparer and concurrence); environment and business-service lists; report file retention; audit trail retention |
+| Settings | Administrator | Report branding (organisation name, logo, preparer and concurrence); environment and business-service lists; report file retention; audit trail retention; SMTP relay for emailed reports; HTTPS certificate and key |
 
 ### Testing an integration
 
@@ -484,6 +502,58 @@ Only the PDF is deleted. The report record, its SHA-256, size and status remain
 as an archive tombstone, so "this is the report we issued for October" is still
 verifiable after the file is gone. Lengthening the window cannot restore a file
 that was already purged. Every change is audited as `settings.updated`.
+
+### Configuring email delivery
+
+**Settings → Email delivery** configures the SMTP relay used for scheduled
+reports: host, port, STARTTLS, username, password and sender address. Saving
+applies to the next scheduled run without a restart and does not require
+editing a file on the server.
+
+- Leave the password field blank to keep the saved one. Tick **Remove the
+  saved password** only when the relay should accept mail without
+  authentication; clear the username too in that case, or delivery reports that
+  the password is missing.
+- The password is write-only. It is encrypted at rest and no screen or API
+  returns it; a change is recorded in the audit trail without the value.
+- **Send test email** sends a short message to the address you enter, using the
+  saved relay, so a mail-flow problem can be separated from a report problem.
+- Until a relay is saved here, the deployment's environment settings are used.
+  Saving the first one makes this screen authoritative; if the username is
+  unchanged, the environment password is carried over so authentication is not
+  silently lost.
+- If the secrets key changed (for example the JWT secret was rotated), the
+  saved password can no longer be decrypted. The field says so and the next
+  delivery fails with an explanation; enter the password again.
+- Saving an empty host disables email delivery; reports are still generated and
+  downloadable.
+
+### Installing your own HTTPS certificate
+
+The gateway serves HTTPS from the moment the deployment starts. Until the
+organisation's certificate is installed it uses a self-signed one generated on
+first start, so browsers show a warning — that is expected on a fresh
+installation, not a sign that the connection is unencrypted.
+
+**Settings → HTTPS certificate** shows which certificate is being served
+(subject, issuer, validity and SHA-256 fingerprint) and accepts a replacement:
+
+- Upload the PEM certificate, including the intermediate chain if your CA
+  issues one, and the matching unencrypted private key (PEM, PKCS#8 or
+  traditional). Passphrase-protected keys are refused because the service
+  cannot prompt during start-up.
+- The pair is checked before anything is written: both must parse, the
+  certificate must be currently valid, and the key must match it. An error
+  leaves the existing certificate untouched.
+- A successful upload takes effect for new connections immediately — no
+  restart and no dropped sessions. The private key is written to the TLS
+  directory with owner-only permissions; it is never displayed, downloaded or
+  written to the audit trail. The event `settings.tls_updated` records the
+  subject, issuer, expiry and fingerprint.
+- Replacing an expiring certificate follows the same steps. The tab shows the
+  expiry date so renewal can be planned.
+- If the deployment uses an external reverse proxy, the tab says that
+  certificates are managed externally; install the certificate there instead.
 
 ### Configuring audit trail retention
 

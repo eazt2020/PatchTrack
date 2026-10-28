@@ -5,7 +5,7 @@
 ```bash
 cd /opt/patchtrack
 docker compose ps
-curl -fsS http://127.0.0.1:8005/healthz
+curl -fsSk https://127.0.0.1:8005/healthz
 ```
 
 Then in the UI:
@@ -78,9 +78,15 @@ PATCHTRACK_REPORT_TICK_INTERVAL=60
 PATCHTRACK_REPORT_PURGE_INTERVAL=86400
 ```
 
-Changing an interval requires restarting that service. Setting
+Changing an environment value requires restarting that service. Setting
 `PATCHTRACK_SCHEDULER_ENABLED=false` pauses all scheduled work without
 disabling the HTTP job endpoints.
+
+These environment values are the **initial defaults**. An administrator can
+change a job's interval or switch it off at **Reporting → Schedules → System
+jobs**; the stored configuration takes effect on the next poll without a
+restart and survives restarts. The environment value is used only until the
+job's row exists.
 
 The audit retention window itself is configured in **Settings → Retention →
 Audit trail retention** and stored in the database; the identity scheduler only
@@ -105,8 +111,8 @@ function the scheduler calls, so a manual run is equivalent to a due run.
 Check scheduled state in the database:
 
 ```sql
-SELECT name, interval_seconds, next_run_at, last_started_at,
-       last_finished_at, last_status, left(last_message, 120) AS message
+SELECT name, enabled, interval_seconds, next_run_at, last_started_at,
+       last_finished_at, last_status, updated_by, left(last_message, 120) AS message
 FROM shared.scheduled_jobs ORDER BY name;
 ```
 
@@ -117,6 +123,49 @@ each service's journal (`journalctl -u 'patchtrack@*' --since yesterday`,
 
 ## 4. Common operations
 
+### Configure or test the report mail relay
+
+UI: **Administration → Settings → Email delivery**. Save the relay, then use
+**Send test email** to prove the path end to end. This is preferred over editing
+`.env`, because a saved relay applies without a restart.
+
+The API requires the administrator permission `settings:manage`; the saved
+password is never returned. To inspect the effective configuration (no
+credentials in the response):
+
+```bash
+curl -fsSk https://127.0.0.1:8005/api/reporting/settings/smtp \
+  -H "Authorization: Bearer $(cat /etc/patchtrack/secrets/service.token)" | jq
+```
+
+`source: database` means the Settings row is in use; `source: environment`
+means the `PATCHTRACK_SMTP_*` fallback is still in use. A delivery failure
+`delivery_attempts.detail` of "The SMTP password is not available" means the
+saved password can no longer be decrypted — usually because
+`PATCHTRACK_SECRETS_KEY` or the JWT secret was rotated. Re-enter the password
+in Settings; do not try to recover the ciphertext. Saving an empty host
+disables emailed reports while still generating them; deleting the `smtp_relay`
+row (only with administrator database access) returns the service to the
+environment fallback, and the next schedule tick picks that up.
+
+### Renew or replace the HTTPS certificate
+
+UI: **Administration → Settings → HTTPS certificate**. Upload the new PEM
+certificate (with its chain) and unencrypted private key. The pair is validated
+before it replaces anything, and new connections use it immediately — no
+restart. Do this before the expiry date shown on the tab.
+
+The private key is on disk at `/var/lib/patchtrack/tls/server.key` (mode 0600)
+inside the `tls` volume. To inspect the served certificate without trusting it:
+
+```bash
+openssl s_client -connect 127.0.0.1:8005 -servername patchtrack.example.com \
+  </dev/null 2>/dev/null | openssl x509 -noout -subject -issuer -dates
+```
+
+If a certificate is placed in the directory out of band, restart the gateway to
+load it. Never copy a key into `.env`, the database or a release archive.
+
 ### Run a collection now
 
 UI: **Operational health → Run now**. Or:
@@ -124,13 +173,13 @@ UI: **Operational health → Run now**. Or:
 ```bash
 curl -fsS -X POST -H "Authorization: Bearer $(cat /etc/patchtrack/secrets/service.token)" \
   -H 'Content-Type: application/json' -d '{"integration":"satellite"}' \
-  http://127.0.0.1:8005/api/inventory/sync
+  https://127.0.0.1:8005/api/inventory/sync
 ```
 
 ### See why a collection failed
 
 ```bash
-curl -fsS "http://127.0.0.1:8005/api/inventory/sync-runs?limit=5" \
+curl -fsSk "https://127.0.0.1:8005/api/inventory/sync-runs?limit=5" \
   -H "Authorization: Bearer $(cat /etc/patchtrack/secrets/service.token)" | jq
 ```
 
@@ -141,7 +190,7 @@ The `error_summary` is deliberately short and free of secrets.
 Activating a policy version re-evaluates automatically. To force it:
 
 ```bash
-curl -fsS -X POST -H "Authorization: Bearer …" http://127.0.0.1:8005/api/compliance/evaluate
+curl -fsSk -X POST -H "Authorization: Bearer …" https://127.0.0.1:8005/api/compliance/evaluate
 ```
 
 ### Inspect local placement overrides
@@ -204,7 +253,7 @@ UI: **Reports → Capture snapshot**, or:
 ```bash
 curl -fsS -X POST -H "Authorization: Bearer …" -H 'Content-Type: application/json' \
   -d '{"scope":"monthly","reporting_month":"2026-09"}' \
-  http://127.0.0.1:8005/api/compliance/snapshots
+  https://127.0.0.1:8005/api/compliance/snapshots
 ```
 
 A monthly snapshot captures the **current** state, labelled with the period.
@@ -269,7 +318,8 @@ What the unit enforces, so you do not have to add it back:
 
 - `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `PrivateDevices`,
   `NoNewPrivileges`, empty `CapabilityBoundingSet`/`AmbientCapabilities`;
-- `ReadWritePaths=/var/lib/patchtrack` only — reports and the Solaris inbox;
+- `ReadWritePaths=/var/lib/patchtrack` only — reports, the Solaris inbox and
+  the TLS directory;
 - `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX` (PostgreSQL over TCP or a
   local socket);
 - `Restart=on-failure`, `RestartSec=5`, `TimeoutStopSec=30`.
@@ -301,7 +351,9 @@ docker compose stop grafana               # safe at any time
 ```
 
 Maintenance that requires downtime: schema migrations, a database restore, and
-changing `PATCHTRACK_SERVICE_TOKEN` (all services must agree).
+changing `PATCHTRACK_SERVICE_TOKEN` (all services must agree). With secret
+files, replace the file content and restart the consuming services; the value
+is read once at start-up.
 
 ## 8. Monitoring to configure
 

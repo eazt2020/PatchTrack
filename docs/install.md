@@ -15,7 +15,7 @@ SELinux, and nothing requires outbound internet access at run time (see
 | CPU / RAM | 2 vCPU / 4 GB minimum; 4 vCPU / 8 GB for more than ~20,000 assets |
 | Disk | 20 GB for the OS and images, plus ~1 KB per asset per assessment in PostgreSQL and ~1 MB per report |
 | Network out | TCP/443 to AssetExplorer, Satellite, SCCM; TCP/587 to SMTP |
-| Network in | TCP/443 to the reverse proxy from users |
+| Network in | TCP/8005 to the gateway from users (the gateway serves HTTPS itself); TCP/443 only when an external reverse proxy terminates TLS |
 | Database | Supplied by the bundled `postgres` service, or an external PostgreSQL 13+ with TLS |
 
 Check the runtime:
@@ -52,7 +52,8 @@ sudo install -d -m 0750 -o patchtrack -g patchtrack \
   /opt/patchtrack \
   /etc/patchtrack \
   /var/lib/patchtrack/reports \
-  /var/lib/patchtrack/solaris-inbox
+  /var/lib/patchtrack/solaris-inbox \
+  /var/lib/patchtrack/tls
 
 sudo install -d -m 0700 -o patchtrack -g patchtrack /etc/patchtrack/secrets
 ```
@@ -97,6 +98,14 @@ sudo ln -s /etc/patchtrack/.env /opt/patchtrack/.env
 ```
 
 `.env` is ignored by git; verify with `git check-ignore -v .env`.
+
+Optional but recommended for production: keep the bootstrap credentials out
+of `.env` by using file-backed secrets. `docker-compose.secrets.yml` mounts
+`database_url`, `jwt_secret`, `service_token` and `postgres_password` from
+`/etc/patchtrack/secrets/`; see
+[security.md](security.md#secret-files) for the file layout and the systemd
+equivalent. Use it from the start, or migrate to it after the stack is
+verified and then remove the plain values from `.env`.
 
 ## 5. Start the database and apply migrations
 
@@ -143,15 +152,20 @@ sudo -u patchtrack docker compose ps
 Every service must show `healthy`:
 
 ```bash
-for s in identity inventory compliance reporting gateway; do
+for s in identity inventory compliance reporting; do
   docker compose exec -T "$s" \
     python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8000/healthz').read().decode())"
 done
+docker compose exec -T gateway \
+  python -c "import ssl,urllib.request;print(urllib.request.urlopen('https://127.0.0.1:8000/healthz', context=ssl._create_unverified_context()).read().decode())"
 ```
 
-The gateway listens on `127.0.0.1:8005` by default. Put a TLS reverse proxy in
-front of it (see [configuration.md](configuration.md#7-tls-termination)) and
-keep the bind address on loopback.
+The gateway serves HTTPS on `127.0.0.1:8005` by default. On first start it
+generates a self-signed certificate under the `tls` volume, so even a brand-new
+installation is not exposed over plain HTTP; the browser warning disappears
+once you install your own certificate (step 10). Keep the bind address on
+loopback unless a reverse proxy is in front (see
+[configuration.md](configuration.md#8-tls-termination)).
 
 ## 8. Create the first administrator
 
@@ -184,6 +198,16 @@ Per-source detail: [AssetExplorer](integration-assetexplorer.md),
 - **Administration → Compliance policy**: review target percentage, freshness
   threshold and blocking severities. Create a version, then activate it.
 - **Administration → Settings**: organisation name (used on PDF reports).
+- **Administration → Settings → Email delivery**: SMTP relay used for scheduled
+  reports; use **Send test email** to confirm the path. The `PATCHTRACK_SMTP_*`
+  variables are only the fallback until a relay is saved here.
+- **Administration → Settings → HTTPS certificate**: upload the organisation's
+  PEM certificate (with its chain) and the unencrypted private key. Until then
+  the gateway is serving the self-signed certificate generated at first start,
+  and browsers warn. The replacement is checked, applied to the live listener
+  without a restart, and recorded as `settings.tls_updated`. If an external
+  proxy terminates TLS instead, this tab reports that certificates are managed
+  externally.
 
 ## 11. Schedule collection, snapshots and reports
 
@@ -228,7 +252,7 @@ loopback or behind the proxy with authentication.
 | Check | Expected |
 |-------|----------|
 | `docker compose ps` | postgres, five services healthy; migrate exited 0 |
-| `curl -s http://127.0.0.1:8005/healthz` | `{"status":"ok","service":"gateway"}` |
+| `curl -sk https://127.0.0.1:8005/healthz` | `{"status":"ok","service":"gateway"}` (use `-k` until your own certificate is installed) |
 | Sign in | Succeeds; the UI shows the dashboard |
 | `GET /api/compliance/summary` | Returns KPIs (zeros and `null` percentage before the first collection) |
 | Audit trail | Contains your sign-in |
@@ -261,7 +285,8 @@ PATCHTRACK_DATABASE_URL=… /opt/patchtrack-venv/bin/python -m patchtrack_common
 The container deployment is the supported one; native installation is
 documented for environments where containers are prohibited. Unit files are
 provided for the latter; the operator still supplies the SELinux contexts for
-`/var/lib/patchtrack` and the TLS termination. See
+`/var/lib/patchtrack` (including `tls/`, where the gateway writes its generated
+certificate) and, if not using the gateway's own HTTPS, the TLS termination. See
 [operations-runbook.md](operations-runbook.md#5-running-natively-under-systemd).
 
 Two unit files ship in `deploy/systemd/`:
