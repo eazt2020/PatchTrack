@@ -69,7 +69,7 @@ The unit tests are where the compliance rules are pinned. Any change to
 `tests/integration/test_report_branding.py` — 6 tests,
 `tests/integration/test_report_retention.py` — 6 tests,
 `tests/integration/test_session_revocation.py` — 10 tests, and
-`tests/integration/test_scheduler_state.py` — 5 tests, all against a real,
+`tests/integration/test_scheduler_state.py` — 6 tests, all against a real,
 freshly created database.
 
 The fixture creates `patchtrack_test`, applies every migration, and drops it at

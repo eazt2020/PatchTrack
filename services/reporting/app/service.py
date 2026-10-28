@@ -479,7 +479,7 @@ def purge_expired() -> int:
         "WHERE expires_at IS NOT NULL AND expires_at < now() "
         "AND status = 'completed'"
     )
-    removed = 0
+    removed_ids = []
     for row in expired:
         path = Path(row["file_path"])
         if path.exists():
@@ -487,11 +487,17 @@ def purge_expired() -> int:
                 path.unlink()
             except OSError:
                 continue
+        removed_ids.append(row["id"])
+    if removed_ids:
+        # One statement rather than one connection per report; a retention
+        # sweep can expire many files at once.
         with connection() as conn:
             conn.execute(
-                text("UPDATE reporting.reports SET file_path = '', "
-                     "error_summary = 'Purged by retention policy' WHERE id = :id"),
-                {"id": row["id"]},
+                text(
+                    "UPDATE reporting.reports SET file_path = '', "
+                    "error_summary = 'Purged by retention policy' "
+                    "WHERE id = ANY(:ids)"
+                ),
+                {"ids": removed_ids},
             )
-        removed += 1
-    return removed
+    return len(removed_ids)

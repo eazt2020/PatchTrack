@@ -222,13 +222,16 @@ Saving the setting applies it immediately, with no restart:
 1. every completed report's `expires_at` is recomputed from its
    `completed_at` plus the new window;
 2. `purge_expired` runs in the same request, so lowering the window deletes
-   already-expired files at once rather than waiting for the daily tick;
+   already-expired files at once rather than waiting for the daily retention
+   job;
 3. the change is audited as `settings.updated` with the new window and the
    number of files purged.
 
 A newly generated report records `expires_at` at completion using the value in
-force at that moment. The daily maintenance job keeps purging later, so the
-window is enforced even if no one opens Settings.
+force at that moment. The `reporting.retention` job keeps purging daily
+(`PATCHTRACK_REPORT_PURGE_INTERVAL`), so the window is enforced even if no one
+opens Settings. Retention is separate from the schedule tick: a filesystem
+sweep every minute would scan the report table for work that is rarely there.
 
 `purge_expired` deletes files past `expires_at` and reports the count. Archived
 metadata, the SHA-256 and the size remain, with the row marked as purged, so an

@@ -93,6 +93,7 @@ class Settings(BaseSettings):
     daily_snapshot_interval: int = Field(86400, ge=300)
     audit_purge_interval: int = Field(86400, ge=300)
     report_tick_interval: int = Field(60, ge=10)
+    report_purge_interval: int = Field(86400, ge=300)
 
     identity_url: str = "http://127.0.0.1:8001"
     inventory_url: str = "http://127.0.0.1:8002"

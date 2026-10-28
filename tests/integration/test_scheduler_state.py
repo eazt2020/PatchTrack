@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import text
 
-from patchtrack_common.scheduler import ScheduledJob, run_scheduled_job
+from patchtrack_common.scheduler import ScheduledJob, due_jobs, run_scheduled_job
 
 
 def clear_job(engine, name: str) -> None:
@@ -85,6 +85,29 @@ def test_a_reported_failure_is_not_a_success(engine):
     )
 
     assert job_state(engine, name)["last_status"] == "failure"
+
+
+def test_due_jobs_selects_missing_and_past_in_one_query(engine):
+    missing = ScheduledJob("test.scheduler.due.missing", 60, lambda: None)
+    future = ScheduledJob("test.scheduler.due.future", 60, lambda: None)
+    past = ScheduledJob("test.scheduler.due.past", 60, lambda: None)
+    with engine.begin() as conn:
+        conn.execute(
+            text("DELETE FROM shared.scheduled_jobs WHERE name = ANY(:names)"),
+            {"names": [missing.name, future.name, past.name]},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO shared.scheduled_jobs (name, interval_seconds, next_run_at) "
+                "VALUES (:f, 60, now() + interval '1 hour'), "
+                "       (:p, 60, now() - interval '1 hour')"
+            ),
+            {"f": future.name, "p": past.name},
+        )
+
+    ready = due_jobs([missing, future, past])
+
+    assert {job.name for job in ready} == {missing.name, past.name}
 
 
 def test_a_second_runner_cannot_execute_the_same_due_job(engine):

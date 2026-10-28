@@ -119,7 +119,8 @@ restarting the service that owns the job.
 | `PATCHTRACK_SYNC_SOLARIS_INTERVAL` | `604800` (7 d) | Inventory |
 | `PATCHTRACK_DAILY_SNAPSHOT_INTERVAL` | `86400` (24 h) | Compliance snapshot and refresh |
 | `PATCHTRACK_AUDIT_PURGE_INTERVAL` | `86400` (24 h) | Identity audit-retention purge |
-| `PATCHTRACK_REPORT_TICK_INTERVAL` | `60` (1 min) | Reporting schedules and report retention |
+| `PATCHTRACK_REPORT_TICK_INTERVAL` | `60` (1 min) | Reporting schedules |
+| `PATCHTRACK_REPORT_PURGE_INTERVAL` | `86400` (24 h) | Report-file retention sweep |
 
 Due times are stored in `shared.scheduled_jobs`, so a restart does not replay
 work that just ran. A failed run is retried after

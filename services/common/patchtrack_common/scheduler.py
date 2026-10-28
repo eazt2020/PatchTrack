@@ -140,6 +140,27 @@ def _failed(result: Any) -> bool:
     return isinstance(result, dict) and result.get("status") == "failed"
 
 
+def due_jobs(jobs: Iterable[ScheduledJob]) -> list[ScheduledJob]:
+    """Return the jobs whose persisted next-run time has passed.
+
+    One query for the whole service, rather than one connection per job on
+    every poll. A job with no row has never run and is due.
+    """
+    jobs = list(jobs)
+    if not jobs:
+        return []
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT name, next_run_at IS NULL OR next_run_at <= now() AS due "
+                "FROM shared.scheduled_jobs WHERE name = ANY(:names)"
+            ),
+            {"names": [job.name for job in jobs]},
+        ).all()
+    state = {row[0]: bool(row[1]) for row in rows}
+    return [job for job in jobs if state.get(job.name, True)]
+
+
 def run_scheduled_job(job: ScheduledJob, *,
                       retry_seconds: int = 300) -> dict[str, Any]:
     """Run one job if it is due and no other instance holds it.
@@ -222,7 +243,12 @@ class InAppScheduler:
             pass
 
         while not self._stop.is_set():
-            for job in self.jobs:
+            try:
+                ready = await asyncio.to_thread(due_jobs, self.jobs)
+            except Exception:  # noqa: BLE001 - the loop must survive
+                log.exception("scheduler could not read due state")
+                ready = []
+            for job in ready:
                 if self._stop.is_set():
                     return
                 try:

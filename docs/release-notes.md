@@ -23,6 +23,18 @@
   is no longer read. `scripts/patchtrack-job.sh` remains as a manual tool for
   running one job immediately.
 
+### Performance
+
+- The scheduler reads due state for all of a service's jobs in one query per
+  poll instead of opening a connection per job.
+- Report-file retention is a daily `reporting.retention` job rather than part
+  of the 60-second schedule tick, so the report table is no longer scanned
+  every minute. The sweep marks all expired files in one statement instead of
+  one connection per file.
+- Migration `018_performance_indexes.sql` indexes the due-schedule lookup,
+  report-expiry sweep, report and sync-run orderings, and snapshot lookup by
+  period.
+
 ### Session and sign-in
 
 - **Signing out now revokes the access token.** Previously the gateway only

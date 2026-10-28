@@ -51,7 +51,7 @@ is attributed to it in the audit trail), never as a named human user.
 |---------|------|-----------------|
 | inventory | AssetExplorer, Satellite, SCCM and Solaris collection | 6 h, 6 h, 24 h, 7 d |
 | compliance | Daily snapshot and compliance refresh | 24 h |
-| reporting | Report schedules, report retention | 60 s |
+| reporting | Report schedules; report-file retention | 60 s; 24 h |
 | identity | Audit retention purge | 24 h |
 | gateway | none | — |
 
@@ -75,6 +75,7 @@ PATCHTRACK_SYNC_SOLARIS_INTERVAL=604800
 PATCHTRACK_DAILY_SNAPSHOT_INTERVAL=86400
 PATCHTRACK_AUDIT_PURGE_INTERVAL=86400
 PATCHTRACK_REPORT_TICK_INTERVAL=60
+PATCHTRACK_REPORT_PURGE_INTERVAL=86400
 ```
 
 Changing an interval requires restarting that service. Setting

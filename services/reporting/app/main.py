@@ -705,9 +705,8 @@ def execute_due_schedules(
             "schedule": schedule["name"], "report_id": report_id,
             "status": result.get("status"), "delivery": delivery["status"],
         })
-    purged = purge_expired()
     return {"status": "success", "processed": processed,
-            "purged_reports": purged, "evaluated_at": now.isoformat()}
+            "evaluated_at": now.isoformat()}
 
 
 @app.post("/jobs/tick")
@@ -732,5 +731,15 @@ install_scheduler(app, [
         name="reporting.tick",
         interval_seconds=get_settings().report_tick_interval,
         run=lambda: execute_due_schedules(SCHEDULER_PRINCIPAL),
+    ),
+    # Retention is a filesystem sweep, not schedule evaluation. It runs daily
+    # rather than on every tick so the report table is not scanned once a
+    # minute for work that is almost never there.
+    ScheduledJob(
+        name="reporting.retention",
+        interval_seconds=get_settings().report_purge_interval,
+        run=lambda: {
+            "status": "success", "purged_reports": purge_expired(),
+        },
     ),
 ])

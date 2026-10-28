@@ -77,7 +77,8 @@ stored here, or anywhere else in the database.
 
 One row per in-app scheduled job (`inventory.assetexplorer`,
 `inventory.satellite`, `inventory.sccm`, `inventory.solaris`,
-`compliance.daily`, `identity.audit_purge`, `reporting.tick`). Holds
+`compliance.daily`, `identity.audit_purge`, `reporting.tick`,
+`reporting.retention`). Holds
 `interval_seconds`, `next_run_at`, last start/finish timestamps, `last_status`
 (`success`/`failure`) and `last_message`.
 
