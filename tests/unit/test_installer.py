@@ -85,6 +85,35 @@ def test_generated_environment_contains_no_bootstrap_secret():
     assert "PATCHTRACK_TLS_ENABLED=true" in text
 
 
+def test_the_systemd_service_owns_the_whole_compose_stack(tmp_path):
+    install_dir = tmp_path / "opt" / "patchtrack"
+
+    docker = installer.compose_service_unit(install_dir, "docker")
+    assert "Type=simple" in docker
+    assert f"WorkingDirectory={install_dir}" in docker
+    assert f"ConditionPathExists={install_dir}/docker-compose.yml" in docker
+    assert "Requires=docker.service" in docker
+    assert "/usr/bin/docker compose -f docker-compose.yml " \
+           "-f docker-compose.secrets.yml up --remove-orphans" in docker
+    assert "/usr/bin/docker compose -f docker-compose.yml " \
+           "-f docker-compose.secrets.yml stop" in docker
+    assert "TimeoutStopSec=180" in docker
+    assert "WantedBy=multi-user.target" in docker
+    assert installer.SYSTEMD_UNIT_MARKER in docker
+
+    podman = installer.compose_service_unit(install_dir, "podman")
+    assert "/usr/bin/podman-compose" in podman
+    assert "docker.service" not in podman
+
+    assert installer.systemd_unit_is_installer_owned(docker, install_dir)
+    assert not installer.systemd_unit_is_installer_owned(
+        docker, tmp_path / "opt" / "elsewhere"
+    )
+    assert not installer.systemd_unit_is_installer_owned(
+        "[Unit]\nDescription=Something else\n", install_dir
+    )
+
+
 def test_installer_validates_the_proxy_and_bypass_list():
     assert installer.validate_proxy("") is None
     assert installer.validate_proxy("http://proxy.example.com:3128") is None

@@ -57,8 +57,11 @@ reported and without the next sync undoing it.
   certificate, replacement with the organisation's own certificate in
   Settings, and optional file-backed bootstrap secrets for Docker, Podman or
   systemd deployments.
-- **Operations** — Grafana dashboards are optional; the application, API and
-  reports work with Grafana stopped.
+- **Operations** — on install, one `patchtrack.service` systemd unit is
+  enabled; `systemctl start|stop|restart patchtrack` is the normal start and
+  stop procedure, and `journalctl -u patchtrack` shows the application log.
+  Grafana dashboards are optional; the application, API and reports work with
+  Grafana stopped.
 
 ## What is in this repository
 
@@ -79,7 +82,7 @@ reported and without the next sync undoing it.
 | `deploy/container` | Service image, entrypoint and pinned requirements |
 | `docker-compose.secrets.yml` | Opt-in Compose override for file-backed bootstrap secrets |
 | `deploy/grafana` | Provisioned datasource and dashboard |
-| `deploy/systemd` | Native (non-container) service units |
+| `deploy/systemd` | Compose systemd service and native (non-container) units |
 | `scripts` | HTTPS development launcher, demo data, dashboard generator, manual job runner |
 | `tests` | Unit tests, database integration tests, browser smoke test |
 | `docs` | Requirements, design, operations and user documentation |
@@ -257,7 +260,7 @@ PATCHTRACK_TEST_DATABASE_URL=postgresql+psycopg://patchtrack@/patchtrack_test?ho
   /opt/patchtrack-venv/bin/python -m pytest tests/integration
 ```
 
-The suite currently contains 607 tests: 466 unit tests and 141 database
+The suite currently contains 608 tests: 467 unit tests and 141 database
 integration tests. Integration tests create and drop their own scratch
 database; never point them at a database holding real data.
 

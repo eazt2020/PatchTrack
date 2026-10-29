@@ -142,6 +142,16 @@ This release has no new database migrations; `upgrade.sh` applies none.
   verification after start, stop timeouts, what happens to scheduled
   collections, reports and backups across a stop, host reboot behaviour and
   recovery from an ungraceful stop.
+- **One systemd service for the container deployment.** The installer now
+  writes and enables `/etc/systemd/system/patchtrack.service`, which owns the
+  whole Compose stack. An administrator starts and stops PatchTrack with
+  `systemctl start|stop|restart patchtrack`, checks it with
+  `systemctl status patchtrack`, and reads its output with
+  `journalctl -u patchtrack` — no Compose commands are needed. The unit runs
+  Compose in the foreground, so systemd's active state follows the running
+  stack; `uninstall.sh` stops, disables and removes it. The reference unit is
+  in `deploy/systemd/patchtrack.service`. See
+  [start-stop.md](start-stop.md#systemd-service-recommended).
 - **Stop grace periods match that behaviour.** Application services get
   `stop_grace_period: 30s` so uvicorn can finish in-flight requests and the
   scheduler's five-second shutdown; PostgreSQL gets `60s` for a fast shutdown.
