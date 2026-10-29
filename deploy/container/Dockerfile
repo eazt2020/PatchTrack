@@ -7,7 +7,7 @@
 #
 # Build from the repository root:
 #
-#   docker build -f deploy/container/Dockerfile -t patchtrack:3.0.1 .
+#   docker build -f deploy/container/Dockerfile -t patchtrack:3.0.2 .
 #
 # The image runs as an unprivileged user, has no build tools, and contains no
 # credentials. It also works unmodified under SELinux on RHEL/Rocky 9: nothing
