@@ -127,6 +127,50 @@ outage — so the trend, history views and period picker have varied, internally
 consistent observations to display. Every snapshot records
 `synthetic_history` in its methodology.
 
+## Screens
+
+These captures come from the development stack running the 100-asset,
+five-year demo seed above. Every record is synthetic; the layout, figures and
+workflows are the application's own.
+
+**Executive dashboard.** Live estate with KPI tiles, compliance by operating
+system, environment and business service, status distribution, the 12-month
+trend, the period summary and the servers with the most outstanding patches.
+
+![Executive dashboard showing live compliance KPIs and breakdown charts](docs/images/dashboard.png)
+
+**Recorded period.** The same dashboard for Q1 2026, read from the immutable
+snapshots captured in that quarter. Dimension filters are disabled here because
+a snapshot stores group totals rather than server rows.
+
+![Executive dashboard showing a recorded Q1 2026 snapshot](docs/images/dashboard-period.png)
+
+**History & trends.** Monthly and quarterly compliance against the 95% target,
+with the retained snapshot ledger behind the charts. Green quarters meet the
+target; orange quarters miss it.
+
+![History and trends charts with the snapshot ledger](docs/images/trends.png)
+
+**Non-compliant servers.** The drill-down register, with state tabs, filters,
+severity counts and CSV export; a hostname opens its full assessment.
+
+![Non-compliant server register](docs/images/servers.png)
+
+**Remediation.** Outstanding findings by severity, the active policy's
+remediation windows and the finding register.
+
+![Remediation findings by severity and register](docs/images/remediation.png)
+
+**Server inventory.** The authoritative inventory mirror with lifecycle, patch
+source, current state and audited local placement overrides.
+
+![Server inventory list with compliance state](docs/images/inventory.png)
+
+**Reports.** Server-side PDF generation and the retained report history,
+including the delivery status and recorded hash.
+
+![Report generation and report history](docs/images/reports.png)
+
 ## Deployment
 
 Production deployment uses Docker Compose on RHEL 9 or Rocky 9 with SELinux
