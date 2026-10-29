@@ -174,11 +174,16 @@ written, not the authority of root on a running host.
 **Containers.** `docker-compose.secrets.yml` is an opt-in override:
 
 ```bash
-sudo install -d -m 0750 -o root -g patchtrack /etc/patchtrack/secrets
+sudo install -d -m 0750 -o root -g root /etc/patchtrack/secrets
 # create database_url, jwt_secret, service_token and postgres_password,
-# mode 0640 root:patchtrack (the directory is group-traversable), then:
+# mode 0640 root:root, then:
 docker compose -f docker-compose.yml -f docker-compose.secrets.yml up -d
 ```
+
+Compose bind-mounts a file secret with the host file's ownership and mode, so
+the files must be readable by GID 0: the image runs as UID 1001 / GID 0, and
+`root:root` with mode `0640` is readable inside every container while remaining
+unreadable to other host accounts. The installer writes them this way.
 
 The four files are mounted read-only at `/run/secrets/`, the application reads
 the `*_FILE` variables, and the plain variables are masked in the container

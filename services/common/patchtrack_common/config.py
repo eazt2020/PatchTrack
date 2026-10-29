@@ -189,3 +189,13 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def release_version() -> str:
+    """The release the running image was built from.
+
+    Used for API metadata and the console so neither can drift from the
+    installed release. The installer writes PATCHTRACK_VERSION into .env;
+    outside a deployment the value is absent and reported as ``unknown``.
+    """
+    return get_settings().version or "unknown"

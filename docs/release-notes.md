@@ -96,6 +96,23 @@ This release has no new database migrations; `upgrade.sh` applies none.
   the application and PostgreSQL images when needed, skips the build when the
   application image is supplied, and starts Compose with pulls disabled. The
   mode and bundle path are recorded in `install.json`.
+- File-backed Compose secrets are written `root:root` with mode `0640`.
+  Compose bind-mounts a file secret with the host file's ownership, and the
+  application image runs as UID 1001 / GID 0, so the previous
+  `root:patchtrack` ownership made every container fail to read
+  `/run/secrets/database_url`. The manual instructions in
+  [security.md](security.md#secret-files) and `docker-compose.secrets.yml`
+  say the same.
+- Rollback removes `/var/lib/containerd` as well as `/var/lib/docker` when
+  the installation created them. Docker's containerd image store kept the
+  downloaded base image and build layers outside the directory the installer
+  previously cleaned up, so a failed build left hundreds of megabytes behind.
+- The installer rejects administrator email addresses with reserved suffixes
+  (`.invalid`, `.test`, `.local`, `.localhost`, `.onion`, `.arpa`) in
+  preflight. The identity service refuses them with `EmailStr`, so accepting
+  them here made a completed install fail at the first-administrator step.
+  When the API still rejects a value, the reported error now includes its
+  validation message instead of only "administrator creation failed".
 - `install.sh --check` runs the same preflight without changing the host.
 - `uninstall.sh` reverses an installation from its manifest. It prechecks the
   manifest, paths, runtime, compose project, image, account and configuration
@@ -353,6 +370,11 @@ This release has no new database migrations; `upgrade.sh` applies none.
 
 - Every service exposes Prometheus metrics at `/metrics`, with alert rules and
   an optional `monitoring` compose profile (`deploy/monitoring/`).
+- **Settings → Platform** reports the release the running image was built
+  from, served by `/api/version` from `PATCHTRACK_VERSION`. It previously
+  printed a hardcoded "PatchTrack 1.0.0" regardless of the installed release.
+  The FastAPI metadata of all five services uses the same value, so the API
+  schema at `/docs` no longer reports a separate version.
 
 ### System timezone
 

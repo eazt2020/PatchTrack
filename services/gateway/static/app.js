@@ -3576,6 +3576,14 @@ async function renderSettings() {
         },
       }, "Save branding")),
     orgStatus);
+  // The release comes from the running image, not a string baked into this
+  // file, so a rebuilt deployment cannot show a stale version.
+  const applicationVersion = h("dd", {}, "PatchTrack");
+  api("version").then((value) => {
+    if (value && value.version) {
+      applicationVersion.textContent = `PatchTrack ${value.version}`;
+    }
+  }).catch(() => { /* leave the neutral label if the release is unavailable */ });
   // Each Settings concern gets its own tab, so a long form or two retention
   // windows never compete for one screen. The panels are built once and shown
   // or hidden; the last selected tab survives a re-render.
@@ -3822,7 +3830,7 @@ async function renderSettings() {
           timezoneStatus)),
       card("Platform", "Deployment facts",
         h("dl", { class: "kv" },
-          h("dt", {}, "Application"), h("dd", {}, "PatchTrack 1.0.0"),
+          h("dt", {}, "Application"), applicationVersion,
           h("dt", {}, "Report retention"), h("dd", {}, "Editable in Settings"),
           h("dt", {}, "Database"), h("dd", {}, "PostgreSQL"))))],
   ];

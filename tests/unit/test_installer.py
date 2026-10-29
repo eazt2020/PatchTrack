@@ -53,6 +53,21 @@ def test_installer_validates_the_certificate_name_and_accounts():
     assert installer.validate_admin_username("ab") is not None
 
 
+def test_installer_rejects_email_domains_the_identity_service_refuses():
+    assert installer.validate_email("") is None
+    assert installer.validate_email("admin@example.com") is None
+    assert installer.validate_email("admin@corp.example") is None
+    for value in (
+        "admin@example.invalid",
+        "admin@host.local",
+        "admin@example.test",
+        "admin@example.localhost",
+        "admin@node.onion",
+        "admin@1.2.3.4.arpa",
+    ):
+        assert installer.validate_email(value) is not None, value
+
+
 def test_installer_refuses_to_install_over_its_own_source_tree():
     problem = installer.validate_install_path(str(ROOT), "install directory")
     assert problem is not None
@@ -214,6 +229,60 @@ def test_rollback_runs_actions_in_reverse_order():
 def test_rollback_stops_before_removing_protected_paths():
     with pytest.raises(installer.InstallerError):
         installer.remove_tree(Path("/etc"))
+
+
+def test_rollback_removes_container_stores_the_installation_created(monkeypatch):
+    import types
+
+    monkeypatch.setattr(
+        installer, "run_command",
+        lambda *a, **k: types.SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(installer, "wait_for", lambda *a, **k: None)
+
+    docker = installer.Installer(
+        installer.Config(), installer.RuntimePlan("docker", install_packages=False)
+    )
+    monkeypatch.setattr(docker, "configure_docker_proxy", lambda: None)
+    docker._data_existed = {path: False for path in docker._data_dirs}
+    docker.start_runtime()
+
+    removed = [
+        action.path for action in docker.actions
+        if isinstance(action, installer.RemoveTree)
+    ]
+    assert removed == [Path("/var/lib/docker"), Path("/var/lib/containerd")]
+
+    podman = installer.Installer(
+        installer.Config(), installer.RuntimePlan("podman", install_packages=False)
+    )
+    podman._data_existed = {path: False for path in podman._data_dirs}
+    podman.start_runtime()
+
+    removed = [
+        action.path for action in podman.actions
+        if isinstance(action, installer.RemoveTree)
+    ]
+    assert removed == [Path("/var/lib/containers")]
+
+
+def test_pre_existing_container_store_is_not_removed_on_rollback(monkeypatch):
+    import types
+
+    monkeypatch.setattr(
+        installer, "run_command",
+        lambda *a, **k: types.SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(installer, "wait_for", lambda *a, **k: None)
+    subject = installer.Installer(
+        installer.Config(), installer.RuntimePlan("docker", install_packages=False)
+    )
+    monkeypatch.setattr(subject, "configure_docker_proxy", lambda: None)
+    subject._data_existed = {path: True for path in subject._data_dirs}
+
+    subject.start_runtime()
+
+    assert not any(isinstance(action, installer.RemoveTree) for action in subject.actions)
 
 
 class _FakeGateway:

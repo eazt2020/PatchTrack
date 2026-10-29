@@ -276,8 +276,20 @@ def validate_admin_username(value: str) -> Optional[str]:
 
 
 def validate_email(value: str) -> Optional[str]:
-    if value and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value):
+    if not value:
+        return None
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value):
         return "must be a valid email address, or left empty"
+    # The identity service validates this field with pydantic's EmailStr,
+    # which refuses the reserved suffixes below. Rejecting them here keeps a
+    # fresh installation from passing preflight and then failing after the
+    # stack is already running.
+    suffix = value.rsplit("@", 1)[1].lower().rstrip(".").rsplit(".", 1)[-1]
+    if suffix in ("arpa", "invalid", "local", "localhost", "onion", "test"):
+        return (
+            "must not use a reserved domain suffix (.arpa, .invalid, .local, "
+            ".localhost, .onion or .test); use a real domain or leave it empty"
+        )
     return None
 
 
@@ -1914,8 +1926,15 @@ class Installer:
         self.created_group = False
         self.prebuilt_image = False
         self.image_loaded = False
-        self._data_dir = Path("/var/lib/docker" if runtime.runtime == "docker" else "/var/lib/containers")
-        self._data_existed = self._data_dir.exists()
+        # Docker keeps containers under /var/lib/docker and, with the
+        # containerd image store, images under /var/lib/containerd. Podman
+        # uses /var/lib/containers for both. Record which of these the host
+        # already had, so rollback removes only data this installation created.
+        if runtime.runtime == "docker":
+            self._data_dirs = (Path("/var/lib/docker"), Path("/var/lib/containerd"))
+        else:
+            self._data_dirs = (Path("/var/lib/containers"),)
+        self._data_existed = {path: path.exists() for path in self._data_dirs}
 
     # -- package and service changes
 
@@ -1958,12 +1977,14 @@ class Installer:
         info(f"{self.plan.label} installed")
 
     def start_runtime(self) -> None:
-        if not self._data_existed:
+        for path in self._data_dirs:
+            if self._data_existed[path]:
+                continue
             # Starting the runtime creates this directory. Record it before the
             # service state so rollback stops the daemon first, then removes
             # the data that only this installation could have created.
             self.actions.append(RemoveTree(
-                self._data_dir, "removed container data created by this installation"
+                path, "removed container data created by this installation"
             ))
         if self.plan.runtime == "podman":
             result = run_command(["podman", "info"], capture=True, check=False)
@@ -2083,10 +2104,15 @@ class Installer:
             self.cfg.env_file, build_env(self.cfg, self.cfg.service_user),
             self.actions, mode=0o640, gid=self.gid, description="created environment file",
         )
-        write_secret(self.cfg.secrets_dir / "postgres_password", db_password, self.actions, self.gid)
-        write_secret(self.cfg.secrets_dir / "database_url", database_url, self.actions, self.gid)
-        write_secret(self.cfg.secrets_dir / "jwt_secret", jwt_secret, self.actions, self.gid)
-        write_secret(self.cfg.secrets_dir / "service_token", service_token, self.actions, self.gid)
+        # Compose bind-mounts a file secret with the host file's ownership and
+        # mode, and the application image runs as UID 1001 / GID 0. Group root
+        # therefore lets the containers read the file while keeping it
+        # unreadable to every other host account (and to the unprivileged
+        # patchtrack service user used only by the native deployment).
+        write_secret(self.cfg.secrets_dir / "postgres_password", db_password, self.actions, 0)
+        write_secret(self.cfg.secrets_dir / "database_url", database_url, self.actions, 0)
+        write_secret(self.cfg.secrets_dir / "jwt_secret", jwt_secret, self.actions, 0)
+        write_secret(self.cfg.secrets_dir / "service_token", service_token, self.actions, 0)
 
         link = self.cfg.install_dir / ".env"
         os.symlink(str(self.cfg.env_file), str(link))
@@ -2382,12 +2408,21 @@ class Installer:
                         f"administrator creation returned HTTP {response.status}"
                     )
         except urllib.error.HTTPError as exc:
-            detail = "administrator creation failed"
+            detail = f"administrator creation failed (HTTP {exc.code})"
             try:
                 body = json.loads(exc.read().decode("utf-8"))
-                if isinstance(body.get("detail"), str):
-                    detail += f": {body['detail']}"
-            except (ValueError, UnicodeDecodeError, OSError):
+                problem = body.get("detail")
+                if isinstance(problem, str):
+                    detail += f": {problem}"
+                elif isinstance(problem, list):
+                    # FastAPI validation errors arrive as a list of objects.
+                    messages = [
+                        item.get("msg", "") for item in problem if isinstance(item, dict)
+                    ]
+                    messages = [message for message in messages if message]
+                    if messages:
+                        detail += ": " + "; ".join(messages)
+            except (ValueError, UnicodeDecodeError, OSError, AttributeError):
                 pass
             raise InstallerError(detail) from None
         _, session = self._get_json(opener, "/api/session/status")
