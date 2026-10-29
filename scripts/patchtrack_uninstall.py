@@ -43,6 +43,7 @@ MANAGED_SECRETS = ("postgres_password", "database_url", "jwt_secret", "service_t
 MANAGED_CONFIG_FILES = ("install.json", ".env")
 PROXY_DROPIN = base.DOCKER_PROXY_DROPIN
 PROXY_MARKER = "Managed by the PatchTrack guided installer"
+SYSTEMD_UNIT = base.SYSTEMD_UNIT_PATH
 PROTECTED_ACCOUNT_NAMES = {"root", "nobody"}
 
 
@@ -362,6 +363,25 @@ def collect_preflight(manifest: Manifest, options: Options) -> Tuple[List[base.C
         str(manifest.path),
     ))
 
+    if SYSTEMD_UNIT.exists() or SYSTEMD_UNIT.is_symlink():
+        try:
+            ours = base.systemd_unit_is_installer_owned(
+                SYSTEMD_UNIT.read_text(), manifest.install_dir
+            )
+        except OSError:
+            ours = False
+        checks.append(base.Check(
+            "systemd service",
+            True if ours else True,
+            f"{SYSTEMD_UNIT} will be removed"
+            if ours else f"{SYSTEMD_UNIT} was not created for this installation; it will be left in place",
+            required=ours,
+        ))
+    else:
+        checks.append(base.Check(
+            "systemd service", True, f"{SYSTEMD_UNIT} is not present"
+        ))
+
     if manifest.installation_mode == "airgap":
         detail = "air-gapped installation"
         if manifest.airgap_bundle:
@@ -528,6 +548,8 @@ class Uninstaller:
         self.account_removed = False
         self.preserved_volumes: List[str] = []
         self.leftovers: List[Path] = []
+        self.systemd_unit_removed = False
+        self.systemd_unit_preserved = False
 
     def _compose(self, *args: str) -> subprocess.CompletedProcess:
         return base.run_command(
@@ -553,6 +575,58 @@ class Uninstaller:
                     f"could not remove data volume {name}: "
                     + (result.stderr or result.stdout or "").strip()
                 )
+
+    def remove_systemd_unit(self) -> None:
+        """Stop and remove the unit the installer created, before the stack.
+
+        A unit that belongs to another deployment is left alone: removing its
+        containers would only make it fail, and the operator needs to see the
+        unit so they can decide what it was for.
+        """
+        if not (SYSTEMD_UNIT.exists() or SYSTEMD_UNIT.is_symlink()):
+            return
+        try:
+            text = SYSTEMD_UNIT.read_text()
+        except OSError as exc:
+            self.failures.append(f"could not read {SYSTEMD_UNIT}: {exc}")
+            return
+        if not base.systemd_unit_is_installer_owned(text, self.manifest.install_dir):
+            self.systemd_unit_preserved = True
+            base.warn(
+                f"keeping {SYSTEMD_UNIT}: it was not created for this installation"
+            )
+            return
+
+        base.step("Stopping and removing the PatchTrack systemd service")
+        if base.command_exists("systemctl"):
+            result = base.run_command(
+                ["systemctl", "disable", "--now", SYSTEMD_UNIT.name],
+                check=False, capture=True,
+            )
+            if result.returncode != 0:
+                self.failures.append(
+                    f"could not stop and disable {SYSTEMD_UNIT.name}: "
+                    + (result.stderr or result.stdout or "").strip()
+                )
+        try:
+            SYSTEMD_UNIT.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            self.failures.append(f"could not remove {SYSTEMD_UNIT}: {exc}")
+            return
+        if base.command_exists("systemctl"):
+            reload_result = base.run_command(
+                ["systemctl", "daemon-reload"], check=False, capture=True
+            )
+            if reload_result.returncode != 0:
+                self.failures.append(
+                    "could not reload systemd: "
+                    + (reload_result.stderr or "").strip()
+                )
+                return
+        self.systemd_unit_removed = True
+        base.info("PatchTrack systemd service removed")
 
     def remove_containers(self) -> bool:
         base.step("Removing the PatchTrack containers and networks")
@@ -718,6 +792,7 @@ class Uninstaller:
         return self.manifest.service_group or self.user
 
     def run(self) -> bool:
+        self.remove_systemd_unit()
         removed = self.remove_containers()
         self.remove_image()
         self.remove_proxy_config()
@@ -759,6 +834,21 @@ def collect_postflight(
         ", ".join(str(path) for path in managed_present)
         if managed_present else "installer-created files are gone",
     ))
+    if uninstaller.systemd_unit_removed:
+        checks.append(base.Check(
+            "systemd service removed",
+            not SYSTEMD_UNIT.exists() and not SYSTEMD_UNIT.is_symlink(),
+            f"{SYSTEMD_UNIT} still exists"
+            if SYSTEMD_UNIT.exists() or SYSTEMD_UNIT.is_symlink()
+            else f"{SYSTEMD_UNIT} is gone",
+        ))
+    elif uninstaller.systemd_unit_preserved:
+        checks.append(base.Check(
+            "systemd service preserved",
+            True,
+            f"{SYSTEMD_UNIT} was not created for this installation",
+            required=False,
+        ))
     checks.append(base.Check(
         "containers and networks removed",
         not state.containers and not state.networks,

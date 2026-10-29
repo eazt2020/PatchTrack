@@ -107,6 +107,18 @@ journalctl CONTAINER_NAME=patchtrack-reporting --since today
 The `patchtrack` Compose project names containers `<project>-<service>-<n>`,
 for example `patchtrack-gateway-1`.
 
+On an installer deployment the `patchtrack.service` systemd unit runs Compose
+in the foreground, so the same service output is also collected by the
+journal. This is the simplest place for a host administrator to look:
+
+```bash
+journalctl -u patchtrack -f
+journalctl -u patchtrack --since today
+```
+
+The container driver still keeps its own copy, so `docker compose logs` remains
+valid for a container that the unit has stopped.
+
 ### Native systemd deployment
 
 The units run uvicorn in the foreground, so its output goes to the journal:

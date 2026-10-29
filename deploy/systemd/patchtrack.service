@@ -1,0 +1,33 @@
+# PatchTrack application as one systemd service (Compose deployment).
+#
+# install.sh writes a host-specific copy of this unit to
+# /etc/systemd/system/patchtrack.service and enables it. This file is the
+# reference for a manual Docker deployment with the default paths:
+#
+#   sudo install -m 0644 deploy/systemd/patchtrack.service \
+#     /etc/systemd/system/patchtrack.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now patchtrack
+#
+# For Podman, replace the compose command with /usr/bin/podman-compose and
+# remove Requires=docker.service and docker.service from After=.
+[Unit]
+Description=PatchTrack application
+Documentation=file:/opt/patchtrack/docs/start-stop.md
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+ConditionPathExists=/opt/patchtrack/docker-compose.yml
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/patchtrack
+ExecStart=/usr/bin/docker compose -f docker-compose.yml -f docker-compose.secrets.yml up --remove-orphans
+ExecStop=/usr/bin/docker compose -f docker-compose.yml -f docker-compose.secrets.yml stop
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=300
+TimeoutStopSec=180
+
+[Install]
+WantedBy=multi-user.target

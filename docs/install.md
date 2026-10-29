@@ -61,6 +61,10 @@ It then:
   always run with `docker-compose.secrets.yml`;
 - builds the image, starts PostgreSQL, applies migrations, starts all five
   services and waits for `/readyz`;
+- writes and enables `/etc/systemd/system/patchtrack.service`, then starts it
+  so the running stack is registered with systemd. Normal operation is then
+  `sudo systemctl start|stop|restart patchtrack` and
+  `sudo journalctl -u patchtrack`; see [start-stop.md](start-stop.md);
 - creates the first administrator through the one-time bootstrap endpoint and
   confirms an authenticated session with the forced password-change flag set.
 
@@ -531,6 +535,7 @@ By default it removes:
 - only the configuration files the installer created: `.env`,
   `secrets/postgres_password`, `secrets/database_url`, `secrets/jwt_secret`,
   `secrets/service_token` and `install.json`;
+- the `patchtrack.service` systemd unit, after stopping and disabling it;
 - the service user and group, but only if this installation created them and
   no application or configuration files remain. An account that existed
   before installation is kept.

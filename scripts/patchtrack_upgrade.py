@@ -184,6 +184,15 @@ def validate_upgrade_version(current: str, new: str) -> Optional[str]:
     return None
 
 
+def systemd_unit_owned(manifest: manifest_reader.Manifest) -> bool:
+    """True when this installation owns the Compose systemd service."""
+    try:
+        text = base.SYSTEMD_UNIT_PATH.read_text()
+    except OSError:
+        return False
+    return base.systemd_unit_is_installer_owned(text, manifest.install_dir)
+
+
 def compose_argv(manifest: manifest_reader.Manifest, *args: str) -> List[str]:
     prefix = ["docker", "compose"] if manifest.runtime == "docker" else ["podman-compose"]
     for pair in COMPOSE_FILES:
@@ -554,6 +563,7 @@ class Upgrade:
         self.version_changed = False
         self.services_stopped = False
         self.db_touched = False
+        self.unit_owned = systemd_unit_owned(ctx.manifest)
         self.failures: List[str] = []
 
     def _compose(self, *args: str, **kwargs):
@@ -618,9 +628,44 @@ class Upgrade:
             raise UpgradeError(f"image {image} was not created")
         base.info(f"image {image} is ready")
 
+    def _postgres_ready(self) -> bool:
+        return self._compose(
+            "exec", "-T", "postgres", "pg_isready",
+            "-U", "patchtrack", "-d", "patchtrack",
+            check=False, capture=True,
+        ).returncode == 0
+
     def stop_services(self) -> None:
         base.step("Stopping the application services")
         self.services_stopped = True
+        if self.unit_owned:
+            # Stopping the unit also stops PostgreSQL, so bring the database
+            # back before migrations run. The unit is started again, not
+            # Compose directly, so systemd's active state stays accurate.
+            result = base.run_command(
+                ["systemctl", "stop", base.SYSTEMD_SERVICE_NAME],
+                check=False, capture=True,
+            )
+            if result.returncode != 0:
+                raise UpgradeError(
+                    "could not stop the PatchTrack systemd service: "
+                    + (result.stderr or result.stdout or "").strip()
+                )
+            result = self._compose(
+                "up", "-d", "postgres", check=False, capture=True
+            )
+            if result.returncode != 0:
+                raise UpgradeError(
+                    "could not restart PostgreSQL for migrations: "
+                    + (result.stderr or result.stdout or "").strip()
+                )
+            base.wait_for(
+                self._postgres_ready, timeout=120, interval=3,
+                label="PostgreSQL",
+            )
+            base.info("systemd service stopped; PostgreSQL is ready for migrations")
+            return
+
         result = self._compose(
             "stop", "gateway", "identity", "inventory", "compliance", "reporting",
             check=False, capture=True,
@@ -646,7 +691,13 @@ class Upgrade:
 
     def start(self) -> None:
         base.step("Starting the upgraded services")
-        result = self._compose("up", "-d", check=False, capture=True)
+        if self.unit_owned:
+            result = base.run_command(
+                ["systemctl", "start", base.SYSTEMD_SERVICE_NAME],
+                check=False, capture=True,
+            )
+        else:
+            result = self._compose("up", "-d", check=False, capture=True)
         if result.returncode != 0:
             raise UpgradeError(
                 "could not start the services: "
@@ -840,7 +891,13 @@ class Upgrade:
                 )
 
         if self.services_stopped or self.db_touched:
-            start = self._compose("up", "-d", check=False, capture=True)
+            if self.unit_owned:
+                start = base.run_command(
+                    ["systemctl", "start", base.SYSTEMD_SERVICE_NAME],
+                    check=False, capture=True,
+                )
+            else:
+                start = self._compose("up", "-d", check=False, capture=True)
             if start.returncode != 0:
                 failures.append(
                     "could not start the previous services: "

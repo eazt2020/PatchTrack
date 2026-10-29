@@ -85,6 +85,12 @@ and starts the stack. It verifies `/readyz`, `/healthz`, the sign-in page and
 the migration table, then records the version in `install.json` and removes
 the previous tree. The previous image is kept on the host.
 
+When the installation has the `patchtrack.service` systemd unit, the upgrade
+stops that unit (rather than running Compose directly), starts PostgreSQL for
+the migration, and starts the unit again afterwards. The unit remains active
+and enabled across the upgrade. An installation made before the unit existed
+is upgraded with Compose commands and keeps its previous start method.
+
 If any step after staging fails, the script stops the new services, restores
 the previous tree, `.env` and `install.json`, and restores the database when
 migrations had started. It renames the failed database to

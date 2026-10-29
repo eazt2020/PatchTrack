@@ -64,6 +64,9 @@ DEFAULT_NO_PROXY = (
 DOCKER_PROXY_DROPIN = Path(
     "/etc/systemd/system/docker.service.d/10-patchtrack-proxy.conf"
 )
+SYSTEMD_SERVICE_NAME = "patchtrack.service"
+SYSTEMD_UNIT_PATH = Path("/etc/systemd/system") / SYSTEMD_SERVICE_NAME
+SYSTEMD_UNIT_MARKER = "Managed by the PatchTrack guided installer"
 AIRGAP_SUMS = "SHA256SUMS"
 AIRGAP_POSTGRES_IMAGE = "docker.io/library/postgres:17"
 AIRGAP_BASE_ARCHIVE = "ubi9-python-312.tar"
@@ -837,6 +840,20 @@ def target_path_checks(cfg: Config) -> List[Check]:
             ))
         else:
             checks.append(Check(label, True, f"{path} is available"))
+    if SYSTEMD_UNIT_PATH.exists() or SYSTEMD_UNIT_PATH.is_symlink():
+        checks.append(Check(
+            "systemd service", False,
+            f"{SYSTEMD_UNIT_PATH} already exists; refusing to overwrite it",
+            remediation=(
+                f"Remove or rename {SYSTEMD_UNIT_PATH}, then run "
+                "systemctl daemon-reload. If it belongs to a previous PatchTrack "
+                "installation, remove that installation first."
+            ),
+        ))
+    else:
+        checks.append(Check(
+            "systemd service", True, f"{SYSTEMD_UNIT_PATH} is available"
+        ))
     problem = validate_install_path(str(cfg.install_dir), "install directory")
     if problem:
         checks.append(Check(
@@ -1374,6 +1391,82 @@ def docker_proxy_unit(cfg: Config) -> str:
         "# Managed by the PatchTrack guided installer; remove with uninstall.sh\n"
         "# --remove-proxy-config when the host no longer needs this proxy.\n"
     )
+
+
+def compose_service_unit(install_dir: Path, runtime: str) -> str:
+    """The single systemd service that owns the Compose stack.
+
+    A normal administrator starts and stops PatchTrack with
+    ``systemctl start|stop patchtrack`` and reads the stack's output with
+    ``journalctl -u patchtrack``. The service runs Compose in the foreground so
+    systemd's active state reflects the running stack rather than the result of
+    a one-shot command.
+    """
+    if runtime == "docker":
+        compose = "/usr/bin/docker compose"
+        after = "network-online.target docker.service"
+        requires = "Requires=docker.service\n"
+    else:
+        compose = "/usr/bin/podman-compose"
+        after = "network-online.target"
+        requires = ""
+    files = "-f docker-compose.yml -f docker-compose.secrets.yml"
+    return (
+        f"# {SYSTEMD_UNIT_MARKER} for {install_dir}.\n"
+        "#\n"
+        "# Start, stop and inspect the application with systemctl and\n"
+        "# journalctl. Do not run compose directly while this unit is active;\n"
+        "# use systemctl restart after changing .env or the Compose files.\n"
+        "[Unit]\n"
+        "Description=PatchTrack application\n"
+        f"Documentation=file:{install_dir}/docs/start-stop.md\n"
+        "Wants=network-online.target\n"
+        f"After={after}\n"
+        f"{requires}"
+        f"ConditionPathExists={install_dir}/docker-compose.yml\n"
+        "\n"
+        "[Service]\n"
+        "Type=simple\n"
+        f"WorkingDirectory={install_dir}\n"
+        f"ExecStart={compose} {files} up --remove-orphans\n"
+        f"ExecStop={compose} {files} stop\n"
+        "Restart=on-failure\n"
+        "RestartSec=10\n"
+        "TimeoutStartSec=300\n"
+        "TimeoutStopSec=180\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
+    )
+
+
+def systemd_unit_is_installer_owned(text: str, install_dir: Path) -> bool:
+    """True when a unit was written for this installation, not by an operator."""
+    return (
+        SYSTEMD_UNIT_MARKER in text
+        and f"WorkingDirectory={install_dir}" in text
+    )
+
+
+class SystemdServiceUnit(RollbackAction):
+    """Disable and remove the Compose service unit during rollback."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.description = f"systemd service: {path}"
+
+    def rollback(self) -> None:
+        if command_exists("systemctl"):
+            run_command(
+                ["systemctl", "disable", "--now", self.path.name],
+                check=False, capture=True,
+            )
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
+        if command_exists("systemctl"):
+            run_command(["systemctl", "daemon-reload"], check=False, capture=True)
 
 
 class DockerProxyConfig(RollbackAction):
@@ -2041,6 +2134,36 @@ class Installer:
         except OSError:
             pass
 
+    def install_systemd_unit(self) -> None:
+        step("Installing the systemd service")
+        if SYSTEMD_UNIT_PATH.exists() or SYSTEMD_UNIT_PATH.is_symlink():
+            raise InstallerError(
+                f"{SYSTEMD_UNIT_PATH} already exists; refusing to overwrite it"
+            )
+        unit = compose_service_unit(self.cfg.install_dir, self.plan.runtime)
+        # Record the rollback first: a partial write must still be cleaned up.
+        self.actions.append(SystemdServiceUnit(SYSTEMD_UNIT_PATH))
+        write_file(
+            SYSTEMD_UNIT_PATH, unit, [], mode=0o644,
+            description=f"created systemd service: {SYSTEMD_UNIT_PATH}",
+        )
+        run_command(["systemctl", "daemon-reload"])
+        run_command(["systemctl", "enable", SYSTEMD_SERVICE_NAME])
+        info(f"systemd service {SYSTEMD_SERVICE_NAME} is enabled")
+
+    def activate_systemd_unit(self) -> None:
+        step("Registering the running application with systemd")
+        result = run_command(
+            ["systemctl", "start", SYSTEMD_SERVICE_NAME],
+            check=False, capture=True,
+        )
+        if result.returncode != 0:
+            raise InstallerError(
+                f"could not start {SYSTEMD_SERVICE_NAME}: "
+                + ((result.stderr or result.stdout or "").strip() or "unknown error")
+            )
+        info(f"{SYSTEMD_SERVICE_NAME} is active; use systemctl to manage it")
+
     # -- containers
 
     def load_archive(self, archive: Path) -> None:
@@ -2316,8 +2439,10 @@ class Installer:
         self.create_account()
         self.prepare_images()
         self.install_files()
+        self.install_systemd_unit()
         self.build_and_start()
         self.verify()
+        self.activate_systemd_unit()
         self.completed = True
 
     def rollback(self) -> bool:
@@ -2723,12 +2848,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print("    certificate at Settings → HTTPS certificate.")
     print(f"    Configuration: {cfg.env_file}")
     print(f"    Secrets:       {cfg.secrets_dir}")
-    if cfg.runtime == "docker":
-        print(f"    Logs: cd {cfg.install_dir} && docker compose -f docker-compose.yml "
-              "-f docker-compose.secrets.yml logs -f")
-    else:
-        print(f"    Logs: cd {cfg.install_dir} && podman-compose -f docker-compose.yml "
-              "-f docker-compose.secrets.yml logs -f")
+    print(f"    Start/stop:   sudo systemctl start|stop|restart {SYSTEMD_SERVICE_NAME}")
+    print(f"    Status:       sudo systemctl status {SYSTEMD_SERVICE_NAME}")
+    print(f"    Logs:         sudo journalctl -u {SYSTEMD_SERVICE_NAME} -f")
     return 0
 
 

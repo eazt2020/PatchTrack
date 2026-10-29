@@ -6,10 +6,81 @@ start. A normal stop asks each process to finish what it is doing; a forced
 kill can leave an interrupted report, collection or backup for the next start
 to clean up.
 
-## Compose deployment (supported)
+## systemd service (recommended)
 
-Run these commands from the directory that holds the deployment, normally
-`/opt/patchtrack`. The installer uses the secrets override, so include it:
+The guided installer writes and enables
+`/etc/systemd/system/patchtrack.service`. It is one unit for the whole
+application, so an administrator does not need to know which containers exist:
+
+```bash
+sudo systemctl start patchtrack      # start the application
+sudo systemctl stop patchtrack       # stop it gracefully
+sudo systemctl restart patchtrack    # stop, then start
+sudo systemctl status patchtrack     # active/inactive and recent output
+sudo systemctl is-enabled patchtrack # enabled at boot
+```
+
+The service is enabled at boot. To stop PatchTrack from starting
+automatically, run `sudo systemctl disable patchtrack`; this does not stop a
+running instance.
+
+Logs from every application service and from Compose itself are in the
+journal while the unit owns the stack:
+
+```bash
+sudo journalctl -u patchtrack -f
+sudo journalctl -u patchtrack --since today
+sudo journalctl -u patchtrack -p warning
+```
+
+`systemctl start` returns when Compose has launched the containers, not
+necessarily when the application is ready. Verify readiness before handing it
+to users:
+
+```bash
+curl -fsSk https://127.0.0.1:8005/readyz
+curl -fsSk https://127.0.0.1:8005/healthz
+```
+
+`systemctl stop` runs the same graceful Compose stop described below: uvicorn
+finishes in-flight requests, the scheduler stops within about five seconds, and
+PostgreSQL performs a fast shutdown. Stopped containers and all volumes are
+kept; `systemctl start` starts them again.
+
+Use systemctl rather than running `docker compose up` or `stop` by hand while
+the unit is active. A manual stop makes the unit inactive without telling
+systemd why, and the next status check is misleading.
+
+### Manual installation of the unit
+
+The installer creates a host-specific unit, including a custom application
+directory and the Docker or Podman runtime it selected. For a manual Docker
+deployment using the default `/opt/patchtrack` path, copy the reference unit:
+
+```bash
+sudo install -m 0644 /opt/patchtrack/deploy/systemd/patchtrack.service \
+  /etc/systemd/system/patchtrack.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now patchtrack
+```
+
+For Podman, edit the copy first: replace `/usr/bin/docker compose` with
+`/usr/bin/podman-compose`, remove `Requires=docker.service`, and remove
+`docker.service` from `After=`. If the application directory is not
+`/opt/patchtrack`, change `WorkingDirectory`, `ConditionPathExists`,
+`Documentation` and the `ExecStart`/`ExecStop` paths.
+
+An installation upgraded from a release before this unit existed does not get
+it automatically. Install it once with the commands above; `upgrade.sh`
+preserves and uses the unit on later upgrades once it is present.
+
+## Compose commands (manual and troubleshooting)
+
+The commands in this section are the layer the systemd unit uses. They are
+useful when diagnosing a failed start, or on a deployment deliberately run
+without the unit. Run them from the directory that holds the deployment,
+normally `/opt/patchtrack`. The installer uses the secrets override, so
+include it:
 
 ```bash
 cd /opt/patchtrack
