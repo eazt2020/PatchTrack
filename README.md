@@ -58,6 +58,7 @@ reported and without the next sync undoing it.
 
 | Path | Contents |
 |------|----------|
+| `LICENSE` | GNU Affero General Public License, version 3 |
 | `install.sh` | Guided production installer with preflight, verification and automatic rollback |
 | `uninstall.sh` | Guided uninstaller with preflight, data-preserving removal and post-uninstallation checks |
 | `upgrade.sh` | Guided upgrade with preflight, mandatory backup, staged replacement, verification and automatic rollback |
@@ -263,3 +264,8 @@ It ignores certificate errors so it can run against the development stack's
 self-signed certificate. Point it at an `http://` URL with
 `PATCHTRACK_TLS_ENABLED=false scripts/dev-run.sh restart` to test a plain-HTTP
 stack instead.
+
+## License
+
+PatchTrack is licensed under the GNU Affero General Public License, version 3
+(AGPL-3.0-only). The full text is in [LICENSE](LICENSE).

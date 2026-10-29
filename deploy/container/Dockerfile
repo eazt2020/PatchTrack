@@ -26,11 +26,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONPATH=/opt/patchtrack/common:/opt/patchtrack/services
 
+LABEL org.opencontainers.image.title="PatchTrack" \
+      org.opencontainers.image.licenses="AGPL-3.0-only"
+
 WORKDIR /opt/patchtrack
 
 COPY deploy/container/requirements.txt /opt/patchtrack/requirements.txt
 RUN pip install --no-cache-dir -r /opt/patchtrack/requirements.txt
 
+COPY LICENSE /opt/patchtrack/LICENSE
 COPY services/common /opt/patchtrack/common
 COPY services /opt/patchtrack/services
 COPY deploy/postgres /opt/patchtrack/deploy/postgres
