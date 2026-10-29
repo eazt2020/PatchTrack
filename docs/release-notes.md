@@ -1,11 +1,19 @@
 # Release notes
 
-## 3.0.2 — 2026-10-29
+## 3.0.3 — 2026-10-30
 
-Documentation, licensing and installer-usability release. It contains no
-compliance-engine, API or schema changes; existing data is untouched.
+Corrective release. It supersedes 3.0.0, 3.0.1 and 3.0.2, which are withdrawn:
+each carried defects that could fail a fresh installation or misreport the
+installed release. Install 3.0.3 or later, and replace any 3.0.0–3.0.2
+deployment.
 
-- **GNU AGPL-3.0.** PatchTrack is now licensed under the GNU Affero General
+The release also carries everything that had accumulated in the unreleased
+security and integrity work, so the sections below describe the complete
+content of 3.0.3 rather than only its corrections.
+
+### Licensing, installer usability and documentation
+
+- **GNU AGPL-3.0.** PatchTrack is licensed under the GNU Affero General
   Public License, version 3 (`AGPL-3.0-only`). The full text is in `LICENSE`
   at the root of the source archive and is copied into the application image
   at `/opt/patchtrack/LICENSE`; the image also carries the
@@ -21,12 +29,23 @@ compliance-engine, API or schema changes; existing data is untouched.
   register, remediation, inventory and reports, captured from the 100-asset,
   five-year demo seed. Every record in those images is labelled synthetic.
 - **Documentation counts.** The README and testing strategy record the current
-  suite: 585 tests — 449 unit and 136 database integration.
+  suite: 613 tests — 472 unit and 141 database integration.
 
-`install.sh` now defaults to version 3.0.2, as does `docker-compose.yml`.
-This release has no new database migrations; `upgrade.sh` applies none.
+### Corrections that make 3.0.3 a release
 
-## Unreleased — security and integrity corrections
+- **Fresh online installation.** Three defects stopped a clean installation on
+  a host with no prior PatchTrack data: rollback removed a container data
+  directory the host already had, the bootstrap secret files were written with
+  an ownership the application containers could not read, and the installer
+  accepted an administrator email address that the identity service refuses.
+  Each is fixed and covered by an installer test.
+- **Reported release.** The console printed a hardcoded `PatchTrack 1.0.0` and
+  every FastAPI service advertised `1.0.0`. Both now report the release the
+  running image was built from, read from `PATCHTRACK_VERSION`, so a rebuilt
+  deployment cannot show a stale version. `GET /api/version` serves the value
+  without authentication for monitoring.
+- **Withdrawn releases.** 3.0.0, 3.0.1 and 3.0.2 were recalled before use and
+  their tags and release archives were deleted. Do not install them.
 
 ### In-app data archive for disaster recovery
 
@@ -418,7 +437,16 @@ This release has no new database migrations; `upgrade.sh` applies none.
   dashboard on a wall display. Hovering the top edge of the window (or moving
   keyboard focus into it) reveals the header again.
 
-## 3.0.1 — 2026-10-29
+`install.sh` now defaults to version 3.0.3, as does `docker-compose.yml` and
+`.env.example`. An installation upgraded from 3.0.0–3.0.2 applies the new
+migrations listed above, including `020_data_backups.sql`.
+
+## Withdrawn releases
+
+The notes below are kept for historical reference only. These releases are
+withdrawn and must not be installed; 3.0.3 supersedes all of them.
+
+## 3.0.1 — 2026-10-29 (withdrawn)
 
 Post-release hardening for the guided installer's air-gap support.
 
@@ -440,7 +468,7 @@ Post-release hardening for the guided installer's air-gap support.
 
 `install.sh` now defaults to version 3.0.1, as does `docker-compose.yml`.
 
-## 3.0.0 — 2026-10-26
+## 3.0.0 — 2026-10-26 (withdrawn)
 
 First release.
 
