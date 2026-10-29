@@ -26,7 +26,7 @@ from patchtrack_common.scheduler import (
     install as install_scheduler,
 )
 from patchtrack_common.audit import record_audit
-from patchtrack_common.config import get_settings
+from patchtrack_common.config import get_settings, release_version
 from patchtrack_common.db import connection, execute, fetch_all, fetch_one
 from patchtrack_common.net import client_ip
 from patchtrack_common import timezones as timezone_settings
@@ -40,7 +40,7 @@ from patchtrack_common.security import (
 )
 
 APP = "identity"
-app = FastAPI(title="PatchTrack Identity", version="1.0.0", docs_url="/docs")
+app = FastAPI(title="PatchTrack Identity", version=release_version(), docs_url="/docs")
 install_metrics(app, APP)
 install_request_guards(app)
 

@@ -35,7 +35,7 @@ from starlette.concurrency import run_in_threadpool
 
 from patchtrack_common import tls as tls_settings
 from patchtrack_common.audit import record_audit
-from patchtrack_common.config import get_settings
+from patchtrack_common.config import get_settings, release_version
 from patchtrack_common.metrics import install as install_metrics
 from patchtrack_common.request_guards import install as install_request_guards
 from patchtrack_common.net import client_ip
@@ -47,7 +47,7 @@ log = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR.parent / "static"
 
-app = FastAPI(title="PatchTrack Gateway", version="1.0.0", docs_url=None,
+app = FastAPI(title="PatchTrack Gateway", version=release_version(), docs_url=None,
               redoc_url=None, openapi_url=None)
 install_metrics(app, APP)
 install_request_guards(app)
@@ -194,6 +194,12 @@ def _origin_matches(origin: str, allowed: str) -> bool:
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
     return {"status": "ok", "service": APP}
+
+
+@app.get("/api/version")
+def version() -> dict[str, str]:
+    """The release the running image was built from, for the console."""
+    return {"version": release_version()}
 
 
 @app.get("/readyz")
