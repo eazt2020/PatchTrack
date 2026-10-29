@@ -1,5 +1,31 @@
 # Release notes
 
+## 3.0.2 — 2026-10-29
+
+Documentation, licensing and installer-usability release. It contains no
+compliance-engine, API or schema changes; existing data is untouched.
+
+- **GNU AGPL-3.0.** PatchTrack is now licensed under the GNU Affero General
+  Public License, version 3 (`AGPL-3.0-only`). The full text is in `LICENSE`
+  at the root of the source archive and is copied into the application image
+  at `/opt/patchtrack/LICENSE`; the image also carries the
+  `org.opencontainers.image.licenses` label.
+- **Installer remediation guidance.** `install.sh --check` and the guided
+  installer now print a `how to fix` line under every failed or warning
+  preflight check. It names the setting, package, repository, proxy or
+  air-gap alternative that resolves the problem instead of leaving the
+  operator with a bare warning. The same output is shared by `upgrade.sh` and
+  `uninstall.sh`, so their prechecks gain the same guidance.
+- **Sample screens in the README.** The README now shows the executive
+  dashboard (live and recorded period), history and trends, the non-compliant
+  register, remediation, inventory and reports, captured from the 100-asset,
+  five-year demo seed. Every record in those images is labelled synthetic.
+- **Documentation counts.** The README and testing strategy record the current
+  suite: 585 tests — 449 unit and 136 database integration.
+
+`install.sh` now defaults to version 3.0.2, as does `docker-compose.yml`.
+This release has no new database migrations; `upgrade.sh` applies none.
+
 ## Unreleased — security and integrity corrections
 
 ### Guided installer with preflight and automatic rollback
