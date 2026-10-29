@@ -7,7 +7,7 @@ pytest tests.
 
 | Layer | Location | Needs | Count |
 |-------|----------|-------|-------|
-| Unit tests | `tests/unit/` | Nothing but Python | 448 |
+| Unit tests | `tests/unit/` | Nothing but Python | 449 |
 | Database integration tests | `tests/integration/` | PostgreSQL | 136 |
 | Browser smoke test | `tests/ui/smoke.py` | Playwright + Chromium + a running stack | 1 script, 14 routes |
 | Dashboard verification | manual procedure (§7) | Grafana + PostgreSQL | 15 panels |
@@ -16,9 +16,9 @@ pytest tests.
 Run:
 
 ```bash
-/opt/patchtrack-venv/bin/python -m pytest                       # 448 pass, 136 skip without a DB
+/opt/patchtrack-venv/bin/python -m pytest                       # 449 pass, 136 skip without a DB
 PATCHTRACK_TEST_DATABASE_URL='postgresql+psycopg://patchtrack@/patchtrack_test?host=/tmp' \
-  /opt/patchtrack-venv/bin/python -m pytest                     # 584 pass
+  /opt/patchtrack-venv/bin/python -m pytest                     # 585 pass
 ```
 
 `pytest.ini` sets `testpaths = tests`, `--strict-markers` and fails on an
@@ -55,7 +55,7 @@ so the same command works on a build host without PostgreSQL.
 | `test_serve.py` | 4 | The deployment launcher builds a TLS context only for the gateway with TLS enabled, generates the certificate on first launch, leaves other services and disabled deployments on plain HTTP, and defaults `--service` from `PATCHTRACK_SERVICE` |
 | `test_uninstaller.py` | 16 | Reads the installation manifest, refuses a manifest from another directory, a symlinked manifest, an image that is not PatchTrack, overlapping paths, an unknown runtime and an unknown installation mode; accepts an air-gap manifest and treats one without a mode as online; refuses a bundle inside the application directory; removes only installer-created configuration and empty directories; preserves operator files; and recognises its own Docker proxy drop-in |
 | `test_upgrade.py` | 9 | The guided upgrade validates target versions (no no-op, no downgrade, safe characters), edits `PATCHTRACK_VERSION` in place while preserving mode and unrelated lines, appends it when absent, reads quoted proxy values from `.env`, derives the loopback probe address from bind/port/TLS settings, refuses a backup directory inside the deployment, and places staging beside the installed tree |
-| `test_installer.py` | 26 | The guided installer validates bind addresses, ports, certificate names and account names; refuses to install over its source tree or a non-empty target; renders an environment file with no bootstrap secrets; uses loopback for its own probe when published on all interfaces; reverses recorded actions in order; refuses to remove a protected system path; verifies the bootstrap administrator's authenticated session against a local HTTPS gateway, including the refusal when that session belongs to another account; validates proxy URLs, redacts proxy credentials, renders the service proxy environment and escapes systemd specifiers in the Docker proxy drop-in; and in air-gap mode verifies bundle checksums, requires the required archives to be listed while tolerating a removed optional archive, refuses a bundle overlapping the install directories, skips registry probes, loads and tags the supplied images, and skips the build |
+| `test_installer.py` | 27 | The guided installer validates bind addresses, ports, certificate names and account names; refuses to install over its source tree or a non-empty target; renders an environment file with no bootstrap secrets; uses loopback for its own probe when published on all interfaces; reverses recorded actions in order; refuses to remove a protected system path; verifies the bootstrap administrator's authenticated session against a local HTTPS gateway, including the refusal when that session belongs to another account; validates proxy URLs, redacts proxy credentials, renders the service proxy environment and escapes systemd specifiers in the Docker proxy drop-in; and in air-gap mode verifies bundle checksums, requires the required archives to be listed while tolerating a removed optional archive, refuses a bundle overlapping the install directories, skips registry probes, loads and tags the supplied images, and skips the build; preflight output shows a `how to fix` line for failed and warning checks only |
 | `test_integration_probe.py` | 11 | Each connector's Test configuration probe uses one page, succeeds on a documented response, reports 401/403 as an authentication failure, rejects a malformed payload and raises rather than silently returning an empty collection; the Solaris probe checks the inbox exists and every document parses |
 
 The unit tests are where the compliance rules are pinned. Any change to

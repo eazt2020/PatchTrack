@@ -394,6 +394,34 @@ def test_airgap_preflight_rejects_a_bundle_missing_a_required_archive(tmp_path):
 
     assert by_name["application image archive"].ok is False
     assert by_name["PostgreSQL image archive"].ok is False
+    assert all(
+        check.remediation for check in checks if not check.ok or check.warning
+    )
+
+
+def test_preflight_output_includes_remediation_only_for_problems(capsys):
+    checks = [
+        installer.Check(
+            "memory", False, "1 GiB",
+            remediation="Allocate at least 4 GiB.",
+        ),
+        installer.Check(
+            "container image registry", True, "not reachable",
+            required=False, warning=True,
+            remediation="Use a proxy or an air-gap bundle.",
+        ),
+        installer.Check(
+            "CPU", True, "4 vCPU", remediation="This line should not be printed.",
+        ),
+    ]
+
+    failures, warnings = installer.print_checks(checks)
+    output = capsys.readouterr().out
+
+    assert (failures, warnings) == (1, 1)
+    assert "how to fix: Allocate at least 4 GiB." in output
+    assert "how to fix: Use a proxy or an air-gap bundle." in output
+    assert "This line should not be printed." not in output
 
 
 def test_airgap_installer_loads_images_and_skips_the_build(tmp_path, monkeypatch):

@@ -249,7 +249,7 @@ PATCHTRACK_TEST_DATABASE_URL=postgresql+psycopg://patchtrack@/patchtrack_test?ho
   /opt/patchtrack-venv/bin/python -m pytest tests/integration
 ```
 
-The suite currently contains 584 tests: 448 unit tests and 136 database
+The suite currently contains 585 tests: 449 unit tests and 136 database
 integration tests. Integration tests create and drop their own scratch
 database; never point them at a database holding real data.
 
