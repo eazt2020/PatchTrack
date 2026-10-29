@@ -387,19 +387,30 @@ def bundle_preflight_checks(
         "network access is not required; images come from the bundle or the local runtime",
     )]
     runtime = plan.runtime
+    archives = bundle_archives(cfg.version)
 
     if cfg.bundle_dir:
         bundle = cfg.bundle_dir
-        archives = bundle_archives(cfg.version)
         required = (archives["app"], archives["postgres"])
         checks.append(Check(
             "air-gap bundle",
             bundle.is_dir(),
             str(bundle) if bundle.is_dir() else f"{bundle} is not a directory",
+            remediation=(
+                "Extract the release bundle to that path, or pass the correct "
+                "directory with --bundle-dir (or PATCHTRACK_INSTALL_BUNDLE_DIR)."
+            ),
         ))
         if bundle.is_dir():
             ok, detail = verify_bundle(bundle, required)
-            checks.append(Check("bundle checksums", ok, detail))
+            checks.append(Check(
+                "bundle checksums", ok, detail,
+                remediation=(
+                    "Re-copy the bundle from the release media and verify it "
+                    "with 'sha256sum -c SHA256SUMS'; do not install from a "
+                    "bundle that fails verification."
+                ),
+            ))
             for label, name in (
                 ("application", archives["app"]),
                 ("PostgreSQL", archives["postgres"]),
@@ -409,6 +420,11 @@ def bundle_preflight_checks(
                     (bundle / name).is_file(),
                     str(bundle / name) if (bundle / name).is_file()
                     else f"{bundle / name} is missing",
+                    remediation=(
+                        f"Use a complete bundle for version {cfg.version}; the "
+                        f"{label.lower()} image archive is required for an "
+                        "air-gap installation."
+                    ),
                 ))
             for label, name in (
                 ("pinned base image", archives["base"]),
@@ -424,6 +440,11 @@ def bundle_preflight_checks(
                     f"not present in the bundle; only needed for rebuilds or native installs",
                     required=False,
                     warning=not present,
+                    remediation=(
+                        f"Add {name} to the bundle on the connected host if this "
+                        "host must rebuild the image, run a native install or use "
+                        "the optional dashboards; otherwise no action is needed."
+                    ),
                 ))
     else:
         app_present = runtime_ready and image_exists(runtime, cfg.image)
@@ -435,12 +456,20 @@ def bundle_preflight_checks(
             app_present,
             f"{cfg.image} is loaded" if app_present else
             f"{cfg.image} is not loaded; pass --bundle-dir or load the bundle first",
+            remediation=(
+                f"Pass a verified --bundle-dir, or load the application archive "
+                f"with '{runtime} load -i {archives['app']}' before rerunning."
+            ),
         ))
         checks.append(Check(
             "preloaded PostgreSQL image",
             postgres_present,
             f"{AIRGAP_POSTGRES_IMAGE} is loaded" if postgres_present else
             f"{AIRGAP_POSTGRES_IMAGE} is not loaded; pass --bundle-dir or load the bundle first",
+            remediation=(
+                f"Pass a verified --bundle-dir, or load the PostgreSQL archive "
+                f"with '{runtime} load -i {archives['postgres']}' before rerunning."
+            ),
         ))
 
     if plan.install_packages:
@@ -458,6 +487,11 @@ def bundle_preflight_checks(
             "because air-gap mode does not add a remote Docker repository"
             if repos else
             "no enabled dnf repository can supply the container runtime",
+            remediation=(
+                "Enable a local dnf repository containing docker-ce and "
+                "docker-compose-plugin (or podman and podman-compose), or "
+                "preinstall the runtime and rerun the check."
+            ),
         ))
     return checks
 
@@ -648,6 +682,9 @@ class Check:
     detail: str
     required: bool = True
     warning: bool = False
+    # What the operator can do about it. Printed only when the check fails or
+    # warns, so a passing check does not add noise to the preflight report.
+    remediation: str = ""
 
 
 @dataclass
@@ -781,25 +818,60 @@ def target_path_checks(cfg: Config) -> List[Check]:
     ):
         exists, nonempty = directory_state(path)
         if path.is_symlink():
-            checks.append(Check(label, False, f"{path} is a symbolic link; use a real directory"))
+            checks.append(Check(
+                label, False, f"{path} is a symbolic link; use a real directory",
+                remediation=f"Choose a real directory for {label} instead of a symlink.",
+            ))
         elif exists and not path.is_dir():
-            checks.append(Check(label, False, f"{path} is not a directory"))
+            checks.append(Check(
+                label, False, f"{path} is not a directory",
+                remediation=f"Remove or rename the file at {path}, or choose another path.",
+            ))
         elif exists and nonempty:
-            checks.append(Check(label, False, f"{path} is not empty; refusing to overwrite it"))
+            checks.append(Check(
+                label, False, f"{path} is not empty; refusing to overwrite it",
+                remediation=(
+                    f"Use a new empty directory for {label}, or remove the previous "
+                    "installation after confirming it is no longer needed."
+                ),
+            ))
         else:
             checks.append(Check(label, True, f"{path} is available"))
     problem = validate_install_path(str(cfg.install_dir), "install directory")
     if problem:
-        checks.append(Check("install path", False, problem))
+        checks.append(Check(
+            "install path", False, problem,
+            remediation=(
+                "Use an absolute path outside the source tree and system "
+                "directories, such as /opt/patchtrack."
+            ),
+        ))
     problem = validate_install_path(str(cfg.config_dir), "configuration directory")
     if problem:
-        checks.append(Check("configuration path", False, problem))
+        checks.append(Check(
+            "configuration path", False, problem,
+            remediation=(
+                "Use an absolute path outside the source tree and system "
+                "directories, such as /etc/patchtrack."
+            ),
+        ))
     if cfg.config_dir == cfg.install_dir:
-        checks.append(Check("path separation", False, "configuration and install directories must differ"))
+        checks.append(Check(
+            "path separation", False,
+            "configuration and install directories must differ",
+            remediation=(
+                "Set PATCHTRACK_INSTALL_DIR and PATCHTRACK_INSTALL_CONFIG_DIR "
+                "to different directories."
+            ),
+        ))
     elif paths_overlap(cfg.install_dir, cfg.config_dir):
         checks.append(Check(
             "path separation", False,
             "configuration and install directories must not contain each other",
+            remediation=(
+                "Move the configuration directory outside the application "
+                "directory (or vice versa) so the two trees are separate."
+            ),
         ))
     return checks
 
@@ -874,6 +946,10 @@ def collect_preflight(cfg: Config, runtime: RuntimeInfo, plan: RuntimePlan) -> L
         "root privileges",
         os.geteuid() == 0,
         "running as root" if os.geteuid() == 0 else "rerun with sudo",
+        remediation=(
+            "Rerun the installer with sudo: root is required to create the "
+            "service account, directories and service."
+        ),
     ))
 
     release = os_release()
@@ -887,6 +963,10 @@ def collect_preflight(cfg: Config, runtime: RuntimeInfo, plan: RuntimePlan) -> L
         supported,
         f"{release.get('PRETTY_NAME', os_id)} ({version_id})"
         + ("" if supported else " — this installer targets RHEL 9 / Rocky 9"),
+        remediation=(
+            "Install on RHEL 9 or Rocky Linux 9. Use --allow-unsupported-os "
+            "only for a documented exception."
+        ),
     ))
 
     machine = os.uname().machine
@@ -894,11 +974,16 @@ def collect_preflight(cfg: Config, runtime: RuntimeInfo, plan: RuntimePlan) -> L
         "architecture",
         machine in ("x86_64", "aarch64") or cfg.allow_unsupported_os,
         machine,
+        remediation=(
+            "Run on an x86_64 or aarch64 host. Use --allow-unsupported-os only "
+            "for a documented exception."
+        ),
     ))
 
     cores = os.cpu_count() or 1
     checks.append(Check(
-        "CPU", cores >= cfg.min_cpu, f"{cores} vCPU (minimum {cfg.min_cpu})"
+        "CPU", cores >= cfg.min_cpu, f"{cores} vCPU (minimum {cfg.min_cpu})",
+        remediation=f"Allocate at least {cfg.min_cpu} vCPUs to this host.",
     ))
 
     memory = memory_bytes()
@@ -906,19 +991,33 @@ def collect_preflight(cfg: Config, runtime: RuntimeInfo, plan: RuntimePlan) -> L
         "memory",
         memory >= cfg.min_memory_gb * 1024 ** 3,
         f"{memory / 1024 ** 3:.1f} GiB (minimum {cfg.min_memory_gb} GiB)",
+        remediation=(
+            f"Allocate at least {cfg.min_memory_gb} GiB of memory, or set "
+            "PATCHTRACK_INSTALL_MIN_MEMORY_GB to a lower accepted value if the "
+            "deployment is sized for it."
+        ),
     ))
 
     enforcing = selinux_enforcing()
     if enforcing is None:
         selinux_ok = cfg.allow_unsupported_os
         selinux_detail = "SELinux status could not be read"
+        selinux_fix = (
+            "Ensure SELinux is enabled in the kernel and /sys/fs/selinux is "
+            "mounted; investigate the host before installing."
+        )
     elif enforcing:
         selinux_ok = True
         selinux_detail = "enforcing"
+        selinux_fix = ""
     else:
         selinux_ok = cfg.allow_permissive
         selinux_detail = "not enforcing; use --allow-permissive only for a documented exception"
-    checks.append(Check("SELinux", selinux_ok, selinux_detail))
+        selinux_fix = (
+            "Set SELinux to enforcing in /etc/selinux/config and reboot. Use "
+            "--allow-permissive only for a documented exception."
+        )
+    checks.append(Check("SELinux", selinux_ok, selinux_detail, remediation=selinux_fix))
 
     disk_gb = cfg.min_disk_gb * 1024 ** 3
     for label, path in (
@@ -932,6 +1031,12 @@ def collect_preflight(cfg: Config, runtime: RuntimeInfo, plan: RuntimePlan) -> L
             available >= disk_gb,
             f"{available / 1024 ** 3:.1f} GiB free on the filesystem for {path} "
             f"(minimum {cfg.min_disk_gb} GiB)",
+            remediation=(
+                f"Free at least {cfg.min_disk_gb} GiB on the filesystem holding "
+                f"{path}, move that path to a larger filesystem, or set "
+                "PATCHTRACK_INSTALL_MIN_DISK_GB to a lower accepted value if the "
+                "deployment is sized for it."
+            ),
         ))
 
     required_commands = ["useradd", "groupadd", "systemctl"]
@@ -939,10 +1044,21 @@ def collect_preflight(cfg: Config, runtime: RuntimeInfo, plan: RuntimePlan) -> L
         required_commands.append("dnf")
     if plan.runtime == "docker":
         required_commands.append("systemctl")
+    command_packages = {
+        "useradd": "shadow-utils",
+        "groupadd": "shadow-utils",
+        "systemctl": "systemd",
+        "dnf": "dnf",
+    }
     for command in sorted(set(required_commands)):
+        package = command_packages.get(command, command)
         checks.append(Check(
             f"command {command}", command_exists(command),
             "found" if command_exists(command) else f"{command} is required",
+            remediation=(
+                f"Install the {package} package with dnf, or ensure {command} "
+                "is present on PATH before rerunning."
+            ),
         ))
 
     if plan.install_packages:
@@ -950,26 +1066,46 @@ def collect_preflight(cfg: Config, runtime: RuntimeInfo, plan: RuntimePlan) -> L
             "package manager",
             command_exists("dnf"),
             "dnf is available" if command_exists("dnf") else "dnf is required to install the runtime",
+            remediation=(
+                "Install dnf on the host, or install Docker/Podman yourself and "
+                "rerun the installer."
+            ),
         ))
 
     ready = runtime.docker_ready if plan.runtime == "docker" else runtime.podman_ready
     if plan.install_packages:
         runtime_detail = f"{plan.label}; dnf will install it"
         runtime_ok = command_exists("dnf")
+        runtime_fix = (
+            "Install dnf so the installer can install Docker Engine with "
+            "Compose v2, or preinstall a supported runtime."
+        )
     elif ready:
         version = runtime.docker_version if plan.runtime == "docker" else runtime.podman_version
         runtime_detail = f"{plan.label} {version or ''}".strip()
         runtime_ok = True
+        runtime_fix = ""
     else:
         runtime_detail = f"{plan.label} is incomplete"
         runtime_ok = False
-    checks.append(Check("container runtime", runtime_ok, runtime_detail))
+        runtime_fix = (
+            "Install Docker Engine with the Compose v2 plugin, or Podman with "
+            "podman-compose, then rerun. Use --runtime podman to select Podman "
+            "explicitly."
+        )
+    checks.append(Check(
+        "container runtime", runtime_ok, runtime_detail, remediation=runtime_fix
+    ))
 
     free, detail = port_available(cfg.bind_address, cfg.gateway_port)
     checks.append(Check(
         "gateway port",
         free,
         f"{cfg.bind_address}:{cfg.gateway_port} is {detail}",
+        remediation=(
+            f"Stop the process using {cfg.bind_address}:{cfg.gateway_port}, or "
+            "choose another port with PATCHTRACK_INSTALL_GATEWAY_PORT."
+        ),
     ))
 
     checks.extend(target_path_checks(cfg))
@@ -978,6 +1114,11 @@ def collect_preflight(cfg: Config, runtime: RuntimeInfo, plan: RuntimePlan) -> L
         present, detail = compose_project_present(plan.runtime)
         checks.append(Check(
             "existing compose project", not present, detail,
+            remediation=(
+                "Use upgrade.sh to update the existing installation, or remove "
+                "the old PatchTrack compose project and volumes after confirming "
+                "they are no longer needed."
+            ),
         ))
 
     if cfg.airgap:
@@ -989,17 +1130,32 @@ def collect_preflight(cfg: Config, runtime: RuntimeInfo, plan: RuntimePlan) -> L
                 "configured, but no registry or package download is expected",
                 required=False,
                 warning=True,
+                remediation=(
+                    "No action is needed: air-gap mode does not use the proxy. "
+                    "Unset PATCHTRACK_INSTALL_PROXY if it is not required."
+                ),
             ))
         return checks
 
     if cfg.proxy_url:
         reachable, detail = proxy_reachable(cfg.proxy_url)
-        checks.append(Check("HTTP proxy", reachable, f"{display_proxy(cfg.proxy_url)}: {detail}"))
+        checks.append(Check(
+            "HTTP proxy", reachable, f"{display_proxy(cfg.proxy_url)}: {detail}",
+            remediation=(
+                "Check the proxy address, credentials and firewall, then correct "
+                "PATCHTRACK_INSTALL_PROXY; unset it to use direct access."
+            ),
+        ))
         checks.append(Check(
             "proxy bypass list",
             validate_no_proxy(cfg.no_proxy) is None,
             cfg.no_proxy or "empty (all destinations use the proxy)",
             required=False,
+            remediation=(
+                "Use a comma-separated list of host names or domains without "
+                "schemes or spaces, for example "
+                "'localhost,127.0.0.1,.internal'."
+            ),
         ))
 
     network_checks = [
@@ -1009,6 +1165,29 @@ def collect_preflight(cfg: Config, runtime: RuntimeInfo, plan: RuntimePlan) -> L
     ]
     if plan.install_packages:
         network_checks.append(("Docker package repository", "https://download.docker.com/linux/"))
+    network_fixes = {
+        "container image registry": (
+            "Allow HTTPS to https://registry-1.docker.io (set "
+            "PATCHTRACK_INSTALL_PROXY if access is through a proxy), or preload "
+            "the PostgreSQL image from a verified air-gap bundle."
+        ),
+        "base image registry": (
+            "Allow HTTPS to https://registry.access.redhat.com (set "
+            "PATCHTRACK_INSTALL_PROXY if access is through a proxy), or include "
+            "the pinned base image in a verified air-gap bundle."
+        ),
+        "Python package index": (
+            "Allow HTTPS to https://pypi.org (set PATCHTRACK_INSTALL_PROXY if "
+            "access is through a proxy), or include the patchtrack-wheels "
+            "directory in a verified air-gap bundle."
+        ),
+        "Docker package repository": (
+            "Allow HTTPS to https://download.docker.com or configure a local "
+            "dnf mirror; alternatively preinstall Docker or Podman and rerun. "
+            "On an air-gapped host, enable a local repository containing the "
+            "runtime packages."
+        ),
+    }
     route = " through the proxy" if cfg.proxy_url else ""
     for label, url in network_checks:
         reachable = network_reachable(url, cfg.proxy_url)
@@ -1020,6 +1199,7 @@ def collect_preflight(cfg: Config, runtime: RuntimeInfo, plan: RuntimePlan) -> L
             "packages are mirrored or cached",
             required=False,
             warning=not reachable,
+            remediation=network_fixes[label],
         ))
     return checks
 
@@ -1037,6 +1217,15 @@ def print_checks(checks: Iterable[Check]) -> Tuple[int, int]:
         else:
             tag = colour(" OK ", "1;32")
         print(f"    [{tag}] {check.name}: {check.detail}")
+        if not check.ok or check.warning:
+            fix = check.remediation or (
+                "Review the detail above, correct the host configuration, and "
+                "rerun --check."
+            )
+            label = colour(
+                "how to fix", "1;33" if check.warning else "1;31"
+            )
+            print(f"        {label}: {fix}")
     return failures, warnings
 
 
@@ -2427,10 +2616,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         failures, warnings = print_checks(collect_preflight(cfg, runtime, plan))
         print()
         if failures:
-            error(f"{failures} required check(s) failed.")
+            error(
+                f"{failures} required check(s) failed. Address the 'how to fix' "
+                "lines above and rerun --check."
+            )
             return 1
         if warnings:
-            warn(f"{warnings} warning(s); see the notes above.")
+            warn(
+                f"{warnings} warning(s); review the 'how to fix' lines above "
+                "before installing."
+            )
         else:
             info("All required checks passed.")
         return 0
@@ -2469,11 +2664,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     failures, warnings = print_checks(checks)
     if failures:
         print()
-        error(f"{failures} required precheck(s) failed; nothing has been changed.")
+        error(
+            f"{failures} required precheck(s) failed; nothing has been changed. "
+            "Address the 'how to fix' lines above and rerun."
+        )
         return 1
     if warnings:
         print()
-        warn(f"{warnings} warning(s) — the installation may still work if mirrors or caches are available.")
+        warn(
+            f"{warnings} warning(s) — review the 'how to fix' lines above. The "
+            "installation may still work if mirrors or caches are available."
+        )
 
     summary(cfg, plan)
     if not args.yes and not _ask_yes_no("Proceed with the installation?", True):

@@ -39,7 +39,9 @@ Before changing anything it checks root access, RHEL/Rocky 9 and architecture,
 SELinux, CPU, memory, free disk, `dnf`, `systemctl`, account tools, the selected
 port, the target directories and existing Compose resources. Image registries
 and the package index are probed and reported as warnings, because a mirrored
-or preloaded host can work without direct access.
+or preloaded host can work without direct access. Every failed or warning check
+is followed by a `how to fix` line naming the configuration variable, package,
+repository or air-gap alternative that resolves it.
 
 It then:
 
