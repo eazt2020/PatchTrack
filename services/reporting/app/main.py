@@ -30,6 +30,20 @@ from patchtrack_common.db import connection, fetch_all, fetch_one
 from patchtrack_common.net import client_ip
 from patchtrack_common.security import Principal, PrincipalDep, require_permission
 
+from .backups import (
+    BACKUP_RETENTION_KEY,
+    BACKUP_RETENTION_MAX,
+    BACKUP_RETENTION_MIN,
+    active_backup,
+    archive_path,
+    backup_settings_view,
+    backup_stats,
+    enqueue_backup,
+    list_backups,
+    queue_scheduled_backup,
+    save_backup_retention,
+    worker_status,
+)
 from .scheduler import (
     claim_execution,
     compute_next_run,
@@ -941,6 +955,110 @@ def update_scheduler_job(
     return _job_view(definition, row, default_interval)
 
 
+# --------------------------------------------------------------------------- data backups
+class BackupRetentionUpdate(BaseModel):
+    count: int = Field(ge=BACKUP_RETENTION_MIN, le=BACKUP_RETENTION_MAX)
+
+
+@app.get("/backups")
+def get_backups(
+    _: Annotated[Principal, Depends(require_permission("settings:manage"))],
+    limit: int = Query(100, ge=1, le=500),
+) -> dict[str, Any]:
+    worker = worker_status()
+    return {
+        "items": list_backups(limit),
+        "active": active_backup(),
+        "worker": worker,
+        "stats": backup_stats(),
+        "app_version": get_settings().version or worker.get("version") or "unknown",
+    }
+
+
+@app.post("/backups", status_code=202)
+def create_backup(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_permission("settings:manage"))],
+) -> dict[str, Any]:
+    """Queue an archive now. One active backup at a time is deliberate: two
+    dumps of the same database only waste disk and make the newest archive
+    ambiguous."""
+    queued, active = enqueue_backup("manual", principal.username)
+    if queued is None:
+        current = active["status"] if active else "active"
+        raise HTTPException(
+            status_code=409,
+            detail=f"A backup is already {current}. Wait for it to finish.",
+        )
+    record_audit(
+        event_type="backup.requested", outcome="success", principal=principal,
+        target_type="backup", target_id=str(queued["id"]),
+        source_ip=_client_ip(request), service=APP,
+    )
+    return {"id": str(queued["id"]), "status": "queued"}
+
+
+@app.get("/backups/{backup_id}/download")
+def download_backup(
+    backup_id: UUID,
+    request: Request,
+    principal: Annotated[Principal, Depends(require_permission("settings:manage"))],
+):
+    row = fetch_one(
+        "SELECT id, status, filename, sha256 FROM shared.backup_runs "
+        "WHERE id = :id", id=backup_id,
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Backup not found")
+    if row["status"] != "completed":
+        raise HTTPException(status_code=409, detail="Backup is not complete")
+    path = archive_path(row["filename"])
+    if path is None or not path.is_file():
+        raise HTTPException(status_code=404, detail="Backup archive is unavailable")
+    record_audit(
+        event_type="backup.downloaded", outcome="success", principal=principal,
+        target_type="backup", target_id=str(backup_id),
+        source_ip=_client_ip(request), service=APP,
+    )
+    headers = {
+        "Cache-Control": "private, no-store",
+        "X-Content-Type-Options": "nosniff",
+    }
+    if row["sha256"]:
+        headers["X-PatchTrack-SHA256"] = row["sha256"]
+    return FileResponse(
+        path, media_type="application/gzip", filename=row["filename"],
+        headers=headers,
+    )
+
+
+@app.get("/settings/backup")
+def get_backup_settings(
+    _: Annotated[Principal, Depends(require_permission("settings:manage"))],
+) -> dict[str, Any]:
+    return backup_settings_view()
+
+
+@app.put("/settings/backup")
+def set_backup_settings(
+    payload: BackupRetentionUpdate,
+    request: Request,
+    principal: Annotated[Principal, Depends(require_permission("settings:manage"))],
+) -> dict[str, Any]:
+    """Save the archive count. The worker applies it after the next successful
+    archive rather than deleting files while it may be writing a new one."""
+    save_backup_retention(payload.count, principal.username)
+    record_audit(
+        event_type="settings.updated", outcome="success", principal=principal,
+        target_type="setting", target_id=BACKUP_RETENTION_KEY,
+        context={"retention": payload.count},
+        source_ip=_client_ip(request), service=APP,
+    )
+    view = backup_settings_view()
+    view["applies_after_next_backup"] = True
+    return view
+
+
 # --------------------------------------------------------------------------- scheduler tick
 def execute_due_schedules(
     principal: Principal, *, source_ip: str | None = None
@@ -1057,5 +1175,13 @@ install_scheduler(app, [
         run=lambda: {
             "status": "success", "purged_reports": purge_expired(),
         },
+    ),
+    # Queueing is fast and idempotent; the worker container does the dump and
+    # applies retention. A backup already in progress is reported as skipped
+    # work, not a failed job.
+    ScheduledJob(
+        name="reporting.backup",
+        interval_seconds=get_settings().backup_interval,
+        run=queue_scheduled_backup,
     ),
 ])

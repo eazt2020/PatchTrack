@@ -16,13 +16,16 @@ Then in the UI:
 | Operational health | Every enabled integration `healthy` or `degraded` with a reason |
 | Reconciliation | Open conflicts count, and whether they are new |
 | Reports (if scheduled) | Yesterday's/this month's report `completed`, delivery `sent` |
+| Data backups | Worker `Online`, the newest archive `completed`, no failed request awaiting attention |
 
 Red flags:
 
 - unknown + stale rising for a source that should be collecting;
 - an integration `authentication_failure` (credential expired);
 - `stale` integration health (collection silently stopped);
-- an open reconciliation conflict on a hostname that matters.
+- an open reconciliation conflict on a hostname that matters;
+- the backup worker `Not running`, or a backup `failed` (the row carries the
+  error; see [backup-restore.md](backup-restore.md#troubleshooting)).
 
 ## 2. Health endpoints
 
@@ -338,6 +341,11 @@ Containers use the json-file driver with `max-size: 20m`, `max-file: 5`. For
 native mode, systemd's journal handles rotation; set
 `SystemMaxUse=2G` in `/etc/systemd/journald.conf`.
 
+`install.sh`, `upgrade.sh` and `uninstall.sh` each leave a complete run log in
+`/var/log/patchtrack/` with 90-day retention. [logging.md](logging.md) covers
+the file names, how to read a failed run, where each service and PostgreSQL
+write, and how to collect logs for support.
+
 Application logs never contain credentials; if you find one, treat it as a
 defect and report it.
 
@@ -354,6 +362,12 @@ Maintenance that requires downtime: schema migrations, a database restore, and
 changing `PATCHTRACK_SERVICE_TOKEN` (all services must agree). With secret
 files, replace the file content and restart the consuming services; the value
 is read once at start-up.
+
+For a planned stop and start, follow the order in
+[start-stop.md](start-stop.md): the gateway first, the backend services next,
+then PostgreSQL. That page also covers the stop grace period, what happens to
+scheduled work across a stop, and recovery from a host or container that was
+killed rather than stopped.
 
 ## 8. Monitoring to configure
 

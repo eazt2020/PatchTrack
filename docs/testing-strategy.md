@@ -7,8 +7,8 @@ pytest tests.
 
 | Layer | Location | Needs | Count |
 |-------|----------|-------|-------|
-| Unit tests | `tests/unit/` | Nothing but Python | 449 |
-| Database integration tests | `tests/integration/` | PostgreSQL | 136 |
+| Unit tests | `tests/unit/` | Nothing but Python | 466 |
+| Database integration tests | `tests/integration/` | PostgreSQL | 141 |
 | Browser smoke test | `tests/ui/smoke.py` | Playwright + Chromium + a running stack | 1 script, 14 routes |
 | Dashboard verification | manual procedure (§7) | Grafana + PostgreSQL | 15 panels |
 | Deployment verification | manual procedure (§8) | Docker + RHEL/Rocky 9 | full stack |
@@ -16,9 +16,9 @@ pytest tests.
 Run:
 
 ```bash
-/opt/patchtrack-venv/bin/python -m pytest                       # 449 pass, 136 skip without a DB
+/opt/patchtrack-venv/bin/python -m pytest                       # 466 pass, 141 skip without a DB
 PATCHTRACK_TEST_DATABASE_URL='postgresql+psycopg://patchtrack@/patchtrack_test?host=/tmp' \
-  /opt/patchtrack-venv/bin/python -m pytest                     # 585 pass
+  /opt/patchtrack-venv/bin/python -m pytest                     # 607 pass
 ```
 
 `pytest.ini` sets `testpaths = tests`, `--strict-markers` and fails on an
@@ -57,6 +57,8 @@ so the same command works on a build host without PostgreSQL.
 | `test_upgrade.py` | 9 | The guided upgrade validates target versions (no no-op, no downgrade, safe characters), edits `PATCHTRACK_VERSION` in place while preserving mode and unrelated lines, appends it when absent, reads quoted proxy values from `.env`, derives the loopback probe address from bind/port/TLS settings, refuses a backup directory inside the deployment, and places staging beside the installed tree |
 | `test_installer.py` | 27 | The guided installer validates bind addresses, ports, certificate names and account names; refuses to install over its source tree or a non-empty target; renders an environment file with no bootstrap secrets; uses loopback for its own probe when published on all interfaces; reverses recorded actions in order; refuses to remove a protected system path; verifies the bootstrap administrator's authenticated session against a local HTTPS gateway, including the refusal when that session belongs to another account; validates proxy URLs, redacts proxy credentials, renders the service proxy environment and escapes systemd specifiers in the Docker proxy drop-in; and in air-gap mode verifies bundle checksums, requires the required archives to be listed while tolerating a removed optional archive, refuses a bundle overlapping the install directories, skips registry probes, loads and tags the supplied images, and skips the build; preflight output shows a `how to fix` line for failed and warning checks only |
 | `test_integration_probe.py` | 11 | Each connector's Test configuration probe uses one page, succeeds on a documented response, reports 401/403 as an authentication failure, rejects a malformed payload and raises rather than silently returning an empty collection; the Solaris probe checks the inbox exists and every document parses |
+| `test_backup_worker.py` | 10 | The archive worker's script parses and fails fast with a private umask; the dump excludes live session tables and the backup queue; the archive is published only after its digest is known; temporary files are excluded from the report archive and retention never follows a path out of the backup directory; the retention setting is bounded; an archive path outside the configured directory is refused; the `reporting.backup` job is registered |
+| `test_run_log.py` | 7 | The install/upgrade/uninstall wrapper preserves the tool's exit status and captures stdout and stderr into one mode-0600 file; the directory is 0750 and `<tool>.log` links to the newest run; a failed log directory falls back to the user state directory with a warning; old timestamped logs are pruned while operator files are kept; a missing tool argument is refused; each wrapper invokes the logger with the right tool name and Python tool |
 
 The unit tests are where the compliance rules are pinned. Any change to
 `engine.py` that alters a published figure must change a test in
@@ -67,18 +69,23 @@ The unit tests are where the compliance rules are pinned. Any change to
 `tests/integration/test_reconciliation.py` — 13 tests,
 `tests/integration/test_password_change.py` — 8 tests,
 `tests/integration/test_rotation_end_to_end.py` — 3 tests,
-`tests/integration/test_asset_overrides.py` — 5 tests, and
+`tests/integration/test_asset_overrides.py` — 5 tests,
 `tests/integration/test_placement_options.py` — 10 tests,
 `tests/integration/test_dashboard_breakdown.py` — 4 tests,
 `tests/integration/test_dashboard_periods.py` — 12 tests,
-`tests/integration/test_integration_test_endpoint.py` — 5 tests, and
+`tests/integration/test_integration_test_endpoint.py` — 5 tests,
+`tests/integration/test_inventory_stats.py` — 3 tests,
+`tests/integration/test_justification_lifecycle.py` — 4 tests,
 `tests/integration/test_report_branding.py` — 6 tests,
+`tests/integration/test_report_deletion.py` — 5 tests,
 `tests/integration/test_report_retention.py` — 6 tests,
+`tests/integration/test_audit_retention.py` — 8 tests,
 `tests/integration/test_session_revocation.py` — 10 tests,
 `tests/integration/test_scheduler_state.py` — 8 tests,
 `tests/integration/test_scheduler_config.py` — 6 tests,
-`tests/integration/test_smtp_settings.py` — 13 tests, and
-`tests/integration/test_tls_settings.py` — 7 tests, all against a real,
+`tests/integration/test_smtp_settings.py` — 13 tests,
+`tests/integration/test_tls_settings.py` — 7 tests, and
+`tests/integration/test_backup_archive.py` — 5 tests, all against a real,
 freshly created database.
 
 The fixture creates `patchtrack_test`, applies every migration, and drops it at

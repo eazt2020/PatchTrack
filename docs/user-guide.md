@@ -387,8 +387,9 @@ timezone is chosen, the deployment timezone applies (see below).
 
 **System jobs** on the same screen lists every background job: the four
 collection connectors, the daily compliance snapshot, the audit-retention
-purge, the report schedule tick and report-file retention. Each row shows its
-interval, whether it is enabled, its next run and its last result.
+purge, the report schedule tick, report-file retention and the data-backup
+job. Each row shows its interval, whether it is enabled, its next run and its
+last result.
 
 An administrator can change a job's interval (in seconds, minimum 10) or switch
 it off, then press **Save**. The change is stored in the database and takes
@@ -410,8 +411,42 @@ fresh installation.
 | Compliance policy | Administrator | Target, freshness, blocking severities, scope rules |
 | Users & roles | Administrator | Accounts, roles, password resets |
 | Audit trail | Administrator | Who did what, when |
+| Data backups | Administrator | On-demand disaster-recovery archive, archive list and download, retention count, worker status |
 | Operational health | Operations | Integration status and manual collection |
 | Settings | Administrator | Report branding (organisation name, logo, preparer and concurrence); environment and business-service lists; report file retention; audit trail retention; SMTP relay for emailed reports; HTTPS certificate and key |
+
+### Creating and downloading a data backup
+
+**Administration → Data backups** produces a single archive of the database and
+the report files — the two things needed to rebuild this installation on the
+same PatchTrack release after corruption or a failed host. It is not a
+replacement for an installation image, and it contains no secrets: no `.env`,
+JWT secret, service token, TLS private key or database password.
+
+- **Create backup now** queues one archive. It runs in the background; the
+  screen refreshes while it is queued or running and shows the resulting size,
+  version, report count and SHA-256. A second request is refused while one is
+  active, because two dumps cannot safely overlap.
+- The same archive is produced on a schedule by the `reporting.backup` system
+  job. Change its cadence at **Reporting → Schedules → System jobs**, or switch
+  it off there; the first reporting start after installation or upgrade queues
+  one promptly.
+- The **worker** tile shows the dedicated `backup` container's heartbeat. If it
+  says *Not running*, a queued request will wait until the container is
+  started (`docker compose ps backup`, `docker compose logs backup`).
+- **Retention** is the number of completed archives kept, 1–90. The worker
+  removes older archives and their rows after the next successful backup, so
+  the screen can briefly show more than the limit.
+- **Download** saves the archive through the gateway. The account must be an
+  administrator; the download is audited. Verify it with
+  `sha256sum -c SHA256SUMS` after extracting, and compare the outer SHA-256
+  with the value shown on the screen.
+
+The archive contains user password hashes, so a restore keeps existing
+passwords, but the SMTP password is encrypted with a key that is deliberately
+not in the archive — re-enter it at **Settings → Email delivery** after a
+restore. Full restore and migration steps, including the report volume, are in
+[backup-restore.md](backup-restore.md#restore-an-in-app-archive).
 
 ### Testing an integration
 

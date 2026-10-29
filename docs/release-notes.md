@@ -28,6 +28,41 @@ This release has no new database migrations; `upgrade.sh` applies none.
 
 ## Unreleased — security and integrity corrections
 
+### In-app data archive for disaster recovery
+
+- **Portable backups from the console.** **Administration → Data backups**
+  creates on demand, and the `reporting.backup` system job creates on a
+  schedule, one `.tar.gz` containing a `pg_dump` custom-format database dump,
+  the report volume, a manifest (application and schema versions, counts,
+  digests), `SHA256SUMS` and `RESTORE.txt`. It is intended to rebuild a
+  same-release installation after corruption or on a replacement host; full
+  restore and migration steps are in
+  [backup-restore.md](backup-restore.md#in-app-data-archive).
+- **A dedicated worker, not the application image.** The `backup` Compose
+  service runs the PostgreSQL image already required by the deployment, so
+  `pg_dump` matches the server major version and the air-gap bundle needs no
+  new asset. The reporting service only queues work and serves downloads from
+  a read-only mount; the worker polls `shared.backup_runs`, writes to a
+  temporary directory, and renames the archive into place only after the
+  digest is known. A heartbeat distinguishes "queued" from "worker not
+  running".
+- **Exclusive queue.** A partial unique index permits one queued or running
+  archive; a manual request during a scheduled run returns `409` rather than
+  starting a second dump.
+- **Retention and safety.** The worker keeps the newest N completed archives
+  (1–90, default 7, `PATCHTRACK_BACKUP_RETENTION`), removes older rows and
+  files after a successful archive, and deletes an archive if its database row
+  cannot be completed. Live session tables (`identity.refresh_tokens`,
+  `identity.login_attempts`) and the backup queue itself are excluded from the
+  dump; no `.env`, JWT secret, service token, TLS key or database password is
+  archived. The SMTP password travels encrypted but must be re-entered after a
+  restore because its key does not.
+- **Migration `020_data_backups.sql`** creates `shared.backup_runs` and
+  `shared.backup_worker`. The Compose stack gains a `backup` service and a
+  `backups` volume; the reporting service reads that volume read-only. No
+  existing table is altered. `PATCHTRACK_VERSION` is now recorded in each
+  archive.
+
 ### Guided installer with preflight and automatic rollback
 
 - `install.sh` now performs a guided production installation. It asks for the
@@ -82,6 +117,37 @@ This release has no new database migrations; `upgrade.sh` applies none.
   previous version and verifies it. The backup is retained under
   `/var/lib/patchtrack/upgrades`, and downgrades are refused because they need
   a restore rather than an upgrade.
+
+### Run logs and graceful start and stop
+
+- **Installation, upgrade and uninstallation now leave a log.** The three
+  maintenance wrappers run their Python tool through
+  `scripts/patchtrack-run-logged.sh`, which copies everything printed on the
+  terminal — including `dnf`, the container runtime, `pg_dump` and `psql`
+  output — to `/var/log/patchtrack/<tool>-<UTC>-<pid>.log`. Files are mode
+  0600, the directory 0750, and `<tool>.log` links to the newest run. Each file
+  records the command line, invoking user, host, start and end times and the
+  tool's exit status. Logs are kept for 90 days. `PATCHTRACK_LOG_DIR` changes
+  the directory; if it is not writable the wrapper falls back to the per-user
+  state directory and says so, and it never blocks an installation over a
+  logging failure. No environment file, password, token or key is logged. The
+  uninstaller's log is written before removal and the directory is not in the
+  installation manifest, so the record survives uninstallation.
+- **Where every kind of log lives is now documented.** [logging.md](logging.md)
+  covers the installer logs, per-service container or journal output, Compose
+  log rotation (`20m` × 5), PostgreSQL logging in both deployments, the backup
+  worker, retention, support collection and log troubleshooting.
+- **Graceful stop and start are documented.** [start-stop.md](start-stop.md)
+  gives the dependency order (gateway first, backends next, PostgreSQL last),
+  verification after start, stop timeouts, what happens to scheduled
+  collections, reports and backups across a stop, host reboot behaviour and
+  recovery from an ungraceful stop.
+- **Stop grace periods match that behaviour.** Application services get
+  `stop_grace_period: 30s` so uvicorn can finish in-flight requests and the
+  scheduler's five-second shutdown; PostgreSQL gets `60s` for a fast shutdown.
+  The backup worker traps `SIGTERM`, finishes the archive or dump already
+  running, records it and exits at the top of its loop; a run still cut short
+  is marked failed and its temporary directory removed on the next start.
 
 ### Secret files for bootstrap credentials
 

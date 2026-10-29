@@ -62,6 +62,10 @@ class Settings(BaseSettings):
         ),
     )
     app_name: str = "PatchTrack"
+    # The installer writes the release tag into .env. It is recorded in every
+    # data archive so an operator can confirm that the target installation is
+    # the same release before restoring.
+    version: str = Field("", description="PatchTrack release version")
     log_level: str = "INFO"
     max_request_bytes: int = Field(
         64 * 1024 * 1024,
@@ -75,6 +79,14 @@ class Settings(BaseSettings):
 
     report_dir: Path = Path("/var/lib/patchtrack/reports")
     report_retention_days: int = 2555
+
+    # Data archives are written by the backup worker container onto a volume
+    # that the reporting service mounts read-only. The retention count is an
+    # initial default; the live value is in shared.app_settings and is edited
+    # in the console. The worker applies it after each successful archive.
+    backup_dir: Path = Path("/var/lib/patchtrack/backups")
+    backup_interval: int = Field(86400, ge=60)
+    backup_retention: int = Field(7, ge=1, le=90)
 
     # TLS termination inside the gateway. When enabled, the gateway serves
     # HTTPS on its normal port instead of HTTP, so a first installation is

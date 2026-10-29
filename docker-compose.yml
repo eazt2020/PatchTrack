@@ -20,6 +20,9 @@ x-service-defaults: &service-defaults
     context: .
     dockerfile: deploy/container/Dockerfile
   restart: unless-stopped
+  # uvicorn handles SIGTERM gracefully; allow in-flight requests and the
+  # scheduler's five-second shutdown window to finish before SIGKILL.
+  stop_grace_period: 30s
   env_file: .env
   depends_on:
     postgres:
@@ -45,6 +48,8 @@ services:
     # (see docs/configuration.md).
     image: ${POSTGRES_IMAGE:-docker.io/library/postgres:17}
     restart: unless-stopped
+    # Fast shutdown needs to flush the write-ahead log and checkpoint.
+    stop_grace_period: 60s
     environment:
       # Both spellings are set so either image works: the official image reads
       # POSTGRES_*, Red Hat's reads POSTGRESQL_*. Each ignores the other's.
@@ -133,13 +138,65 @@ services:
     volumes:
       # Reports outlive every container. A dedicated volume (not a bind mount)
       # keeps them safe from host path changes and backup/restore is a single
-      # volume archive.
-      - reports:/var/lib/patchtrack/reports:Z
+      # volume archive. `:z` is the shared label: the backup worker reads this
+      # volume too.
+      - reports:/var/lib/patchtrack/reports:z
+      # Archives are written by the worker and only read here, to serve a
+      # download after an authenticated, audited request.
+      - backups:/var/lib/patchtrack/backups:ro,z
     depends_on:
       postgres:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+
+  # Turns queued rows in shared.backup_runs into archives on the backups
+  # volume. It deliberately uses the PostgreSQL image: pg_dump must match the
+  # server major version, and this image is already required and shipped in the
+  # air-gap bundle. The application image therefore carries no database client
+  # binaries. Reporting mounts the volume read-only to serve downloads.
+  backup:
+    image: ${POSTGRES_IMAGE:-docker.io/library/postgres:17}
+    restart: unless-stopped
+    # The worker traps SIGTERM, finishes the dump or tar already running,
+    # records it and exits at the top of its loop. This window bounds that; a
+    # run cut short by the runtime is marked failed on the next start.
+    stop_grace_period: 30s
+    entrypoint: ["/bin/bash", "/opt/patchtrack/backup-worker.sh"]
+    env_file: .env
+    environment:
+      PATCHTRACK_BACKUP_DIR: /var/lib/patchtrack/backups
+      PATCHTRACK_REPORT_DIR: /var/lib/patchtrack/reports
+      PATCHTRACK_VERSION: ${PATCHTRACK_VERSION:-3.0.2}
+      # This container needs the database URL and nothing else from .env.
+      POSTGRES_PASSWORD: ""
+      PATCHTRACK_JWT_SECRET: ""
+      PATCHTRACK_SERVICE_TOKEN: ""
+      PATCHTRACK_SECRETS_KEY: ""
+      PATCHTRACK_SMTP_PASSWORD: ""
+      PATCHTRACK_GF_DB_PASSWORD: ""
+      GF_ADMIN_PASSWORD: ""
+    volumes:
+      - ./deploy/backup/backup-worker.sh:/opt/patchtrack/backup-worker.sh:ro,Z
+      - backups:/var/lib/patchtrack/backups:z
+      - reports:/var/lib/patchtrack/reports:ro,z
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
 
   gateway:
     <<: *service-defaults
@@ -232,6 +289,7 @@ services:
 volumes:
   pgdata:
   reports:
+  backups:
   solaris-inbox:
   grafana-data:
   prometheus-data:

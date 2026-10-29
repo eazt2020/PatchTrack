@@ -39,6 +39,9 @@ def test_period_snapshot_lookup_uses_a_date(monkeypatch):
         return None
 
     monkeypatch.setattr(main, "fetch_one", fake_fetch_one)
+    # The test pins the SQL parameter type, not the configured timezone; keep
+    # it hermetic so the unit suite needs no database.
+    monkeypatch.setattr(main.timezone_settings, "system_timezone", lambda: "UTC")
     with pytest.raises(HTTPException) as raised:
         main.request_report(
             ReportRequest(report_type="monthly_management",
