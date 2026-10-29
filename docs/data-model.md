@@ -71,7 +71,8 @@ the record of the purge cannot be removed by the same run.
 Key/value jsonb. Holds the organisation name used on reports and
 `audit_retention_days` (`{"days": N}`, default 2555 when absent), plus
 whatever runtime configuration must survive restarts: the system timezone,
-report file retention, and the SMTP relay under `smtp_relay`
+report file retention, data backup retention under `backup.retention`
+(`{"count": N}`), and the SMTP relay under `smtp_relay`
 (`{"host", "port", "starttls", "username", "password", "sender"}`).
 
 The SMTP password is the one credential in the database. It is stored as a
@@ -85,7 +86,7 @@ database (environment or `secret_ref` files).
 One row per in-app scheduled job (`inventory.assetexplorer`,
 `inventory.satellite`, `inventory.sccm`, `inventory.solaris`,
 `compliance.daily`, `identity.audit_purge`, `reporting.tick`,
-`reporting.retention`). Holds
+`reporting.retention`, `reporting.backup`). Holds
 `interval_seconds`, `next_run_at`, last start/finish timestamps, `last_status`
 (`success`/`failure`) and `last_message`.
 
@@ -100,6 +101,36 @@ process dies.
 System jobs**; once a row exists it is authoritative over the environment
 default. `updated_by` records the administrator who last changed it, and every
 change is also written to the audit trail as `scheduler.updated`.
+
+### `shared.backup_runs`
+
+The data-archive queue and its history. One row per requested archive, whether
+from **Create backup now** (`trigger_kind = 'manual'`) or the
+`reporting.backup` job (`'schedule'`).
+
+| Column | Meaning |
+|---|---|
+| `status` | `queued` → `running` → `completed` or `failed` |
+| `trigger_kind`, `requested_by`, `requested_at` | Who asked and when |
+| `started_at`, `finished_at` | Worker timestamps |
+| `filename`, `size_bytes`, `sha256` | The archive on the backups volume and its digest; NULL until completed |
+| `app_version`, `schema_version` | Release and highest migration at archive time |
+| `report_files`, `message` | Report-file count; failure explanation, truncated to 1000 characters |
+
+A partial unique index on a constant expression where `status IN ('queued',
+'running')` allows at most one active request, so a manual and a scheduled
+request cannot dump the database concurrently. A second request reads the
+active row and is refused with `409`. Filenames are unique when present. The
+row's data is **excluded from archives** (schema only), so a restored system
+does not inherit an in-flight queue or a history of files that are not on the
+new host.
+
+### `shared.backup_worker`
+
+One row (`singleton = true`): the worker's `last_seen_at` heartbeat and
+`worker_version`. The reporting service treats it as stale after 60 seconds and
+the Data backups screen warns; a queued backup with no heartbeat means the
+`backup` container is not running. Its data is also excluded from archives.
 
 ## identity
 
@@ -457,6 +488,7 @@ controlled purge.
 | Report PDF files | `PATCHTRACK_REPORT_RETENTION_DAYS` (default 2555 days) |
 | Report metadata | Indefinite, after the file is purged |
 | Login attempts | Indefinite; pruned manually if required |
+| Data archives | Newest N completed, where N is `backup.retention` (default 7); removed by the backup worker after a successful archive |
 
 The purge job removes files and sets nothing else: the row keeps its filename,
 SHA-256 and size, so an archived period remains identifiable after the bytes

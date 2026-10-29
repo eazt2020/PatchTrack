@@ -60,6 +60,14 @@ function fmtInterval(seconds) {
   return `${value} second${value === 1 ? "" : "s"}`;
 }
 
+function fmtBytes(bytes) {
+  const value = Number(bytes) || 0;
+  if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(2)} GiB`;
+  if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(1)} MiB`;
+  if (value >= 1024) return `${(value / 1024).toFixed(0)} KiB`;
+  return `${value} B`;
+}
+
 /* A tab strip with one panel visible at a time. `panels` is a list of
  * [key, label, content]; `state.key` remembers the selection for the session so
  * navigating away and back does not reset it. Keyboard: arrows, Home and End. */
@@ -150,6 +158,7 @@ const ROUTES = [
   { id: "users", label: "Users & roles", icon: "☖", perm: "users:manage" },
   { id: "audit", label: "Audit trail", icon: "⌸", perm: "audit:view" },
   { id: "health", label: "Operational health", icon: "♡", perm: "integrations:view" },
+  { id: "backups", label: "Data backups", icon: "⛁", perm: "settings:manage" },
   { id: "settings", label: "Settings", icon: "⚙", perm: "settings:manage" },
 ];
 
@@ -183,6 +192,7 @@ async function renderRoute() {
   const { path, params } = parseHash();
   // The dashboard arms its own timer; any other route must not inherit it.
   stopDashboardRefresh();
+  stopBackupRefresh();
   // A wall display can be bookmarked as #/dashboard?tv=1. The parameter wins
   // over the stored preference for this visit but does not overwrite it.
   if (params.get("tv") === "1") setKiosk(true, { persist: false });
@@ -683,6 +693,33 @@ function bindKiosk() {
       setKiosk(false);
     }
   });
+}
+
+/* ------------------------------------------------------ backup list refresh */
+/* A queued or running backup is short-lived. Polling while one is active makes
+   the result appear without a manual reload; the route check and the render
+   token prevent an old timer from painting over a different view. */
+let backupRefreshTimer = null;
+
+function stopBackupRefresh() {
+  if (backupRefreshTimer) {
+    window.clearTimeout(backupRefreshTimer);
+    backupRefreshTimer = null;
+  }
+}
+
+function scheduleBackupRefresh() {
+  stopBackupRefresh();
+  const token = renderToken;
+  backupRefreshTimer = window.setTimeout(() => {
+    backupRefreshTimer = null;
+    if (renderToken !== token || parseHash().path !== "backups") return;
+    if (document.hidden) {
+      scheduleBackupRefresh();
+      return;
+    }
+    renderBackups();
+  }, 5000);
 }
 
 /* --------------------------------------------------------- dashboard refresh */
@@ -2385,6 +2422,247 @@ async function renderSchedules() {
       jobsTable)));
 }
 
+/* ------------------------------------------------------------------ backups */
+async function renderBackups() {
+  mount(view, spinnerRows(3));
+  const [data, settings, jobs] = await Promise.all([
+    api("reporting/backups"),
+    api("reporting/settings/backup"),
+    api("reporting/scheduler/jobs"),
+  ]);
+  const job = jobs.find((entry) => entry.name === "reporting.backup") || null;
+  const worker = settings.worker || data.worker || {};
+  const active = data.active;
+  const completed = data.items.filter((row) => row.status === "completed");
+  const latest = completed.slice().sort((a, b) =>
+    String(b.finished_at || "").localeCompare(String(a.finished_at || "")))[0] || null;
+  const totalSize = completed.reduce(
+    (sum, row) => sum + (Number(row.size_bytes) || 0), 0);
+
+  const flash = h("div", { class: "stack" });
+  if (!worker.available) {
+    flash.appendChild(alert("warn",
+      "The backup worker is not reporting a heartbeat. A requested backup "
+      + "stays queued until it runs. Check that the backup container is up "
+      + "(`docker compose ps backup` and its logs)."));
+  }
+  if (job && !job.enabled) {
+    flash.appendChild(alert("warn",
+      "Scheduled backups are disabled. Existing archives remain downloadable; "
+      + "enable the job at Reporting → Schedules → System jobs."));
+  }
+  if (settings.pending_purge > 0) {
+    flash.appendChild(alert("warn",
+      `${settings.pending_purge} archive(s) are beyond the retention count and `
+      + "will be removed after the next successful backup."));
+  }
+
+  const create = h("button", {
+    class: "btn btn-primary",
+    disabled: Boolean(active),
+  }, active ? `Backup ${active.status}…` : "Create backup now");
+  create.addEventListener("click", async () => {
+    create.disabled = true;
+    flash.replaceChildren();
+    try {
+      await api("reporting/backups", { method: "POST" });
+      await renderBackups();
+    } catch (error) {
+      create.disabled = false;
+      flash.replaceChildren(alert("error", error.message));
+    }
+  });
+
+  const createCard = card("Create a backup",
+    "One archive of the database and the report volume; no service is stopped",
+    h("div", { class: "stack" },
+      h("div", { class: "row", style: { alignItems: "center" } },
+        create,
+        h("span", { class: "muted small" },
+          active
+            ? `${active.trigger_kind} backup requested by `
+              + `${active.requested_by || "unknown"} at `
+              + `${fmtDate(active.requested_at, true)}`
+            : "On-demand requests are queued and processed in the background.")),
+      h("div", { class: "small secondary" },
+        "A backup normally takes seconds to minutes depending on database and "
+        + "report size. It runs alongside the services and does not interrupt "
+        + "collection or report delivery.")));
+
+  const tiles = h("div", { class: "grid grid-4" },
+    statTile({
+      label: "Archives kept", value: String(settings.completed),
+      sub: `Retention: ${settings.retention} completed archive(s)`,
+      accent: "#5794f2",
+    }),
+    statTile({
+      label: "Archive storage", value: fmtBytes(totalSize),
+      sub: "Compressed archives on the backups volume",
+      accent: "#73bf69",
+    }),
+    statTile({
+      label: "Last backup",
+      value: latest ? fmtRelative(latest.finished_at) : "Never",
+      sub: latest ? fmtDate(latest.finished_at, true) : "No completed archive yet",
+      accent: "#b877d9",
+    }),
+    statTile({
+      label: "Backup worker",
+      value: worker.available ? "Online" : "Not running",
+      sub: worker.last_seen_at
+        ? `Last seen ${fmtRelative(worker.last_seen_at)}`
+        : "No heartbeat recorded",
+      accent: worker.available ? "#73bf69" : "#d03b3b",
+    }));
+
+  const retentionInput = h("input", {
+    id: "backup-retention",
+    type: "number",
+    min: String(settings.min_retention),
+    max: String(settings.max_retention),
+    value: String(settings.retention),
+    style: { width: "110px" },
+    "aria-label": "Completed archives to keep",
+  });
+  const retentionNote = h("div");
+  const retentionSave = h("button", { class: "btn btn-primary" }, "Save");
+  retentionSave.addEventListener("click", async () => {
+    const count = Number(retentionInput.value);
+    if (!Number.isInteger(count)
+        || count < settings.min_retention || count > settings.max_retention) {
+      retentionNote.replaceChildren(alert("error",
+        `Choose a whole number between ${settings.min_retention} and `
+        + `${settings.max_retention}.`));
+      return;
+    }
+    retentionSave.disabled = true;
+    retentionSave.textContent = "Saving…";
+    try {
+      const saved = await api("reporting/settings/backup", {
+        method: "PUT", body: { count },
+      });
+      retentionInput.value = String(saved.retention);
+      retentionNote.replaceChildren(alert("ok",
+        saved.pending_purge > 0
+          ? `Saved. The worker will remove ${saved.pending_purge} older `
+            + "archive(s) after the next successful backup."
+          : "Saved. The worker applies this count after every successful backup."));
+    } catch (error) {
+      retentionNote.replaceChildren(alert("error", error.message));
+    } finally {
+      retentionSave.disabled = false;
+      retentionSave.textContent = "Save";
+    }
+  });
+  const retentionCard = card("Archive retention",
+    "How many completed archives stay downloadable",
+    h("div", { class: "stack" },
+      h("div", { class: "row", style: { alignItems: "flex-end" } },
+        h("div", { class: "field" },
+          h("label", { for: "backup-retention" }, "Completed archives to keep"),
+          retentionInput),
+        retentionSave),
+      retentionNote,
+      h("div", { class: "small secondary" },
+        `Each archive contains the whole database and report volume, so size `
+        + `the backups volume for about ${settings.retention} × their combined `
+        + "size. Lowering the count does not delete anything until the next "
+        + "successful backup.")));
+
+  const scheduleBody = job
+    ? h("div", { class: "stack" },
+      h("dl", { class: "kv" },
+        h("dt", {}, "Cadence"),
+        h("dd", {}, `${fmtInterval(job.interval_seconds)}`
+          + (job.enabled ? "" : " (disabled)")),
+        h("dt", {}, "Next run"), h("dd", {}, fmtDate(job.next_run_at, true)),
+        h("dt", {}, "Last result"),
+        h("dd", {}, job.last_status
+          ? h("span", { title: job.last_message || "" },
+            pill(job.last_status, job.last_status))
+          : h("span", { class: "muted" }, "never run"))),
+      h("button", {
+        class: "btn btn-sm",
+        onclick: () => navigate("schedules"),
+      }, "Configure schedule"))
+    : h("p", { class: "muted" },
+      "The backup job is not registered in this release.");
+  const scheduleCard = card("Scheduled backups",
+    "The same queue as the on-demand button", scheduleBody);
+
+  const archiveTable = table([
+    { label: "Requested", render: (r) => h("div", {},
+      h("div", {}, fmtDate(r.requested_at, true)),
+      h("div", { class: "muted small" },
+        `${r.trigger_kind}${r.requested_by ? ` · ${r.requested_by}` : ""}`)) },
+    { label: "Status", render: (r) => h("div", {},
+      r.status === "queued" ? pill("pending", "queued")
+        : r.status === "running" ? pill("partial", "running")
+          : pill(r.status, r.status),
+      r.message
+        ? h("div", { class: "muted small", title: r.message },
+          r.message.length > 90 ? `${r.message.slice(0, 90)}…` : r.message)
+        : null) },
+    { label: "Size", numeric: true,
+      render: (r) => (r.size_bytes ? fmtBytes(r.size_bytes) : "—") },
+    { label: "Reports", numeric: true,
+      render: (r) => (r.report_files == null ? "—" : String(r.report_files)) },
+    { label: "Version", render: (r) => (r.app_version
+      ? h("div", { class: "small" }, r.app_version,
+        h("div", { class: "muted" }, `schema ${r.schema_version || "?"}`))
+      : "—") },
+    { label: "SHA-256", render: (r) => (r.sha256
+      ? h("span", { class: "mono small", title: r.sha256 },
+        `${r.sha256.slice(0, 12)}…`)
+      : "—") },
+    { label: "", export: false, render: (r) => (r.download_available
+      ? h("button", {
+        class: "btn btn-sm",
+        onclick: () => download(
+          `reporting/backups/${r.id}/download`, r.filename,
+        ).catch((error) => window.alert(error.message)),
+      }, "Download")
+      : h("span", { class: "muted" },
+        r.status === "completed" ? "file unavailable" : "—")) },
+  ], data.items, {
+    compact: true,
+    export: false,
+    empty: "No backups have been created yet.",
+  });
+  const archiveCard = card("Archives",
+    "Newest first; downloads are authenticated and audited", archiveTable);
+
+  const restoreCard = card("Restore and migration",
+    "Archives are portable only to the same PatchTrack release",
+    h("div", { class: "stack" },
+      h("p", { class: "small secondary" },
+        "Each archive is one .tar.gz containing database.dump (pg_dump custom "
+        + "format), reports.tar.gz, manifest.json, SHA256SUMS and RESTORE.txt. "
+        + "Verify it with sha256sum -c SHA256SUMS before restoring."),
+      h("p", { class: "small secondary" },
+        "Secrets are excluded: no .env, JWT signing secret, service token, TLS "
+        + "private key or database password. The database carries password "
+        + "hashes (users keep their passwords) and the SMTP password encrypted "
+        + "with the previous installation's key; re-enter the SMTP password "
+        + "after restoring."),
+      h("p", { class: "small secondary" },
+        "For a new host, install the same PatchTrack release first, then follow "
+        + "the restore steps in docs/backup-restore.md. Compare the application "
+        + "and schema versions in the manifest before restoring.")));
+
+  mount(view, h("div", { class: "stack" },
+    flash,
+    tiles,
+    createCard,
+    h("div", { class: "grid grid-2-1" }, retentionCard, scheduleCard),
+    archiveCard,
+    restoreCard));
+
+  const busy = active
+    || data.items.some((row) => row.status === "queued" || row.status === "running");
+  if (busy) scheduleBackupRefresh();
+}
+
 /* ------------------------------------------------------------------ integrations */
 async function renderIntegrations() {
   mount(view, spinnerRows(3));
@@ -3568,6 +3846,7 @@ const RENDERERS = {
   users: renderUsers,
   audit: renderAudit,
   health: renderHealth,
+  backups: renderBackups,
   settings: renderSettings,
 };
 

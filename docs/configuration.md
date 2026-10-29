@@ -38,6 +38,20 @@ Instants remain stored in UTC. Changing the zone re-labels calendar
 boundaries from the next period onward; it does not rewrite existing
 snapshots or reports.
 
+### Maintenance run logs
+
+These are read by `install.sh`, `upgrade.sh` and `uninstall.sh`, not by the
+application services, so they belong in the operator's environment rather than
+in `.env`:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `PATCHTRACK_LOG_DIR` | `/var/log/patchtrack` | Directory for installation, upgrade and uninstallation run logs. A path that cannot be written falls back to `${XDG_STATE_HOME:-$HOME/.local/state}/patchtrack/logs`. |
+| `PATCHTRACK_LOG_RETENTION_DAYS` | `90` | Age after which timestamped `<tool>-*.log` files are removed. A non-numeric value uses the default. |
+
+See [logging.md](logging.md#installer-upgrade-and-uninstaller-logs) for the
+file names, permissions and contents.
+
 ## 2. Database
 
 | Variable | Default | Notes |
@@ -110,6 +124,9 @@ variables at `%d/<name>`; see
 |----------|---------|-------|
 | `PATCHTRACK_REPORT_DIR` | `/var/lib/patchtrack/reports` | Must be the mounted volume path in containers |
 | `PATCHTRACK_REPORT_RETENTION_DAYS` | 2555 | File retention; metadata is kept |
+| `PATCHTRACK_BACKUP_DIR` | `/var/lib/patchtrack/backups` | Where the backup worker writes data archives; the reporting service reads the same mount read-only to serve downloads |
+| `PATCHTRACK_BACKUP_INTERVAL` | `86400` (24 h) | Initial cadence of the `reporting.backup` job; the stored row wins after the first run |
+| `PATCHTRACK_BACKUP_RETENTION` | `7` | Initial archive count; live value is on the Data backups screen (1–90) |
 | `PATCHTRACK_SMTP_HOST` | empty | Fallback only: empty disables delivery until a relay is saved in Settings; reports still generate |
 | `PATCHTRACK_SMTP_PORT` | 587 | Fallback only |
 | `PATCHTRACK_SMTP_USERNAME` | empty | Fallback only |
@@ -139,12 +156,25 @@ restarting anything.
 | Report file retention | 2555 days | Files older than the window are deleted by the daily report-retention job |
 | SMTP relay | environment values | Host, port, STARTTLS, username, password (encrypted) and sender used for scheduled report email |
 | System timezone | UTC | Calendar day used by schedules, snapshots, period boundaries and report timestamps |
+| Data backup retention | `PATCHTRACK_BACKUP_RETENTION` (7) | Completed archives kept on the backups volume; range 1–90. The worker applies a new value after the next successful archive |
 
 Audit retention is applied by `POST /jobs/audit-purge` on the identity service,
 which the in-app scheduler runs once a day (`PATCHTRACK_AUDIT_PURGE_INTERVAL`).
 The trail is otherwise append-only: the API can set the window, but there is no
 route that edits or deletes an individual event. Changing the window is itself
 audited.
+
+Data archives are written by the `backup` container, not by the reporting
+service. That container runs the same PostgreSQL image as the database, so
+`pg_dump` always matches the server major version, and it mounts the `backups`
+and `reports` volumes. It reads its configuration from the same `.env`; the
+only extra variables it understands are `PATCHTRACK_BACKUP_POLL_SECONDS`
+(default 10) and `PATCHTRACK_BACKUP_ONCE` (used by tests and by an operator who
+wants one pass before starting the loop). `PATCHTRACK_VERSION` is recorded in
+each manifest; Compose passes it from `.env`. A manually assembled deployment
+that omits it records `unknown`, and the Data backups screen falls back to the
+worker's heartbeat value. See
+[backup-restore.md](backup-restore.md#in-app-data-archive).
 
 ## 5. Scheduler
 

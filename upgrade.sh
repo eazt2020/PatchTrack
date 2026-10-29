@@ -29,4 +29,8 @@ if [ -z "$PYTHON_BIN" ] || [ ! -x "$PYTHON_BIN" ]; then
   exit 1
 fi
 
-exec "$PYTHON_BIN" "$HERE/scripts/patchtrack_upgrade.py" "$@"
+# Every run is copied to /var/log/patchtrack/upgrade-<UTC>-<pid>.log (or
+# $PATCHTRACK_LOG_DIR) with mode 0600. The wrapper still returns the upgrader's
+# exit status, and Ctrl-C reaches it so a failed upgrade can roll back.
+exec "$HERE/scripts/patchtrack-run-logged.sh" upgrade \
+  "$PYTHON_BIN" "$HERE/scripts/patchtrack_upgrade.py" "$@"

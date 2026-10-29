@@ -37,6 +37,12 @@ reported and without the next sync undoing it.
 - **Administration** — users and roles, policy versions, integrations,
   reconciliation, audit trail, report branding, retention windows, placement
   lists and the deployment timezone in the UI.
+- **Data backup** — **Administration → Data backups** creates, on demand or on
+  a schedule, one portable `.tar.gz` of the database and report files for
+  disaster recovery or migration to a new host on the same release. A dedicated
+  worker container writes it; the archive carries the release and schema
+  version, digests and restore instructions, and never carries the deployment's
+  secrets.
 - **Installation** — `install.sh` guides a fresh deployment through its
   parameters, checks every dependency first, verifies HTTPS, migrations, all
   services and the first administrator afterwards, and automatically reverses
@@ -69,6 +75,7 @@ reported and without the next sync undoing it.
 | `services/gateway` | Web UI, session/CSRF handling, API fan-out and TLS termination (8005) |
 | `services/common` | Config, file-backed secrets, database and scheduler helpers, security, TLS, migrations |
 | `deploy/postgres` | SQL migrations and the Grafana read-only role |
+| `deploy/backup` | Data-archive worker run in the PostgreSQL container |
 | `deploy/container` | Service image, entrypoint and pinned requirements |
 | `docker-compose.secrets.yml` | Opt-in Compose override for file-backed bootstrap secrets |
 | `deploy/grafana` | Provisioned datasource and dashboard |
@@ -233,6 +240,7 @@ API and reports work with Grafana stopped.
   [Offline deployment](docs/offline-deployment.md)
 - [Backup and restore](docs/backup-restore.md) ·
   [Upgrade and rollback](docs/upgrade-rollback.md)
+- [Logging](docs/logging.md) · [Start and stop](docs/start-stop.md)
 - [Operations runbook](docs/operations-runbook.md) ·
   [Troubleshooting](docs/troubleshooting.md)
 - [User guide](docs/user-guide.md) · [Release notes](docs/release-notes.md)
@@ -249,7 +257,7 @@ PATCHTRACK_TEST_DATABASE_URL=postgresql+psycopg://patchtrack@/patchtrack_test?ho
   /opt/patchtrack-venv/bin/python -m pytest tests/integration
 ```
 
-The suite currently contains 585 tests: 449 unit tests and 136 database
+The suite currently contains 607 tests: 466 unit tests and 141 database
 integration tests. Integration tests create and drop their own scratch
 database; never point them at a database holding real data.
 

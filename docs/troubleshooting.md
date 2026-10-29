@@ -4,6 +4,11 @@ Start with the symptom, then the evidence to collect, then the cause. Do not
 change `.env` secrets, disable TLS or disable SELinux to "see if it helps" —
 each of those turns a small problem into a security incident.
 
+Where the evidence is written is in [logging.md](logging.md): service and
+PostgreSQL logs, the backup worker, and the `install.sh`/`upgrade.sh`/
+`uninstall.sh` run logs under `/var/log/patchtrack/`. For a planned shutdown or
+restart, [start-stop.md](start-stop.md) gives the graceful order.
+
 ## Services do not start
 
 ```

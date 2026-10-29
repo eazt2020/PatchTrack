@@ -122,6 +122,12 @@ JOB_DEFINITIONS: tuple[JobDefinition, ...] = (
         "Deletes archived report files past their retention date.",
         "report_purge_interval",
     ),
+    JobDefinition(
+        "reporting.backup", "Data backup archive",
+        "Queues a database and report-file archive for disaster recovery. "
+        "The worker applies the retention count after each archive.",
+        "backup_interval",
+    ),
 )
 
 

@@ -28,4 +28,9 @@ if [ -z "$PYTHON_BIN" ] || [ ! -x "$PYTHON_BIN" ]; then
   exit 1
 fi
 
-exec "$PYTHON_BIN" "$HERE/scripts/patchtrack_uninstall.py" "$@"
+# Every run is copied to /var/log/patchtrack/uninstall-<UTC>-<pid>.log (or
+# $PATCHTRACK_LOG_DIR) with mode 0600. The wrapper still returns the
+# uninstaller's exit status. The log is written outside the installed tree and
+# configuration directory, so it survives the uninstallation.
+exec "$HERE/scripts/patchtrack-run-logged.sh" uninstall \
+  "$PYTHON_BIN" "$HERE/scripts/patchtrack_uninstall.py" "$@"

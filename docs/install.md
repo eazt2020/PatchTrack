@@ -20,6 +20,12 @@ copies the tree it is run from. If the archive was unpacked directly into
 `/opt/patchtrack`, choose another application directory or use the manual
 procedure below.
 
+Every run is copied in full to
+`/var/log/patchtrack/install-<UTC>-<pid>.log` (mode 0600), with `install.log`
+as a link to the newest one. The log includes the preflight output, rollback
+messages and the tool's final exit status. Set `PATCHTRACK_LOG_DIR` to write
+elsewhere; see [logging.md](logging.md#installer-upgrade-and-uninstaller-logs).
+
 It asks for:
 
 | Input | Default | Notes |
@@ -560,6 +566,12 @@ could not remove.
 Back up the database and reports first if you will use `--purge-data`; see
 [backup-restore.md](backup-restore.md).
 
+The uninstaller's own run log is written before anything is removed, and
+`/var/log/patchtrack` is not part of the installation manifest, so the record
+of the uninstallation survives it. The directory is left in place by default;
+copy it elsewhere before decommissioning the host. See
+[logging.md](logging.md#installer-upgrade-and-uninstaller-logs).
+
 ## Native installation (no containers)
 
 The services are ordinary Python packages and can run under systemd with a
@@ -591,6 +603,15 @@ loop. The per-integration cadences and the scheduler switch are configuration
 in the service environment (see
 [configuration.md](configuration.md#scheduler)), not in a timer environment
 file.
+
+The in-app data archive is implemented by the `backup` container in the
+Compose deployment. A native host does not get it automatically: run
+`deploy/backup/backup-worker.sh` under its own systemd unit with `psql`,
+`pg_dump` and `pg_restore` on `PATH` at the server's major version, and with
+`PATCHTRACK_DATABASE_URL`, `PATCHTRACK_BACKUP_DIR` and
+`PATCHTRACK_REPORT_DIR` set. Without it, requests from **Administration → Data
+backups** stay queued; use the host-side `pg_dump` procedure in
+[backup-restore.md](backup-restore.md#2-database-backup) instead.
 
 ```bash
 sudo install -m 0644 deploy/systemd/patchtrack@.service \

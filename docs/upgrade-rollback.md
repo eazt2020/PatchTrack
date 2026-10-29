@@ -46,6 +46,12 @@ sudo ./upgrade.sh --version 3.1.0           # asks for confirmation
 sudo ./upgrade.sh --version 3.1.0 --yes     # non-interactive
 ```
 
+The run is logged to `/var/log/patchtrack/upgrade-<UTC>-<pid>.log` (mode
+0600), with `upgrade.log` linking to the newest run. The log records the
+backup path, every verification result and any rollback, so keep it with the
+upgrade backup. See
+[logging.md](logging.md#installer-upgrade-and-uninstaller-logs).
+
 `--version` defaults to `PATCHTRACK_UPGRADE_VERSION`, then
 `PATCHTRACK_VERSION`. The target must differ from the installed version and
 must not be older; a downgrade needs a database restore, not an upgrade.
