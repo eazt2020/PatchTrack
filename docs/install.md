@@ -40,6 +40,7 @@ It asks for:
 | Proxy bypass list | Loopback and compose service names | Shown only when a proxy is set |
 | Air-gapped host | No | When yes, asks for the verified bundle directory; see [Air-gapped installation](#air-gapped-installation) |
 | First administrator | Create | Username, display name, optional email and password; the password is read without echo |
+| Sample data | No | Synthetic estate and history for evaluation; removable later without uninstalling; see [Sample data for evaluation](#sample-data-for-evaluation) |
 
 Before changing anything it checks root access, RHEL/Rocky 9 and architecture,
 SELinux, CPU, memory, free disk, `dnf`, `systemctl`, account tools, the selected
@@ -66,7 +67,9 @@ It then:
   `sudo systemctl start|stop|restart patchtrack` and
   `sudo journalctl -u patchtrack`; see [start-stop.md](start-stop.md);
 - creates the first administrator through the one-time bootstrap endpoint and
-  confirms an authenticated session with the forced password-change flag set.
+  confirms an authenticated session with the forced password-change flag set;
+- if sample data was requested, seeds the synthetic estate after the services
+  start, and records the result in `install.json`.
 
 If any step fails, the installer reverses the actions it recorded, newest
 first: containers, volumes and the built image, application files, the account
@@ -90,6 +93,37 @@ run the new release's `upgrade.sh`; see
 The installer does not open a firewall port. Permit TCP/8005 (or the port you
 chose) in the host firewall before users connect.
 
+### Sample data for evaluation
+
+The installer can load a synthetic estate so the dashboard, drill-downs,
+snapshots and PDF reports can be exercised before the AssetExplorer, Satellite,
+SCCM and Solaris integrations are connected. Answer **Yes** to *Load synthetic
+sample data* (non-interactive: `--sample-data`, or
+`PATCHTRACK_INSTALL_SAMPLE_DATA=yes`) and choose the server count and years of
+history, which default to 100 servers and five years.
+
+Every row is labelled synthetic: assets carry `raw.demo_data = true`, snapshots
+record `demo_data`/`synthetic_history` in their methodology, and sync runs carry
+`details.demo_data`. The data is generated through the normal ingestion and
+evaluation path, so it exercises the same code as a real collection. Nothing it
+writes is a reconstruction of a real estate.
+
+The sample data is independent of the installation. Remove it at any time
+without uninstalling PatchTrack:
+
+```bash
+sudo ./uninstall.sh --check --purge-sample-data   # show what would be removed
+sudo ./uninstall.sh --purge-sample-data
+```
+
+The stack must be running. The purge deletes the demo assets and their
+assessments, findings, compliance rows and justifications, the demo snapshots,
+the reconciliation conflicts the seed created, and reports generated from a
+demo snapshot together with their PDFs. It leaves the application, containers,
+images, volumes, configuration and every non-demo row untouched, so the host can
+be handed over for real use. `install.json` records the sample-data state and
+the purge time.
+
 ### Non-interactive use
 
 `--yes` accepts the defaults and reads parameters from `PATCHTRACK_INSTALL_*`
@@ -102,9 +136,10 @@ web form for the operator. Useful variables are
 `PATCHTRACK_INSTALL_ADMIN_USERNAME`, `PATCHTRACK_INSTALL_ADMIN_DISPLAY_NAME`,
 `PATCHTRACK_INSTALL_ADMIN_EMAIL`, `PATCHTRACK_INSTALL_RUNTIME`,
 `PATCHTRACK_INSTALL_PROXY`, `PATCHTRACK_INSTALL_NO_PROXY`,
-`PATCHTRACK_INSTALL_AIRGAP`, `PATCHTRACK_INSTALL_BUNDLE_DIR` and the preflight
-minimums `PATCHTRACK_INSTALL_MIN_DISK_GB` and
-`PATCHTRACK_INSTALL_MIN_MEMORY_GB`.
+`PATCHTRACK_INSTALL_AIRGAP`, `PATCHTRACK_INSTALL_BUNDLE_DIR`,
+`PATCHTRACK_INSTALL_SAMPLE_DATA`, `PATCHTRACK_INSTALL_SAMPLE_ASSETS`,
+`PATCHTRACK_INSTALL_SAMPLE_YEARS` and the preflight minimums
+`PATCHTRACK_INSTALL_MIN_DISK_GB` and `PATCHTRACK_INSTALL_MIN_MEMORY_GB`.
 
 ```bash
 sudo PATCHTRACK_INSTALL_BIND_ADDRESS=0.0.0.0 \
@@ -112,7 +147,9 @@ sudo PATCHTRACK_INSTALL_BIND_ADDRESS=0.0.0.0 \
   ./install.sh --yes
 ```
 
-`--runtime docker|podman` selects a runtime explicitly. `--allow-permissive`
+`--runtime docker|podman` selects a runtime explicitly. `--sample-data` loads
+the synthetic estate; `--sample-assets N` and `--sample-years N` set its size
+and imply it. `--allow-permissive`
 and `--allow-unsupported-os` exist only for documented exceptions and are not
 part of a supported production installation.
 
@@ -165,8 +202,8 @@ described in [offline-deployment.md](offline-deployment.md); do not run the
 installer against an unverified bundle.
 
 ```bash
-sudo ./install.sh --airgap --bundle-dir /srv/bundles/patchtrack-3.0.5
-sudo ./install.sh --airgap --bundle-dir /srv/bundles/patchtrack-3.0.5 --check
+sudo ./install.sh --airgap --bundle-dir /srv/bundles/patchtrack-3.0.7
+sudo ./install.sh --airgap --bundle-dir /srv/bundles/patchtrack-3.0.7 --check
 ```
 
 `--bundle-dir` implies `--airgap`. In interactive mode the installer asks
@@ -244,7 +281,7 @@ check is silently dropped — and the gateway's `depends_on: service_healthy`
 conditions then never become satisfied. Either build explicitly:
 
 ```bash
-podman build --format docker -f deploy/container/Dockerfile -t patchtrack:3.0.5 .
+podman build --format docker -f deploy/container/Dockerfile -t patchtrack:3.0.7 .
 podman-compose up -d
 ```
 
@@ -280,7 +317,7 @@ them for container use. Do not relabel them yourself.
 ## 3. Install the application files
 
 ```bash
-sudo tar -xzf patchtrack-3.0.5.tar.gz -C /opt/patchtrack --strip-components=1
+sudo tar -xzf patchtrack-3.0.7.tar.gz -C /opt/patchtrack --strip-components=1
 sudo chown -R patchtrack:patchtrack /opt/patchtrack
 ```
 
@@ -531,6 +568,25 @@ It preserves by default:
 Other options: `--keep-image`, `--keep-account`, `--yes` (non-interactive;
 combine with `--purge-data` only when you intend to destroy the data). There
 is no rollback, because uninstallation deletes state — run `--check` first.
+
+### Removing sample data without uninstalling
+
+If the installer seeded the synthetic evaluation estate, it can be removed on
+its own while PatchTrack keeps running:
+
+```bash
+sudo ./uninstall.sh --check --purge-sample-data   # dry run: show the counts
+sudo ./uninstall.sh --purge-sample-data
+```
+
+This mode does not stop or remove containers, images, volumes, the application
+tree or the configuration. It deletes only rows marked as synthetic — demo
+assets and their assessments, findings, compliance records and justifications,
+demo snapshots, the reconciliation conflicts the seed created, and reports
+generated from a demo snapshot along with their PDFs — and leaves real data in
+place. The stack must be running, and the mode cannot be combined with
+`--purge-data`, `--keep-image` or `--keep-account`. On success `install.json`
+records `sample_data.loaded: false` and the purge time.
 
 After removal, the uninstaller verifies that the application directory,
 managed configuration, containers, network and image are gone, that the

@@ -14,11 +14,16 @@ email-validator==2.3.0
 fastapi==0.162.0
 httpx==0.28.1
 Jinja2==3.1.6
+# Direct Solaris collection: read-only SSH to each configured target.
+paramiko==3.5.1
 psycopg[binary,pool]==3.3.6
 PyJWT==2.15.1
 pydantic==2.14.2
 pydantic-settings==2.16.2
 python-dotenv==1.2.4
+# Parses the multipart upload used to restore a downloaded archive from the
+# console; FastAPI raises at import time without it.
+python-multipart==0.0.20
 PyYAML==6.0.3
 reportlab==5.1.0
 SQLAlchemy==2.1.6

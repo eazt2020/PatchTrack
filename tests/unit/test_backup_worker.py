@@ -136,3 +136,84 @@ def test_the_backup_job_is_registered_in_the_scheduler():
 
     backup = {job.name: job for job in JOB_DEFINITIONS}["reporting.backup"]
     assert backup.interval_setting == "backup_interval"
+
+
+def test_restore_requires_an_explicit_confirmation_word():
+    from reporting.app.backups import RESTORE_CONFIRMATION
+
+    assert RESTORE_CONFIRMATION == "RESTORE"
+
+
+def test_migration_versions_are_compared_by_their_number():
+    from reporting.app.backups import schema_number
+
+    assert schema_number("021_restore_runs") == 21
+    assert schema_number("9_initial") == 9
+    assert schema_number(21) == 21
+    assert schema_number("") is None
+    assert schema_number("unknown") is None
+
+
+def test_restore_validates_the_archive_before_touching_the_database(script):
+    # The digest, the archive's own checksums and the release/schema checks all
+    # run before pg_restore; a mismatch exits without renaming anything.
+    assert 'sha256sum database.dump reports.tar.gz > SHA256SUMS' in script
+    assert 'sha256sum -c SHA256SUMS' in script
+    assert 'app_version' in script
+    assert 'schema_number' in script
+    assert script.index("sha256sum -c SHA256SUMS") < script.index("pg_restore")
+
+
+def test_restore_keeps_the_previous_database_and_never_reuses_a_name(script):
+    assert 'patchtrack_pre_restore_' in script
+    assert 'patchtrack_restore_' in script
+    # The old database is renamed aside, never dropped; only the scratch
+    # database a failed restore leaves behind may be dropped.
+    assert 'pg_terminate_backend' in script
+    assert 'RENAME TO' in script
+
+
+def test_the_worker_compares_migration_names_by_their_number(script):
+    # "021_restore_runs" must not be rejected as unreadable, and must not sort
+    # as a string against "9_initial".
+    assert "schema_number()" in script
+    assert "0*\\([0-9][0-9]*\\)" in script
+
+
+def test_an_uploaded_archive_manifest_is_read_without_extracting_it(tmp_path):
+    import io
+    import json
+    import tarfile
+
+    from reporting.app.backups import inspect_archive
+
+    good = tmp_path / "good.tar.gz"
+    manifest = {
+        "app_version": "3.0.6", "schema_version": "022_restore_uploads",
+    }
+    with tarfile.open(good, "w:gz") as archive:
+        payload = json.dumps(manifest).encode()
+        info = tarfile.TarInfo("manifest.json")
+        info.size = len(payload)
+        archive.addfile(info, io.BytesIO(payload))
+    assert inspect_archive(good) == manifest
+
+    bad = tmp_path / "bad.tar.gz"
+    bad.write_bytes(b"not a tar")
+    assert inspect_archive(bad) is None
+
+
+def test_the_worker_reads_uploads_from_their_own_volume(script):
+    assert 'UPLOAD_DIR=' in script
+    assert 'path="$UPLOAD_DIR/$filename"' in script
+    # Uploaded files are removed after the one attempt; archives PatchTrack
+    # produced stay for download and retention.
+    assert 'rm -f -- "$UPLOAD_DIR/$filename"' in script
+
+
+def test_the_worker_only_runs_one_restore_at_a_time(script):
+    assert "restore_runs_one_active_idx" in (
+        ROOT / "deploy" / "postgres" / "migrations" / "021_restore_runs.sql"
+    ).read_text()
+    assert "FOR UPDATE SKIP LOCKED" in script
+

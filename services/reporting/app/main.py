@@ -3,13 +3,25 @@ schedules and the background job tick."""
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+)
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import text
@@ -34,14 +46,22 @@ from .backups import (
     BACKUP_RETENTION_KEY,
     BACKUP_RETENTION_MAX,
     BACKUP_RETENTION_MIN,
+    RESTORE_CONFIRMATION,
     active_backup,
+    active_restore,
     archive_path,
     backup_settings_view,
     backup_stats,
+    current_schema_version,
     enqueue_backup,
+    enqueue_restore,
+    enqueue_upload_restore,
+    inspect_archive,
     list_backups,
+    list_restores,
     queue_scheduled_backup,
     save_backup_retention,
+    schema_number,
     worker_status,
 )
 from .scheduler import (
@@ -438,6 +458,61 @@ def request_report(
     background.add_task(_background_generate, report_id, payload.deliver,
                         payload.recipients)
     return {"id": report_id, "status": "queued"}
+
+
+@app.post("/reports/board-pack", status_code=202)
+def request_board_pack(
+    background: BackgroundTasks,
+    request: Request,
+    principal: Annotated[Principal, Depends(require_permission("reports:generate"))],
+) -> dict[str, Any]:
+    """Queue an Executive Board Pack from the latest recorded daily snapshot.
+
+    A board pack is not tied to a reporting month: it reports the most recent
+    day the estate was frozen, which is what the dashboard's Live view is
+    showing today. Refusing when no snapshot exists is deliberate — a pack built
+    from live rows would not match the snapshot the reader was looking at.
+    """
+    snapshot = fetch_one(
+        """
+        SELECT id, period_start, period_end FROM compliance.snapshots
+        WHERE scope = 'daily'
+        ORDER BY period_start DESC, captured_at DESC LIMIT 1
+        """
+    )
+    if snapshot is None:
+        raise HTTPException(
+            status_code=409,
+            detail="No daily compliance snapshot exists yet. Capture one "
+                   "before exporting a board pack.",
+        )
+    with connection() as conn:
+        row = conn.execute(
+            text(
+                """
+                INSERT INTO reporting.reports (
+                    report_type, period_start, period_end, filters, snapshot_id,
+                    requested_by
+                ) VALUES ('board_pack', :ps, :pe, '{}'::jsonb, :snap, :by)
+                RETURNING id, status
+                """
+            ),
+            {
+                "ps": snapshot["period_start"], "pe": snapshot["period_end"],
+                "snap": snapshot["id"], "by": principal.username,
+            },
+        ).mappings().first()
+    report_id = str(row["id"])
+    record_audit(
+        event_type="report.requested", outcome="success", principal=principal,
+        target_type="report", target_id=report_id,
+        context={"report_type": "board_pack",
+                 "snapshot_id": str(snapshot["id"])},
+        source_ip=_client_ip(request), service=APP,
+    )
+    background.add_task(_background_generate, report_id, False, [])
+    return {"id": report_id, "status": "queued",
+            "snapshot_id": str(snapshot["id"])}
 
 
 def _background_generate(report_id: str, deliver: bool,
@@ -994,6 +1069,138 @@ def create_backup(
     record_audit(
         event_type="backup.requested", outcome="success", principal=principal,
         target_type="backup", target_id=str(queued["id"]),
+        source_ip=_client_ip(request), service=APP,
+    )
+    return {"id": str(queued["id"]), "status": "queued"}
+
+
+class RestoreRequest(BaseModel):
+    backup_id: UUID
+    # Typing the word is the deliberate second step before a destructive swap.
+    confirm: str = Field(max_length=20)
+
+
+@app.get("/restores")
+def get_restores(
+    _: Annotated[Principal, Depends(require_permission("settings:manage"))],
+) -> dict[str, Any]:
+    return {
+        "items": list_restores(),
+        "active": active_restore(),
+        "worker": worker_status(),
+    }
+
+
+@app.post("/restores", status_code=202)
+def create_restore(
+    payload: RestoreRequest,
+    request: Request,
+    principal: Annotated[Principal, Depends(require_permission("settings:manage"))],
+) -> dict[str, str]:
+    if payload.confirm != RESTORE_CONFIRMATION:
+        raise HTTPException(
+            status_code=422,
+            detail=f'Type {RESTORE_CONFIRMATION} to confirm the restore.',
+        )
+    queued, reason = enqueue_restore(payload.backup_id, principal.username)
+    if queued is None:
+        raise HTTPException(status_code=409, detail=reason)
+    record_audit(
+        event_type="restore.requested", outcome="success", principal=principal,
+        target_type="backup", target_id=str(payload.backup_id),
+        source_ip=_client_ip(request), service=APP,
+    )
+    return {"id": str(queued["id"]), "status": "queued"}
+
+
+@app.post("/restores/upload", status_code=202)
+async def upload_restore(
+    request: Request,
+    principal: Annotated[Principal, Depends(require_permission("settings:manage"))],
+    archive: Annotated[UploadFile, File()],
+    confirm: Annotated[str, Form()] = "",
+) -> dict[str, str]:
+    """Accept a downloaded archive, stage it, and queue its restore.
+
+    The upload is streamed to the restore-uploads volume with a generated name;
+    the operator's filename is kept only for display. The manifest is checked
+    before the row is queued so an archive from another release fails here,
+    with the file removed, rather than later in the worker.
+    """
+    if confirm != RESTORE_CONFIRMATION:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Type {RESTORE_CONFIRMATION} to confirm the restore.",
+        )
+    original = Path(archive.filename or "").name
+    if not original.endswith(".tar.gz") or original.startswith("."):
+        raise HTTPException(
+            status_code=422,
+            detail="Choose the .tar.gz file produced by Data backups.",
+        )
+
+    settings = get_settings()
+    upload_dir = settings.restore_upload_dir
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    stored_name = f"restore-upload-{uuid4().hex}.tar.gz"
+    final_path = upload_dir / stored_name
+    part_path = upload_dir / f"{stored_name}.part"
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        with part_path.open("wb") as target:
+            while chunk := await archive.read(1024 * 1024):
+                total += len(chunk)
+                if total > settings.restore_upload_max_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail="The archive is larger than this installation "
+                               "accepts for a restore upload.",
+                    )
+                digest.update(chunk)
+                target.write(chunk)
+        os.replace(part_path, final_path)
+    except BaseException:
+        part_path.unlink(missing_ok=True)
+        final_path.unlink(missing_ok=True)
+        raise
+    finally:
+        await archive.close()
+
+    def discard(detail: str) -> HTTPException:
+        final_path.unlink(missing_ok=True)
+        return HTTPException(status_code=422, detail=detail)
+
+    manifest = inspect_archive(final_path)
+    if manifest is None:
+        raise discard("The file is not a readable PatchTrack archive.")
+    running_version = settings.version or ""
+    manifest_version = str(manifest.get("app_version") or "")
+    if not running_version or manifest_version != running_version:
+        raise discard(
+            "The archive was made by PatchTrack "
+            f"{manifest_version or 'unknown'}, but this installation runs "
+            f"{running_version or 'an unknown release'}. Install the matching "
+            "release first."
+        )
+    archived = schema_number(manifest.get("schema_version"))
+    current = schema_number(current_schema_version())
+    if archived is None or current is None:
+        raise discard("The archive or the database has no schema version recorded.")
+    if archived > current:
+        raise discard(
+            "The archive is newer than this installation's database schema. "
+            "Upgrade PatchTrack before restoring it."
+        )
+
+    queued, reason = enqueue_upload_restore(
+        stored_name, original, digest.hexdigest(), principal.username
+    )
+    if queued is None:
+        raise discard(reason)
+    record_audit(
+        event_type="restore.uploaded", outcome="success", principal=principal,
+        target_type="restore_upload", target_id=str(queued["id"]),
         source_ip=_client_ip(request), service=APP,
     )
     return {"id": str(queued["id"]), "status": "queued"}

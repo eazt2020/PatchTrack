@@ -24,13 +24,14 @@ function csrfToken() {
 export async function api(path, options = {}) {
   const { method = "GET", body, signal, redirectOnUnauthorized = true } = options;
   const headers = { Accept: "application/json" };
-  if (body !== undefined) headers["Content-Type"] = "application/json";
+  const isForm = body instanceof FormData;
+  if (body !== undefined && !isForm) headers["Content-Type"] = "application/json";
   if (method !== "GET") headers["X-PatchTrack-CSRF"] = csrfToken();
   const response = await fetch(`/api/${path.replace(/^\//, "")}`, {
     method,
     headers,
     credentials: "same-origin",
-    body: body === undefined ? undefined : JSON.stringify(body),
+    body: body === undefined ? undefined : (isForm ? body : JSON.stringify(body)),
     signal,
   });
   if (response.status === 401 && redirectOnUnauthorized) {

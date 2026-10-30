@@ -19,6 +19,8 @@ from .config import get_settings
 # request: five files at five megabytes each is roughly 33 MB once encoded.
 # The limit leaves headroom for that without accepting unbounded uploads.
 MAX_REQUEST_BYTES = 64 * 1024 * 1024
+DEFAULT_RESTORE_UPLOAD_BYTES = 4 * 1024 * 1024 * 1024
+RESTORE_UPLOAD_SUFFIX = "/restores/upload"
 
 
 class _BodyTooLarge(Exception):
@@ -33,14 +35,29 @@ class RequestBodyLimit:
     cannot bypass the limit.
     """
 
-    def __init__(self, app: Any, max_bytes: int = MAX_REQUEST_BYTES) -> None:
+    def __init__(
+        self,
+        app: Any,
+        max_bytes: int = MAX_REQUEST_BYTES,
+        upload_max_bytes: int = DEFAULT_RESTORE_UPLOAD_BYTES,
+    ) -> None:
         self.app = app
         self.max_bytes = max_bytes
+        self.upload_max_bytes = max(upload_max_bytes, max_bytes)
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+
+        # A downloaded archive can be larger than any JSON request. Only the
+        # restore-upload endpoint gets the archive-sized cap; every other path
+        # keeps the ordinary limit, so this does not widen the general surface.
+        limit = (
+            self.upload_max_bytes
+            if scope.get("path", "").endswith(RESTORE_UPLOAD_SUFFIX)
+            else self.max_bytes
+        )
 
         for name, value in scope.get("headers", []):
             if name == b"content-length":
@@ -49,10 +66,10 @@ class RequestBodyLimit:
                 except ValueError:
                     await _reject(send, 400, "Invalid Content-Length")
                     return
-                if declared > self.max_bytes:
+                if declared > limit:
                     await _reject(
                         send, 413,
-                        f"Request body exceeds {self.max_bytes} bytes",
+                        f"Request body exceeds {limit} bytes",
                     )
                     return
 
@@ -64,7 +81,7 @@ class RequestBodyLimit:
             message = await receive()
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
-                if received > self.max_bytes:
+                if received > limit:
                     raise _BodyTooLarge
             return message
 
@@ -103,5 +120,12 @@ def install(app: FastAPI) -> None:
     max_bytes = int(getattr(
         get_settings(), "max_request_bytes", MAX_REQUEST_BYTES
     ))
-    app.add_middleware(RequestBodyLimit, max_bytes=max_bytes)
+    upload_max_bytes = int(getattr(
+        get_settings(), "restore_upload_max_bytes", DEFAULT_RESTORE_UPLOAD_BYTES
+    ))
+    app.add_middleware(
+        RequestBodyLimit,
+        max_bytes=max_bytes,
+        upload_max_bytes=upload_max_bytes,
+    )
     app.add_exception_handler(RecursionError, _deeply_nested)

@@ -23,10 +23,11 @@ never combined into one ambiguous figure.
 from __future__ import annotations
 
 import calendar
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
-from typing import Any
+from typing import Any, Iterable, Mapping
 from zoneinfo import ZoneInfo
 
 DEFAULT_POLICY: dict[str, Any] = {
@@ -60,6 +61,7 @@ class AssetInput:
     application_group: str = "UNKNOWN"
     lifecycle_status: str = "active"
     in_scope: bool = True
+    exclusion_reason: str = ""
     patch_source: str = ""
     assessment_at: datetime | None = None
     assessment_status: str | None = None
@@ -197,6 +199,25 @@ class Population:
             return None
         return round(self.compliance_pct - self.target_pct, 2)
 
+    @property
+    def required_compliant(self) -> int | None:
+        """Servers that must be compliant to reach the target exactly."""
+        if self.target_pct is None:
+            return None
+        return math.ceil(self.target_pct / 100 * self.denominator)
+
+    @property
+    def gap_servers(self) -> int | None:
+        """How many more servers must be compliant to meet the target.
+
+        ``None`` when no target is configured or the population is empty —
+        a gap of zero would claim success against nothing.
+        """
+        required = self.required_compliant
+        if required is None or self.denominator == 0:
+            return None
+        return max(0, required - self.compliant)
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "total_servers": self.total,
@@ -209,6 +230,7 @@ class Population:
             "compliance_pct": self.compliance_pct,
             "target_pct": self.target_pct,
             "gap_pct": self.gap_pct,
+            "gap_servers": self.gap_servers,
             "critical_findings": self.critical_findings,
             "total_findings": self.total_findings,
         }
@@ -379,3 +401,164 @@ def remediation_due(
     if days is None:
         return None
     return released + timedelta(days=int(days))
+
+
+# --------------------------------------------------------------------------- insights
+# These are pure functions over already-loaded rows so the dashboard, the tests
+# and any future export all answer a question the same way.
+
+def finding_sla(findings: Iterable[Mapping[str, Any]],
+                *, today: date | None = None,
+                due_soon_days: int = 7) -> dict[str, Any]:
+    """Bucket current findings by their recorded remediation due date.
+
+    ``overdue`` is decided by the stored ``remediation_due`` — the date the
+    policy produced when the finding was ingested — never by re-deriving it
+    from ``released_at``. A finding with no due date is ``undated``: it is
+    neither on track nor overdue, and it is reported so it cannot hide.
+    """
+    today = today or datetime.now(UTC).date()
+    rows = list(findings)
+    overdue = due_soon = on_track = undated = 0
+    oldest_days = 0
+    for row in rows:
+        due = row.get("remediation_due")
+        if isinstance(due, datetime):
+            due = due.date()
+        if due is None:
+            undated += 1
+            continue
+        days = (due - today).days
+        if days < 0:
+            overdue += 1
+            oldest_days = max(oldest_days, -days)
+        elif days <= due_soon_days:
+            due_soon += 1
+        else:
+            on_track += 1
+    return {
+        "total": len(rows),
+        "overdue": overdue,
+        "due_soon": due_soon,
+        "on_track": on_track,
+        "undated": undated,
+        "due_soon_days": due_soon_days,
+        "oldest_days_overdue": oldest_days,
+    }
+
+
+def concentration(evaluations: Iterable[Evaluation]) -> dict[str, Any]:
+    """How unevenly outstanding patches sit across the fleet.
+
+    Returns a cumulative curve (server share against patch share) plus the
+    headline shares. Servers with no outstanding patches are part of the
+    population but add nothing to the curve, so the curve starts at the first
+    affected server; that boundary is stated in the response.
+    """
+    counts = sorted(
+        (e.total_patches for e in evaluations), reverse=True)
+    population = len(counts)
+    affected = [n for n in counts if n > 0]
+    total = sum(affected)
+    if not affected or total == 0:
+        return {
+            "population": population, "affected": 0, "total_patches": 0,
+            "top_10_pct_share": 0.0, "top_1pct_share": 0.0,
+            "top_10_servers_share": 0.0, "top_30_servers_share": 0.0,
+            "top_1pct_servers": 0, "top_10pct_servers": 0, "points": [],
+        }
+
+    def count_for(share: float) -> int:
+        return max(1, math.ceil(len(affected) * share))
+
+    def patch_share(n: int) -> float:
+        return round(sum(affected[:n]) / total * 100, 1)
+
+    # The curve records deciles of the affected population. Each point is the
+    # share of all outstanding patches held by that share of affected servers.
+    points = []
+    for step in range(1, 11):
+        n = max(1, math.ceil(len(affected) * step / 10))
+        points.append({
+            "server_share": round(n / len(affected) * 100, 1),
+            "patch_share": patch_share(n),
+            "servers": n,
+        })
+    return {
+        "population": population,
+        "affected": len(affected),
+        "total_patches": total,
+        "top_1pct_share": patch_share(count_for(0.01)),
+        "top_10_pct_share": patch_share(count_for(0.10)),
+        "top_10_servers_share": patch_share(min(10, len(affected))),
+        "top_30_servers_share": patch_share(min(30, len(affected))),
+        "top_1pct_servers": count_for(0.01),
+        "top_10pct_servers": count_for(0.10),
+        "points": points,
+    }
+
+
+def excluded_breakdown(
+    evaluations: Iterable[Evaluation], assets: Mapping[str, AssetInput],
+) -> dict[str, Any]:
+    """Why assets are outside the compliance denominator.
+
+    The engine's own reason is used first because it names the rule that
+    actually excluded the asset; the inventory's recorded exclusion reason is
+    the fallback when the asset was marked out of scope upstream.
+    """
+    buckets: dict[str, int] = {}
+    total = 0
+    for evaluation in evaluations:
+        if evaluation.state != "excluded":
+            continue
+        asset = assets.get(evaluation.asset_id)
+        reason = (
+            (asset.exclusion_reason if asset else "")
+            or evaluation.reason
+            or "Excluded without a recorded reason"
+        )
+        buckets[reason] = buckets.get(reason, 0) + 1
+        total += 1
+    rows = [
+        {"reason": reason, "count": count}
+        for reason, count in sorted(
+            buckets.items(), key=lambda item: (-item[1], item[0]))
+    ]
+    return {"total": total, "reasons": rows}
+
+
+def movers(current: Iterable[Mapping[str, Any]],
+           previous: Iterable[Mapping[str, Any]],
+           *, limit: int = 6) -> list[dict[str, Any]]:
+    """Percentage-point change per group between two recorded panels.
+
+    Only groups present in both observations are compared: a new group has no
+    previous rate, and treating it as zero would invent a collapse.
+    """
+    def rate(row: Mapping[str, Any]) -> float | None:
+        in_scope = int(row.get("in_scope") or 0)
+        compliant = int(row.get("compliant") or 0)
+        if in_scope == 0:
+            return None
+        return round(compliant / in_scope * 100, 2)
+
+    before = {str(row.get("group")): row for row in previous}
+    rows = []
+    for row in current:
+        key = str(row.get("group"))
+        old = before.get(key)
+        if old is None:
+            continue
+        now_rate, old_rate = rate(row), rate(old)
+        if now_rate is None or old_rate is None:
+            continue
+        rows.append({
+            "group": key,
+            "compliance_pct": now_rate,
+            "previous_pct": old_rate,
+            "change_pp": round(now_rate - old_rate, 2),
+            "servers": int(row.get("in_scope") or 0),
+        })
+    rows.sort(key=lambda r: (-abs(r["change_pp"]), r["group"]))
+    return rows[:limit]

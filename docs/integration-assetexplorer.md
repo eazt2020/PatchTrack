@@ -25,46 +25,88 @@ inventory container ──HTTPS GET──▶ AssetExplorer API :443
 | Setting | Value |
 |---------|-------|
 | Endpoint | `https://assetexplorer.example.com` (no trailing `/api`) |
-| Path used | `GET /api/v3/assets/servers?page=N&size=<page_size>` |
-| Auth methods | `bearer` → `Authorization: Bearer <token>`; `apikey` → `X-API-Key: <key>` |
+| Path used | `GET /api/v3/asset_servers?input_data=<url-encoded JSON>` |
+| API build | AssetExplorer build 7700 or later (the documented V3 Assets API) |
+| Auth methods | `integration_key` → `AUTHORIZATION: <key>` (on-premise default); `bearer` → `Authorization: Bearer <token>`; `apikey` → `X-API-Key: <key>` |
 | Credential | `secret_ref` reference, e.g. `env:PATCHTRACK_ASSETEXPLORER_TOKEN` or `file:/etc/patchtrack/assetexplorer.token` |
 | TLS | `verify_tls=true`; the issuing CA must be trusted by the container |
-| Timeouts | `connect_timeout_s` (default 30), `read_timeout_s` |
-| Page size | `page_size` (default 200) |
+| Timeouts | `connect_timeout_s` (default 30), `read_timeout_s` (default 60) |
+| Page size | `page_size` (default 200; AssetExplorer caps one page at 100) |
+
+The integration key is created under **Admin → Developer Space → Integration
+Key** (role required: SDAdmin). It is sent as the raw value of the
+`AUTHORIZATION` header, not as a `Bearer` token.
+
+Older builds expose `/api/v3/assets` with the rows under `assets`. Select that
+path with `extra.api_path`; ManageEngine supports it only until April 2026:
+
+```json
+{ "extra": { "api_path": "/api/v3/assets" } }
+```
+
+The connector also sends
+`Accept: application/vnd.manageengine.sdp.v3+json`, the documented media type
+for the V3 API.
+
+## Request shape
+
+Paging is controlled inside `input_data`, not by `page`/`size` query
+parameters:
+
+```
+GET /api/v3/asset_servers?input_data=%7B%22list_info%22%3A%7B%22start_index%22%3A1%2C%22row_count%22%3A2%7D%7D
+```
+
+which decodes to:
+
+```json
+{"list_info": {"start_index": 1, "row_count": 2}}
+```
 
 ## Response shape expected
 
 ```json
 {
-  "data": [
+  "response_status": { "status_code": 2000, "status": "success" },
+  "list_info": {
+    "has_more_rows": true,
+    "start_index": 1,
+    "row_count": 2,
+    "sort_field": "id",
+    "sort_order": "asc"
+  },
+  "asset_servers": [
     {
-      "asset_id": "AE-100234",
-      "host_name": "srv-web-01",
-      "fqdn": "srv-web-01.example.com",
-      "ip_address": "10.20.10.15",
+      "id": "4101",
+      "name": "srv-dc-01",
+      "fqdn": "srv-dc-01.corp.example",
+      "ip_address": "10.20.0.11",
+      "module": { "id": "3", "name": "Server", "display_name": "Server" },
+      "product": { "id": "77", "name": "PowerEdge R650" },
       "os_name": "Red Hat Enterprise Linux",
       "os_version": "9.4",
-      "asset_type": "Server",
       "asset_status": "In Use",
       "environment": "Production",
-      "business_group": "Customer Portal",
-      "application_group": "Web Tier",
-      "asset_owner": "j.smith",
-      "department": "Digital",
+      "business_group": "Infrastructure",
+      "application_group": "Directory",
+      "asset_owner": "a.singh",
+      "department": "IT",
       "location": "DC1",
-      "lifecycle_status": "In Use",
-      "asset_classification": "Confidential",
-      "created_time": "2024-03-02T09:11:00Z",
-      "last_modified_time": "2026-10-20T04:00:00Z"
+      "lifecycle_status": "Active",
+      "asset_classification": "Tier 1",
+      "created_time": "2024-01-02 09:15:00",
+      "last_modified_time": "2025-06-30 11:02:00"
     }
-  ],
-  "page_info": { "total_pages": 12, "page": 1 }
+  ]
 }
 ```
 
-Pagination stops when `page >= page_info.total_pages`, or — when `page_info`
-is absent — when a page returns fewer than `page_size` items. A hard cap of
-10,000 pages raises an error rather than looping forever.
+The row list key is `asset_servers`; `asset_assets` and the older `assets` key
+are also accepted. Pagination advances `start_index` by `page_size` while
+`list_info.has_more_rows` is true. When `list_info` is absent, a page shorter
+than `page_size` ends collection. A hard cap of 10,000 pages raises an error
+rather than looping forever. A `response_status` whose status is not
+`success` is raised as a probe/collection failure with ManageEngine's message.
 
 ## Field mapping
 
@@ -197,7 +239,7 @@ Content-Type: application/json
 
 {
   "endpoint": "https://assetexplorer.example.com",
-  "auth_method": "bearer",
+  "auth_method": "integration_key",
   "secret_ref": "env:PATCHTRACK_ASSETEXPLORER_TOKEN",
   "enabled": true,
   "sync_interval_minutes": 360,
@@ -205,8 +247,8 @@ Content-Type: application/json
 }
 ```
 
-Test the configuration first — this exercises the endpoint, TLS and bearer
-token and writes nothing:
+Test the configuration first — this exercises the endpoint, TLS and
+integration key and writes nothing:
 
 ```http
 POST /api/inventory/integrations/assetexplorer/test
@@ -234,13 +276,16 @@ acceptance test.
 
 ## Verification against a real installation
 
-The connector's field names follow the documented AssetExplorer v3 server
-asset resource. **They have not been verified against a live installation in
-this delivery.** Before enabling in production:
+The endpoint, authentication header, `input_data` paging and response envelope
+follow ManageEngine's published V3 API (build 7700+). They have been exercised
+against a simulator that reproduces that documented shape, not against a live
+installation. Custom field names still differ per installation. Before
+enabling in production:
 
 1. Call the endpoint once with `curl` and the same credential, capture one
    record.
-2. Compare the keys with `DEFAULT_FIELD_MAP`.
+2. Compare the keys with `DEFAULT_FIELD_MAP` (`id` and `name` are the V3
+   resource's own identifiers).
 3. Set `extra.field_map` for any difference.
 4. Run a sync and inspect `GET /api/inventory/assets?page_size=5`.
 

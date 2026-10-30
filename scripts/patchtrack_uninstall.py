@@ -82,6 +82,7 @@ class Options:
     check: bool = False
     yes: bool = False
     purge_data: bool = False
+    purge_sample_data: bool = False
     keep_image: bool = False
     keep_account: bool = False
     remove_proxy_config: bool = False
@@ -297,6 +298,109 @@ def inspect_runtime(manifest: Manifest) -> RuntimeState:
     state.volumes = _project_items(manifest, "volumes") or []
     state.image_present = base.image_exists(manifest.runtime, manifest.image)
     return state
+
+
+def purge_sample_data(manifest: Manifest, options: Options) -> int:
+    """Remove only the synthetic sample rows; the installation stays intact."""
+    print(base.colour("PatchTrack sample data purge", "1;1"))
+    if options.purge_data or options.keep_image or options.keep_account:
+        base.error(
+            "--purge-sample-data removes sample rows only; do not combine it "
+            "with --purge-data, --keep-image or --keep-account"
+        )
+        return 1
+    if os.geteuid() != 0:
+        base.error("sample data can be purged only as root; rerun with sudo")
+        return 1
+
+    script = manifest.install_dir / "scripts" / "purge-sample-data.py"
+    if not script.is_file():
+        base.error(
+            f"{script} is missing. This installation predates sample-data "
+            "support; update the application tree first."
+        )
+        return 1
+
+    state = inspect_runtime(manifest)
+    if not state.ready:
+        base.error(f"container runtime is not ready: {state.detail}")
+        return 1
+    if not any(name.endswith("_default") for name in state.networks):
+        base.error(
+            "the PatchTrack network is not present; start the stack first with "
+            "sudo systemctl start patchtrack"
+        )
+        return 1
+    if not state.image_present:
+        base.error(
+            f"{manifest.image} is not available; start the stack first so the "
+            "application image exists"
+        )
+        return 1
+
+    reports_volume = f"{manifest.compose_project}_reports"
+    volume = reports_volume if reports_volume in state.volumes else None
+    command = base.sample_data_command(
+        manifest, manifest.runtime, "purge-sample-data.py",
+        *(["--dry-run"] if options.check else []),
+        image=manifest.image, project=manifest.compose_project,
+        reports_volume=volume,
+    )
+
+    if options.check:
+        base.info("dry run: checking what would be removed; nothing will be changed")
+    elif not options.yes:
+        base.warn(
+            "This permanently deletes every synthetic asset, assessment, "
+            "finding, snapshot and sample-generated report. Real data, the "
+            "application, its configuration and its volumes are not touched."
+        )
+        try:
+            if not _ask_yes_no("Remove all synthetic sample data?", False):
+                base.info("Sample data purge cancelled; nothing has been changed.")
+                return 0
+        except UserCancelled as exc:
+            base.error(str(exc))
+            return 2
+
+    result = base.run_command(command, check=False, capture=True)
+    output = (result.stdout or "").strip()
+    if output:
+        print(output)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        base.error("sample data purge failed" + (f": {detail}" if detail else ""))
+        return 1
+
+    if options.check:
+        base.info("dry run complete; nothing has been changed.")
+        return 0
+
+    # Record the purge so the manifest no longer claims sample data is loaded.
+    try:
+        data = json.loads(manifest.path.read_text())
+    except (OSError, ValueError):
+        data = None
+    if isinstance(data, dict):
+        sample = data.get("sample_data")
+        if not isinstance(sample, dict):
+            sample = {}
+        sample["loaded"] = False
+        sample["purged_at"] = (
+            base._dt.datetime.now().astimezone().isoformat(timespec="seconds")
+        )
+        data["sample_data"] = sample
+        try:
+            manifest.path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+            os.chmod(manifest.path, 0o640)
+        except OSError as exc:
+            base.warn(f"could not update {manifest.path}: {exc}")
+
+    base.info(
+        "Sample data purged. The PatchTrack application, its configuration, "
+        "images and data volumes are untouched."
+    )
+    return 0
 
 
 def unknown_config_entries(manifest: Manifest) -> Tuple[List[Path], List[Path]]:
@@ -969,6 +1073,14 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="ALSO delete the PostgreSQL, report, Solaris inbox and TLS volumes",
     )
     parser.add_argument(
+        "--purge-sample-data", action="store_true",
+        help=(
+            "remove only the synthetic sample data loaded by the installer, "
+            "leaving the PatchTrack application, containers, images, volumes "
+            "and configuration in place"
+        ),
+    )
+    parser.add_argument(
         "--keep-image", action="store_true",
         help="leave the PatchTrack container image in place",
     )
@@ -989,6 +1101,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         check=args.check,
         yes=args.yes,
         purge_data=args.purge_data,
+        purge_sample_data=args.purge_sample_data,
         keep_image=args.keep_image,
         keep_account=args.keep_account,
         remove_proxy_config=args.remove_proxy_config,
@@ -1001,6 +1114,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except UninstallError as exc:
         base.error(str(exc))
         return 1
+
+    if options.purge_sample_data:
+        return purge_sample_data(manifest, options)
 
     if not manifest.service_user:
         manifest.service_user = infer_service_user(manifest)

@@ -16,8 +16,8 @@ not edit it.
 | `PATCHTRACK_SESSION_COOKIE_SECURE` | `auto` | `auto` marks the session and CSRF cookies `Secure` for every host other than loopback, so an unencrypted deployment cannot hold a session. `always` forces it even on loopback. `never` is a **development-only** escape hatch for browsing by IP over plain HTTP; the service refuses to start with `never` when `PATCHTRACK_ENVIRONMENT=production`. |
 | `PATCHTRACK_APP_TIMEZONE` | — | **Removed.** The deployment timezone is a database setting, changed in **Settings → Platform**, so every service picks it up without a restart. See [Time zone](#time-zone) below. |
 | `PATCHTRACK_LOG_LEVEL` | `INFO` | Uvicorn log level |
-| `PATCHTRACK_MAX_REQUEST_BYTES` | `67108864` (64 MiB) | Largest accepted request body. Justification evidence is submitted base64-encoded, so keep this comfortably above the combined attachment size. A larger body is refused with `413` before parsing. |
-| `PATCHTRACK_VERSION` | `3.0.5` | Image tag used by compose |
+| `PATCHTRACK_MAX_REQUEST_BYTES` | `67108864` (64 MiB) | Largest accepted request body. Justification evidence is submitted base64-encoded, so keep this comfortably above the combined attachment size. A larger body is refused with `413` before parsing. The restore-upload route uses `PATCHTRACK_RESTORE_UPLOAD_MAX_BYTES` instead. |
+| `PATCHTRACK_VERSION` | `3.0.7` | Image tag used by compose |
 
 ### Time zone
 
@@ -125,6 +125,8 @@ variables at `%d/<name>`; see
 | `PATCHTRACK_REPORT_DIR` | `/var/lib/patchtrack/reports` | Must be the mounted volume path in containers |
 | `PATCHTRACK_REPORT_RETENTION_DAYS` | 2555 | File retention; metadata is kept |
 | `PATCHTRACK_BACKUP_DIR` | `/var/lib/patchtrack/backups` | Where the backup worker writes data archives; the reporting service reads the same mount read-only to serve downloads |
+| `PATCHTRACK_RESTORE_UPLOAD_DIR` | `/var/lib/patchtrack/restore-uploads` | Staging volume for archives uploaded for an in-console restore; reporting writes it, the worker reads and removes the file after the attempt |
+| `PATCHTRACK_RESTORE_UPLOAD_MAX_BYTES` | `4294967296` (4 GiB) | Largest restore upload accepted on `/restores/upload`; every other request keeps `PATCHTRACK_MAX_REQUEST_BYTES` |
 | `PATCHTRACK_BACKUP_INTERVAL` | `86400` (24 h) | Initial cadence of the `reporting.backup` job; the stored row wins after the first run |
 | `PATCHTRACK_BACKUP_RETENTION` | `7` | Initial archive count; live value is on the Data backups screen (1–90) |
 | `PATCHTRACK_SMTP_HOST` | empty | Fallback only: empty disables delivery until a relay is saved in Settings; reports still generate |
@@ -222,6 +224,17 @@ credential **reference** live in `inventory.integrations` and are edited
 through the UI/API. That is deliberate: changing a collection endpoint should
 not require a restart, and a credential must never be in a file the app can be
 tricked into printing.
+
+### Solaris targets
+
+Solaris hosts are configured individually under **Integrations → Solaris →
+Manage hosts**, stored in `inventory.solaris_targets` and
+`inventory.solaris_baselines`. Each target carries its own SSH address,
+username, private-key reference (`env:`/`file:`), pinned `SHA256:` host key,
+Solaris major version and — for Solaris 10 — patch baseline. The inventory
+service therefore needs outbound TCP/22 to every enabled target; no inbound
+connection to Solaris hosts originates from anywhere else. When no targets are
+configured, the `PATCHTRACK_SOLARIS_INBOX` drop path remains in use.
 
 ### Credential references
 

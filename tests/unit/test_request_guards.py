@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from patchtrack_common.request_guards import RequestBodyLimit, install
 
 
-def _app(max_bytes: int = 1024) -> FastAPI:
+def _app(max_bytes: int = 1024, upload_max_bytes: int = 1024) -> FastAPI:
     app = FastAPI()
 
     @app.post("/echo")
@@ -20,7 +20,15 @@ def _app(max_bytes: int = 1024) -> FastAPI:
         await request.json()
         return {"ok": True}
 
-    app.add_middleware(RequestBodyLimit, max_bytes=max_bytes)
+    @app.post("/restores/upload")
+    async def upload(request: Request) -> dict[str, int]:
+        return {"bytes": len(await request.body())}
+
+    app.add_middleware(
+        RequestBodyLimit,
+        max_bytes=max_bytes,
+        upload_max_bytes=upload_max_bytes,
+    )
     app.add_exception_handler(RecursionError, _deep_handler)
     return app
 
@@ -51,6 +59,15 @@ def test_a_body_within_the_limit_reaches_the_route():
     response = TestClient(_app()).post("/echo", content=b"x" * 100)
     assert response.status_code == 200
     assert response.json() == {"bytes": 100}
+
+
+def test_only_the_restore_upload_path_gets_the_archive_limit():
+    app = _app(max_bytes=1024, upload_max_bytes=8192)
+    assert TestClient(app).post(
+        "/restores/upload", content=b"x" * 4096
+    ).status_code == 200
+    # The same body on an ordinary endpoint is still refused.
+    assert TestClient(app).post("/echo", content=b"x" * 4096).status_code == 413
 
 
 def test_a_recursion_failure_becomes_a_422_not_a_500():

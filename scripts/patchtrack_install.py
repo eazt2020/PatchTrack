@@ -49,12 +49,17 @@ from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Sequence, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_VERSION = "3.0.5"
+DEFAULT_VERSION = "3.0.7"
 DEFAULT_INSTALL_DIR = Path("/opt/patchtrack")
 DEFAULT_CONFIG_DIR = Path("/etc/patchtrack")
 DEFAULT_SERVICE_USER = "patchtrack"
 DEFAULT_BIND = "0.0.0.0"
 DEFAULT_PORT = 8005
+COMPOSE_PROJECT = "patchtrack"
+SAMPLE_DATA_ASSETS = 100
+SAMPLE_DATA_YEARS = 5
+MAX_SAMPLE_ASSETS = 10_000
+MAX_SAMPLE_YEARS = 10
 MIN_PASSWORD = 12
 MAX_PASSWORD = 512
 DEFAULT_NO_PROXY = (
@@ -323,6 +328,26 @@ def validate_bundle_dir(value: str) -> Optional[str]:
     if not value:
         return None
     return _path_error(value)
+
+
+def validate_sample_assets(value: str) -> Optional[str]:
+    try:
+        count = int(value, 10)
+    except ValueError:
+        return "must be a whole number"
+    if not 1 <= count <= MAX_SAMPLE_ASSETS:
+        return f"must be between 1 and {MAX_SAMPLE_ASSETS}"
+    return None
+
+
+def validate_sample_years(value: str) -> Optional[str]:
+    try:
+        years = int(value, 10)
+    except ValueError:
+        return "must be a whole number"
+    if not 1 <= years <= MAX_SAMPLE_YEARS:
+        return f"must be between 1 and {MAX_SAMPLE_YEARS}"
+    return None
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -644,6 +669,9 @@ class Config:
     no_proxy: str = DEFAULT_NO_PROXY
     airgap: bool = False
     bundle_dir: Optional[Path] = None
+    sample_data: bool = False
+    sample_assets: int = SAMPLE_DATA_ASSETS
+    sample_years: int = SAMPLE_DATA_YEARS
     runtime: str = "auto"
     min_disk_gb: int = 20
     min_memory_gb: int = 4
@@ -1773,6 +1801,48 @@ def compose(
     )
 
 
+def sample_data_command(
+    cfg: Config,
+    runtime: str,
+    script: str,
+    *args: str,
+    reports_volume: Optional[str] = None,
+    image: Optional[str] = None,
+    project: str = COMPOSE_PROJECT,
+) -> List[str]:
+    """Build a one-off container that runs a sample-data maintenance script.
+
+    The application image does not contain ``scripts/``, so the installed
+    script is bind-mounted read-only. The secret files are mounted
+    individually, as Compose does: the configuration directory is not
+    traversable by the container's unprivileged user. The database URL and JWT
+    secret are read from files, so no credential appears on the command line
+    or in the container environment.
+    """
+    script_path = cfg.install_dir / "scripts" / script
+    command = [
+        runtime, "run", "--rm",
+        "--network", f"{project}_default",
+        "--volume",
+        f"{cfg.secrets_dir / 'database_url'}:/run/secrets/database_url:ro,z",
+        "--volume",
+        f"{cfg.secrets_dir / 'jwt_secret'}:/run/secrets/jwt_secret:ro,z",
+        "--volume",
+        f"{script_path}:/opt/patchtrack/scripts/{script}:ro,z",
+    ]
+    if reports_volume:
+        command += [
+            "--volume", f"{reports_volume}:/var/lib/patchtrack/reports:z",
+        ]
+    command += [
+        "--env", "PATCHTRACK_DATABASE_URL_FILE=/run/secrets/database_url",
+        "--env", "PATCHTRACK_JWT_SECRET_FILE=/run/secrets/jwt_secret",
+        image or cfg.image, "python", f"/opt/patchtrack/scripts/{script}",
+        *args,
+    ]
+    return command
+
+
 def image_exists(runtime: str, image: str) -> bool:
     command = ["docker", "image", "inspect", image] if runtime == "docker" else [
         "podman", "image", "exists", image,
@@ -1914,6 +1984,8 @@ class Installer:
         self.created_group = False
         self.prebuilt_image = False
         self.image_loaded = False
+        self.sample_loaded = False
+        self.sample_error = ""
         # Docker keeps containers under /var/lib/docker and, with the
         # containerd image store, images under /var/lib/containerd. Podman
         # uses /var/lib/containers for both. Record which of these the host
@@ -2122,6 +2194,13 @@ class Installer:
             "installation_mode": "airgap" if self.cfg.airgap else "online",
             "airgap_bundle": str(self.cfg.bundle_dir) if self.cfg.airgap and self.cfg.bundle_dir else None,
             "admin_username": self.cfg.admin_username if self.cfg.create_admin else None,
+            "sample_data": {
+                "enabled": self.cfg.sample_data,
+                "assets": self.cfg.sample_assets if self.cfg.sample_data else 0,
+                "years": self.cfg.sample_years if self.cfg.sample_data else 0,
+                "loaded": False,
+                "loaded_at": None,
+            },
             "verified": False,
         }
         write_file(
@@ -2134,19 +2213,24 @@ class Installer:
         os.chown(self.cfg.env_file, 0, self.gid)
         info("bootstrap secrets created under " + str(self.cfg.secrets_dir))
 
-    def mark_verified(self) -> None:
+    def _update_metadata(self, **updates) -> None:
         path = self.cfg.config_dir / "install.json"
         try:
             data = json.loads(path.read_text())
         except (OSError, ValueError):
             return
-        data["verified"] = True
-        data["verified_at"] = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
+        data.update(updates)
         try:
             path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
             os.chmod(path, 0o640)
         except OSError:
             pass
+
+    def mark_verified(self) -> None:
+        self._update_metadata(
+            verified=True,
+            verified_at=_dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+        )
 
     def install_systemd_unit(self) -> None:
         step("Installing the systemd service")
@@ -2317,6 +2401,54 @@ class Installer:
         self.compose_up()
         info("containers started")
 
+    def load_sample_data(self) -> None:
+        if not self.cfg.sample_data:
+            return
+        step("Loading synthetic sample data")
+        info(
+            f"seeding {self.cfg.sample_assets} sample servers and "
+            f"{self.cfg.sample_years} years of history; every record is marked synthetic"
+        )
+        command = sample_data_command(
+            self.cfg, self.plan.runtime, "seed-demo.py",
+            "--assets", str(self.cfg.sample_assets),
+            "--years", str(self.cfg.sample_years),
+        )
+        # Stream the seed's progress: generating years of history can take a
+        # few minutes, and a silent installer looks hung.
+        result = run_command(
+            command, check=False, capture=False,
+            env=command_environment(self.cfg),
+        )
+        if result.returncode != 0:
+            self.sample_error = f"seed-demo exited with code {result.returncode}"
+            warn(
+                "sample data could not be loaded; the installation itself is "
+                "unaffected and will continue"
+            )
+            warn("see the seed output above for the reason")
+            self._update_metadata(sample_data={
+                "enabled": True,
+                "assets": self.cfg.sample_assets,
+                "years": self.cfg.sample_years,
+                "loaded": False,
+                "loaded_at": None,
+                "error": self.sample_error,
+            })
+            return
+        self.sample_loaded = True
+        self._update_metadata(sample_data={
+            "enabled": True,
+            "assets": self.cfg.sample_assets,
+            "years": self.cfg.sample_years,
+            "loaded": True,
+            "loaded_at": _dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+        })
+        info(
+            "sample data loaded; remove it later with "
+            "uninstall.sh --purge-sample-data"
+        )
+
     # -- verification
 
     def _opener(self, with_cookies: bool = False):
@@ -2464,6 +2596,7 @@ class Installer:
         self.install_files()
         self.install_systemd_unit()
         self.build_and_start()
+        self.load_sample_data()
         self.verify()
         self.activate_systemd_unit()
         self.completed = True
@@ -2521,6 +2654,25 @@ def config_from_env(args: argparse.Namespace) -> Config:
     )
     cfg.admin_email = env("PATCHTRACK_INSTALL_ADMIN_EMAIL", cfg.admin_email)
     cfg.admin_password = os.environ.get("PATCHTRACK_INSTALL_ADMIN_PASSWORD", "")
+    cfg.sample_data = bool(
+        args.sample_data
+        or args.sample_assets is not None
+        or args.sample_years is not None
+    ) or env_bool("PATCHTRACK_INSTALL_SAMPLE_DATA")
+    if args.sample_assets is not None:
+        cfg.sample_assets = args.sample_assets
+    if args.sample_years is not None:
+        cfg.sample_years = args.sample_years
+    for name, attribute in (
+        ("PATCHTRACK_INSTALL_SAMPLE_ASSETS", "sample_assets"),
+        ("PATCHTRACK_INSTALL_SAMPLE_YEARS", "sample_years"),
+    ):
+        value = os.environ.get(name)
+        if value is not None:
+            try:
+                setattr(cfg, attribute, int(value, 10))
+            except ValueError:
+                setattr(cfg, attribute, -1)
     cfg.runtime = args.runtime or env("PATCHTRACK_INSTALL_RUNTIME", "auto")
     try:
         cfg.min_disk_gb = int(env("PATCHTRACK_INSTALL_MIN_DISK_GB", str(cfg.min_disk_gb)))
@@ -2587,6 +2739,20 @@ def prompt_config(cfg: Config, runtime: RuntimeInfo) -> None:
         cfg.admin_password = _ask_password()
     else:
         cfg.admin_password = ""
+
+    print("    Sample data is synthetic: it exercises the console and reports before")
+    print("    the integrations are connected, and can be removed later without")
+    print("    uninstalling PatchTrack (uninstall.sh --purge-sample-data).")
+    cfg.sample_data = _ask_yes_no(
+        "Load synthetic sample data for evaluation?", cfg.sample_data
+    )
+    if cfg.sample_data:
+        cfg.sample_assets = int(_ask(
+            "Sample servers", str(cfg.sample_assets), validate_sample_assets
+        ))
+        cfg.sample_years = int(_ask(
+            "Years of sample history", str(cfg.sample_years), validate_sample_years
+        ))
 
     if runtime.docker_ready and runtime.podman_ready and cfg.runtime == "auto":
         choice = _ask("Container runtime (docker or podman)", "docker",
@@ -2672,6 +2838,14 @@ def validate_config(cfg: Config) -> List[str]:
         )
     if cfg.runtime not in ("auto", "docker", "podman"):
         problems.append("runtime must be auto, docker or podman")
+    if cfg.sample_data:
+        for label, value, validator in (
+            ("sample server count", str(cfg.sample_assets), validate_sample_assets),
+            ("sample history years", str(cfg.sample_years), validate_sample_years),
+        ):
+            problem = validator(value)
+            if problem:
+                problems.append(f"{label} {problem}")
     if cfg.min_disk_gb < 1 or cfg.min_memory_gb < 1:
         problems.append("minimum disk and memory must be at least 1")
     return problems
@@ -2695,6 +2869,11 @@ def summary(cfg: Config, plan: RuntimePlan) -> None:
         print("    Network access        : online")
     print(f"    Administrator         : "
           f"{cfg.admin_username if cfg.create_admin else 'not created (web form at first sign-in)'}")
+    if cfg.sample_data:
+        print(f"    Sample data           : {cfg.sample_assets} servers, "
+              f"{cfg.sample_years} years (synthetic)")
+    else:
+        print("    Sample data           : not loaded")
     print(f"    Public URL            : {cfg.public_url}")
     print("    On failure, every change recorded by this run is reversed automatically.")
 
@@ -2729,6 +2908,22 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument(
         "--bundle-dir", default=None, metavar="PATH",
         help="directory containing the verified air-gap bundle (implies --airgap)",
+    )
+    parser.add_argument(
+        "--sample-data", action="store_true",
+        help=(
+            "load synthetic sample inventory and history after the stack starts, "
+            "so the console and reports can be evaluated before the integrations "
+            "are connected"
+        ),
+    )
+    parser.add_argument(
+        "--sample-assets", type=int, default=None, metavar="N",
+        help=f"sample servers to create (default: {SAMPLE_DATA_ASSETS}; implies --sample-data)",
+    )
+    parser.add_argument(
+        "--sample-years", type=int, default=None, metavar="N",
+        help=f"years of synthetic history (default: {SAMPLE_DATA_YEARS}; implies --sample-data)",
     )
     parser.add_argument(
         "--allow-permissive", action="store_true",
@@ -2867,6 +3062,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("    You will be asked to change that password at first sign-in.")
     else:
         print("    No administrator exists yet; use the one-time form on the sign-in page.")
+    if installer.sample_loaded:
+        print(f"    Sample data: {cfg.sample_assets} synthetic servers with "
+              f"{cfg.sample_years} years of history.")
+        print("    Remove it later with: sudo ./uninstall.sh --purge-sample-data")
+    elif cfg.sample_data:
+        print("    Sample data was requested but was not loaded; see the warning above.")
     print("    The certificate is self-signed until an administrator uploads the organisation's")
     print("    certificate at Settings → HTTPS certificate.")
     print(f"    Configuration: {cfg.env_file}")

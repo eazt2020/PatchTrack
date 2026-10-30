@@ -1,5 +1,147 @@
 # Release notes
 
+## 3.0.7 — 2026-10-31
+
+Executive dashboard insights. Migrations `023_report_board_pack` and
+`024_solaris_ssh_targets` are applied by the migrate service on start-up.
+
+### Executive dashboard
+
+- **Remediation SLA.** Current findings are bucketed by the due date stored on
+  each finding — overdue, due within seven days, on track and undated — with the
+  oldest overdue advisories and their affected server counts. The findings list
+  now filters overdue by the same stored date instead of assuming 30 days from
+  release.
+- **Findings severity mix and gap-to-target.** The dashboard shows the severity
+  breakdown in the same panel grid, while the target tile states how many
+  servers are short of the target and the quarterly target.
+- **Top movers, concentration and exclusions.** Business-service movement is
+  compared across the two most recent recorded months; the missing-patch curve
+  shows how much of the backlog sits on the most affected servers; and excluded
+  assets are grouped by the reason they left the denominator.
+- **Data freshness by source.** Every configured integration is listed with
+  its last successful collection, age and freshness verdict, including sources
+  that have never synced.
+- **Click-through.** KPI tiles, business-service rows and status charts open
+  the server register narrowed to the same state, group or filter.
+- **Board pack export.** **Export board pack** queues the new `board_pack`
+  report from the latest daily snapshot and downloads it when ready.
+- **Rearrangeable panels.** **Arrange panels** turns on drag handles on every
+  dashboard panel. Drag a panel anywhere in the grid, or focus its handle and
+  use the arrow keys, Home and End; the order is remembered per browser, and
+  **Reset layout** restores the default.
+- **Neon console theme.** The interface now uses the reference board's palette:
+  a near-black indigo canvas with magenta, violet and cyan washes, gradient KPI
+  values and chart marks, and colour-coded status pills. The chart palette was
+  retuned with it, including a previously missing `critical` status colour.
+- **Reports match the theme.** PDF reports carry the same magenta–violet–cyan
+  accent band, violet headings and colour-coded KPIs and status cells, with
+  print-safe darkened tones. The page itself stays white so reports print and
+  photocopy cleanly.
+- **Product branding.** The PatchTrack mark is now part of the console: the
+  logo with the *Track · Monitor · Stay Compliant* tagline on the sign-in page
+  and report cover, and the square mark in the sidebar, PDF running header and
+  browser tab. An organisation logo uploaded under Settings still takes
+  precedence in reports.
+- **Optional sample data at installation, removable on its own.** The guided
+  installer can seed a synthetic estate (default 100 servers, five years) after
+  the stack starts; `--sample-data`, `--sample-assets` and `--sample-years`
+  cover non-interactive use. `uninstall.sh --purge-sample-data` removes only
+  the rows the seed marked synthetic — assets, assessments, findings, demo
+  snapshots, reconciliation conflicts and reports generated from them, with
+  their PDFs — and leaves the application, containers, images, volumes,
+  configuration and real data in place.
+- **AssetExplorer collection matches the published V3 API.** The connector
+  now calls `GET /api/v3/asset_servers` with `input_data` paging
+  (`start_index`/`row_count`, 100 rows maximum), sends the on-premise
+  integration key in the `AUTHORIZATION` header, and reads the
+  `response_status` / `list_info.has_more_rows` envelope with rows under
+  `asset_servers`. The previous probe used a path and `page`/`size`
+  parameters that AssetExplorer does not serve. Older builds remain selectable
+  with `extra.api_path=/api/v3/assets`.
+- **Satellite collection works in Simple Content Access organisations.** The
+  connector no longer sends an implicit `subscription_status = valid` host
+  filter, which returned zero hosts when Satellite reports SCA hosts as
+  `unknown`/`disabled`; `extra.host_search` replaces it for administrators who
+  want a narrower scope. Foreman-style `2026-09-30 16:30:00 UTC` timestamps
+  are now parsed as UTC instead of being discarded, and `extra.workers`
+  controls errata concurrency (the previous setting was never read).
+- **SCCM collection rejects an empty or error-shaped response.** A 200 body
+  without a `value` array (an error envelope, `{}`, a proxy page) now fails the
+  run instead of reporting a fully patched estate. `extra.api_path` points the
+  connector at a facade route other than `/SMS_REST/DeviceCompliance`, the
+  first address from the native `IPAddresses` array is used for matching, and
+  updates without an identifier are dropped. The documentation now states that
+  the native Administration Service cannot serve this contract directly: its
+  `Device` class has no missing-updates projection and it requires
+  Windows-integrated authentication.
+- **Solaris is collected directly from each host.** The Solaris integration now
+  manages many SSH targets instead of depending on a central configuration
+  manager: each host has its own address, key reference and pinned SHA-256 host
+  key, and a sync contacts enabled targets concurrently. Solaris 11.4+ hosts
+  report the latest IPS SRU as a pending finding; Solaris 10 hosts, which can
+  only enumerate installed patches, are diffed against an administrator-supplied
+  baseline — with no baseline the host is Unknown and no assessment is written.
+  A failed host never becomes a zero-finding assessment, and the watched-inbox
+  ingestion remains available when no SSH targets are configured. Hosts run the
+  new read-only `deploy/solaris/collect-solaris` collector through an SSH forced
+  command.
+- **Remediation due dates are recorded.** Findings now store the policy due
+  date at evaluation time, so the SLA buckets and the overdue filter populate
+  for collected data. Existing undated findings are backfilled on the next
+  compliance refresh; a date already recorded is never rewritten.
+
+## 3.0.6 — 2026-10-30
+
+Console, backup and operations release. It adds migrations `021_restore_runs`
+and `022_restore_uploads`; the migrate service applies them on start-up and no
+manual step is needed.
+
+### Restore from the console
+
+- **Data backups can be restored in place.** Archives now have a **Restore**
+  action next to Download. A dialog requires typing `RESTORE`; the request is
+  audited, queued in `shared.restore_runs` and performed by the backup worker.
+  Only one restore runs at a time, and new backups wait for it to finish.
+- **Restore a downloaded archive too.** **Restore from a downloaded archive**
+  accepts the `.tar.gz` saved earlier, streams it to a separate
+  `restore-uploads` volume, checks its manifest before queueing and deletes the
+  upload after the attempt. Ordinary requests keep the 64 MiB body limit;
+  only this route accepts the larger `PATCHTRACK_RESTORE_UPLOAD_MAX_BYTES`
+  (4 GiB default).
+- **Guarded and reversible.** The worker verifies the archive's SHA-256 and
+  internal checksums, refuses another release's archive or a newer schema, keeps
+  the previous database as `patchtrack_pre_restore_<UTC>`, snapshots the report
+  volume before replacing it, and records the result in a new Restore history
+  table on the screen. Failed restores change nothing.
+- **The worker gets three capabilities.** `CHOWN`, `DAC_OVERRIDE` and `FOWNER`
+  let its `tar` write the report volume as `1001:0`; every other capability
+  remains dropped.
+
+### Operations
+
+- **Operational health probes readiness, not liveness.** Each service row now
+  calls `/readyz`, so a service whose database connection is down shows
+  unreachable instead of healthy. The database and backup worker appear as
+  their own rows, and the backup worker's heartbeat clears only when it is
+  running.
+- **Status colours everywhere.** Operational health, audit outcomes and backup
+  states use green for good, red for failure, amber for pending and grey for
+  unknown.
+- **Report dates are unambiguous.** PDFs print DD/MM/YYYY with no time or
+  timezone abbreviation, after converting to the display timezone.
+
+### Console
+
+- **Create user works again.** The new-account form reused element IDs that the
+  user table and sidebar already used, so the button submitted an empty
+  username and the service returned `422`. The form now has its own IDs.
+- **Fluid motion.** Page content enters with a short easing curve, navigation
+  glides between items, buttons lift on hover, dialogs fade in over a blurred
+  backdrop, meters animate to their value and the mobile filter panel expands
+  smoothly. All of it is disabled under `prefers-reduced-motion`, and the route
+  entrance is removed after it plays so silent refreshes do not replay it.
+
 ## 3.0.5 — 2026-10-30
 
 Console-only release; no database migration is required.

@@ -11,6 +11,7 @@ import binascii
 import json
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -43,8 +44,21 @@ from .connectors.assetexplorer import AssetExplorerClient, AssetExplorerError
 from .connectors.satellite import SatelliteClient, SatelliteError
 from .connectors.sccm import SccmClient, SccmError
 from .connectors.solaris import SolarisIngestError, probe_inbox
+from .connectors.solaris_ssh import (
+    DEFAULT_COLLECTOR_COMMAND,
+    SolarisSshClient,
+    SolarisSshError,
+    SolarisTarget,
+    validate_baseline_entries,
+)
 from . import justifications as justification_rules
-from .sync import PATCH_SOURCE_KEYS, resolve_conflict, run_assetexplorer_sync, run_patch_sync
+from .sync import (
+    PATCH_SOURCE_KEYS,
+    load_solaris_targets,
+    resolve_conflict,
+    run_assetexplorer_sync,
+    run_patch_sync,
+)
 
 APP = "inventory"
 app = FastAPI(title="PatchTrack Inventory", version=release_version(), docs_url="/docs")
@@ -1276,14 +1290,31 @@ def list_integrations(
         )
         row["last_run"] = last
         row["last_success_at"] = success["at"] if success else None
+        if row["key"] == "solaris":
+            counts = fetch_one(
+                """
+                SELECT count(*) AS total,
+                       count(*) FILTER (WHERE enabled) AS enabled,
+                       count(*) FILTER (WHERE enabled AND last_error <> '') AS failing
+                FROM inventory.solaris_targets
+                """
+            ) or {}
+            row["target_count"] = int(counts.get("enabled") or 0)
+            row["target_total"] = int(counts.get("total") or 0)
+            row["target_failing"] = int(counts.get("failing") or 0)
         row["health"] = _health(row, last)
     return rows
 
 
 def _health(integration: dict[str, Any], last: dict[str, Any] | None) -> str:
+    # Solaris is pulled per host: there is no single endpoint, so configured
+    # targets stand in for one.
+    configured = bool(integration["endpoint"]) or bool(
+        integration.get("target_count")
+    )
     if not integration["enabled"]:
-        return "not_configured" if not integration["endpoint"] else "disabled"
-    if not integration["endpoint"]:
+        return "disabled" if configured else "not_configured"
+    if not configured:
         return "not_configured"
     if not last:
         return "pending"
@@ -1407,12 +1438,14 @@ def _probe_integration(settings: dict[str, Any], secret: str) -> str:
     if key == "assetexplorer":
         with AssetExplorerClient(
             settings["endpoint"],
-            auth_method=settings.get("auth_method", "bearer"),
+            auth_method=settings.get("auth_method", "integration_key"),
             secret=secret,
             timeout_s=float(settings.get("connect_timeout_s") or 30),
+            read_timeout_s=float(settings.get("read_timeout_s") or 60),
             page_size=int(settings.get("page_size") or 200),
             verify_tls=verify_tls,
             field_map=extra.get("field_map"),
+            api_path=extra.get("api_path", "/api/v3/asset_servers"),
         ) as client:
             return client.probe()
     if key == "satellite":
@@ -1423,6 +1456,7 @@ def _probe_integration(settings: dict[str, Any], secret: str) -> str:
             timeout_s=float(settings.get("read_timeout_s") or 60),
             page_size=int(settings.get("page_size") or 100),
             verify_tls=verify_tls,
+            host_search=str(extra.get("host_search") or ""),
         ) as client:
             return client.probe()
     if key == "sccm":
@@ -1432,10 +1466,57 @@ def _probe_integration(settings: dict[str, Any], secret: str) -> str:
             timeout_s=float(settings.get("read_timeout_s") or 60),
             page_size=int(settings.get("page_size") or 200),
             verify_tls=verify_tls,
+            api_path=str(extra.get("api_path") or "/SMS_REST/DeviceCompliance"),
         ) as client:
             return client.probe()
+    if key == "solaris":
+        detail = _probe_solaris_targets(extra)
+        if detail:
+            return detail
     inbox = Path(extra.get("inbox") or "/var/lib/patchtrack/solaris-inbox")
     return probe_inbox(inbox)
+
+
+def _probe_solaris_targets(extra: dict[str, Any]) -> str | None:
+    """Probe every enabled SSH target; return None when none are configured.
+
+    A probe proves SSH, the pinned host key, the collector and — for Solaris
+    10 — that a baseline is assigned. It writes no assessment.
+    """
+    targets = load_solaris_targets()
+    if not targets:
+        return None
+    client = SolarisSshClient(
+        targets,
+        collector_command=str(
+            extra.get("collector_command") or DEFAULT_COLLECTOR_COMMAND
+        ),
+        workers=int(extra.get("workers") or 4),
+    )
+
+    def probe(target: SolarisTarget) -> str:
+        return client.probe(target, resolve_secret(target.secret_ref))
+
+    details: list[str] = []
+    failures: list[str] = []
+    with ThreadPoolExecutor(max_workers=min(4, len(targets))) as pool:
+        futures = {pool.submit(probe, target): target for target in targets}
+        for future in as_completed(futures):
+            target = futures[future]
+            try:
+                details.append(f"{target.name}: {future.result()}")
+            except (SolarisSshError, SecretError) as exc:
+                failures.append(f"{target.name}: {exc}")
+            except Exception as exc:  # noqa: BLE001 - one target must not hide the rest
+                failures.append(f"{target.name}: {type(exc).__name__}: {exc}")
+    if failures:
+        raise SolarisSshError(
+            f"{len(failures)} of {len(targets)} Solaris target(s) failed: "
+            + "; ".join(sorted(failures)[:5])
+        )
+    return (
+        f"all {len(targets)} Solaris target(s) OK: " + "; ".join(sorted(details))
+    )
 
 
 @app.post("/integrations/{key}/test")
@@ -1501,7 +1582,7 @@ def test_integration(
         detail = _probe_integration(settings, secret)
     except (
         AssetExplorerError, SatelliteError, SccmError, SolarisIngestError,
-        SecretError,
+        SolarisSshError, SecretError,
     ) as exc:
         return failed(str(exc), started)
     except Exception as exc:  # noqa: BLE001 - a probe must never 500 the screen
@@ -1518,6 +1599,315 @@ def test_integration(
         "status": "success", "detail": detail, "duration_ms": duration_ms,
         "tested": "draft" if draft else "saved",
     }
+
+
+class SolarisTargetCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    hostname: str = Field(min_length=1, max_length=255)
+    port: int = Field(default=22, ge=1, le=65535)
+    username: str = Field(min_length=1, max_length=64)
+    secret_ref: str = Field(min_length=1, max_length=500)
+    host_key: str = Field(default="", max_length=200)
+    os_major: Literal[10, 11]
+    zone: str = Field(default="global", max_length=64)
+    baseline_id: UUID | None = None
+    collector_command: str = Field(default="", max_length=500)
+    enabled: bool = True
+    connect_timeout_s: int = Field(default=15, ge=1, le=300)
+    read_timeout_s: int = Field(default=120, ge=1, le=900)
+
+
+class SolarisTargetUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    hostname: str | None = Field(default=None, min_length=1, max_length=255)
+    port: int | None = Field(default=None, ge=1, le=65535)
+    username: str | None = Field(default=None, min_length=1, max_length=64)
+    secret_ref: str | None = Field(default=None, min_length=1, max_length=500)
+    host_key: str | None = Field(default=None, max_length=200)
+    os_major: Literal[10, 11] | None = None
+    zone: str | None = Field(default=None, max_length=64)
+    baseline_id: UUID | None = None
+    collector_command: str | None = Field(default=None, max_length=500)
+    enabled: bool | None = None
+    connect_timeout_s: int | None = Field(default=None, ge=1, le=300)
+    read_timeout_s: int | None = Field(default=None, ge=1, le=900)
+
+
+class SolarisBaselineCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    os_major: Literal[10, 11]
+    description: str = Field(default="", max_length=1000)
+    source: str = Field(default="manual", max_length=200)
+    entries: list[dict[str, Any]]
+
+
+SOLARIS_TARGET_COLUMNS = """
+    t.id, t.name, t.hostname, t.port, t.username, t.secret_ref, t.host_key,
+    t.os_major, t.zone, t.baseline_id, t.collector_command, t.enabled,
+    t.connect_timeout_s, t.read_timeout_s, t.last_success_at, t.last_error,
+    t.created_at, t.updated_at
+"""
+
+
+def _validate_target_fields(
+    changes: dict[str, Any], *, existing: dict[str, Any] | None = None
+) -> None:
+    if "secret_ref" in changes and changes["secret_ref"]:
+        try:
+            changes["secret_ref"] = validate_reference(changes["secret_ref"])
+        except SecretError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if changes.get("collector_command"):
+        command = changes["collector_command"]
+        if not command.startswith("/") or not re.fullmatch(
+            r"/[A-Za-z0-9_./@%:+=, -]*", command
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Collector command must be an absolute path without shell "
+                    "metacharacters"
+                ),
+            )
+    os_major = changes.get("os_major") or (existing or {}).get("os_major")
+    if "baseline_id" in changes:
+        baseline_id = changes["baseline_id"]
+    else:
+        baseline_id = (existing or {}).get("baseline_id")
+    if baseline_id is not None:
+        baseline = fetch_one(
+            "SELECT id, os_major, name FROM inventory.solaris_baselines WHERE id = :id",
+            id=str(baseline_id),
+        )
+        if baseline is None:
+            raise HTTPException(status_code=422, detail="Unknown baseline")
+        if os_major is not None and int(baseline["os_major"]) != int(os_major):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Baseline {baseline['name']} is for Solaris "
+                    f"{baseline['os_major']}, not {os_major}"
+                ),
+            )
+
+
+@app.get("/solaris/targets")
+def list_solaris_targets(
+    _: Annotated[Principal, Depends(require_permission("integrations:view"))],
+) -> list[dict[str, Any]]:
+    return fetch_all(
+        f"""
+        SELECT {SOLARIS_TARGET_COLUMNS},
+               b.name AS baseline_name
+        FROM inventory.solaris_targets t
+        LEFT JOIN inventory.solaris_baselines b ON b.id = t.baseline_id
+        ORDER BY t.name
+        """
+    )
+
+
+@app.post("/solaris/targets", status_code=status.HTTP_201_CREATED)
+def create_solaris_target(
+    payload: SolarisTargetCreate,
+    request: Request,
+    principal: Annotated[Principal, Depends(require_permission("integrations:manage"))],
+) -> dict[str, Any]:
+    changes = payload.model_dump()
+    _validate_target_fields(changes)
+    try:
+        execute(
+            """
+            INSERT INTO inventory.solaris_targets
+                (name, hostname, port, username, secret_ref, host_key, os_major,
+                 zone, baseline_id, collector_command, enabled,
+                 connect_timeout_s, read_timeout_s)
+            VALUES
+                (:name, :hostname, :port, :username, :secret_ref, :host_key,
+                 :os_major, :zone, :baseline_id, :collector_command, :enabled,
+                 :connect_timeout_s, :read_timeout_s)
+            """,
+            **{**changes, "baseline_id": str(changes["baseline_id"])
+               if changes["baseline_id"] else None},
+        )
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=409, detail="A target with that name already exists"
+        ) from exc
+    row = fetch_one(
+        f"SELECT {SOLARIS_TARGET_COLUMNS} FROM inventory.solaris_targets t "
+        "WHERE t.name = :name", name=changes["name"],
+    )
+    record_audit(
+        event_type="solaris.target_created", outcome="success",
+        principal=principal, target_type="solaris_target",
+        target_id=str(row["id"]) if row else changes["name"],
+        context={"name": changes["name"], "hostname": changes["hostname"],
+                 "os_major": changes["os_major"]},
+        source_ip=_client_ip(request), service=APP,
+    )
+    return row or {}
+
+
+@app.patch("/solaris/targets/{target_id}")
+def update_solaris_target(
+    target_id: UUID,
+    payload: SolarisTargetUpdate,
+    request: Request,
+    principal: Annotated[Principal, Depends(require_permission("integrations:manage"))],
+) -> dict[str, Any]:
+    existing = fetch_one(
+        f"SELECT {SOLARIS_TARGET_COLUMNS} FROM inventory.solaris_targets t "
+        "WHERE t.id = :id",
+        id=str(target_id),
+    )
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Unknown Solaris target")
+    changes = payload.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(status_code=400, detail="No changes supplied")
+    if "baseline_id" in changes and changes["baseline_id"] is not None:
+        changes["baseline_id"] = str(changes["baseline_id"])
+    _validate_target_fields(changes, existing=existing)
+    assignments = ", ".join(f"{field} = :{field}" for field in changes)
+    execute(
+        f"UPDATE inventory.solaris_targets SET {assignments}, updated_at = now() "
+        "WHERE id = :id",
+        **changes, id=str(target_id),
+    )
+    record_audit(
+        event_type="solaris.target_updated", outcome="success",
+        principal=principal, target_type="solaris_target", target_id=str(target_id),
+        context={"fields": sorted(changes)}, source_ip=_client_ip(request),
+        service=APP,
+    )
+    return fetch_one(
+        f"SELECT {SOLARIS_TARGET_COLUMNS} FROM inventory.solaris_targets t "
+        "WHERE t.id = :id",
+        id=str(target_id),
+    ) or {}
+
+
+@app.delete("/solaris/targets/{target_id}")
+def delete_solaris_target(
+    target_id: UUID,
+    request: Request,
+    principal: Annotated[Principal, Depends(require_permission("integrations:manage"))],
+) -> dict[str, Any]:
+    existing = fetch_one(
+        "SELECT id, name FROM inventory.solaris_targets WHERE id = :id",
+        id=str(target_id),
+    )
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Unknown Solaris target")
+    execute("DELETE FROM inventory.solaris_targets WHERE id = :id", id=str(target_id))
+    record_audit(
+        event_type="solaris.target_deleted", outcome="success",
+        principal=principal, target_type="solaris_target", target_id=str(target_id),
+        context={"name": existing["name"]}, source_ip=_client_ip(request),
+        service=APP,
+    )
+    return {"deleted": True, "name": existing["name"]}
+
+
+@app.post("/solaris/targets/{target_id}/test")
+def test_solaris_target(
+    target_id: UUID,
+    request: Request,
+    principal: Annotated[Principal, Depends(require_permission("integrations:manage"))],
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    target = fetch_one(
+        "SELECT * FROM inventory.solaris_targets WHERE id = :id", id=str(target_id)
+    )
+    if target is None:
+        raise HTTPException(status_code=404, detail="Unknown Solaris target")
+    baseline = None
+    if target["baseline_id"]:
+        baseline = fetch_one(
+            "SELECT id, name, entries FROM inventory.solaris_baselines WHERE id = :id",
+            id=str(target["baseline_id"]),
+        )
+        if baseline:
+            baseline = {
+                "id": str(baseline["id"]), "name": baseline["name"],
+                "entries": baseline["entries"],
+            }
+    view = SolarisTarget(
+        id=str(target["id"]), name=target["name"], hostname=target["hostname"],
+        username=target["username"], secret_ref=target["secret_ref"],
+        os_major=int(target["os_major"]), port=int(target["port"]),
+        host_key=target["host_key"] or "", zone=target["zone"] or "global",
+        collector_command=target["collector_command"] or "",
+        connect_timeout_s=int(target["connect_timeout_s"]),
+        read_timeout_s=int(target["read_timeout_s"]), baseline=baseline,
+    )
+    try:
+        secret = resolve_secret(target["secret_ref"])
+        detail = SolarisSshClient([view]).probe(view, secret)
+    except (SolarisSshError, SecretError) as exc:
+        detail = str(exc)
+        status_text = "failed"
+    else:
+        status_text = "success"
+    duration_ms = round((time.perf_counter() - started) * 1000)
+    record_audit(
+        event_type="solaris.target_tested", outcome=status_text,
+        principal=principal, target_type="solaris_target", target_id=str(target_id),
+        context={"detail": detail[:500]}, source_ip=_client_ip(request), service=APP,
+    )
+    return {"status": status_text, "detail": detail, "duration_ms": duration_ms}
+
+
+@app.get("/solaris/baselines")
+def list_solaris_baselines(
+    _: Annotated[Principal, Depends(require_permission("integrations:view"))],
+) -> list[dict[str, Any]]:
+    return fetch_all(
+        "SELECT id, name, os_major, description, source, entries, created_by, "
+        "created_at, updated_at FROM inventory.solaris_baselines ORDER BY name"
+    )
+
+
+@app.post("/solaris/baselines", status_code=status.HTTP_201_CREATED)
+def create_solaris_baseline(
+    payload: SolarisBaselineCreate,
+    request: Request,
+    principal: Annotated[Principal, Depends(require_permission("integrations:manage"))],
+) -> dict[str, Any]:
+    try:
+        entries = validate_baseline_entries(payload.entries)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        execute(
+            """
+            INSERT INTO inventory.solaris_baselines
+                (name, os_major, description, source, entries, created_by)
+            VALUES (:name, :os_major, :description, :source,
+                    CAST(:entries AS jsonb), :by)
+            """,
+            name=payload.name, os_major=payload.os_major,
+            description=payload.description, source=payload.source,
+            entries=json.dumps(entries), by=principal.username,
+        )
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=409, detail="A baseline with that name already exists"
+        ) from exc
+    row = fetch_one(
+        "SELECT id, name, os_major, description, source, entries, created_by, "
+        "created_at, updated_at FROM inventory.solaris_baselines WHERE name = :n",
+        n=payload.name,
+    )
+    record_audit(
+        event_type="solaris.baseline_created", outcome="success",
+        principal=principal, target_type="solaris_baseline",
+        target_id=str(row["id"]) if row else payload.name,
+        context={"name": payload.name, "os_major": payload.os_major,
+                 "entries": len(entries)},
+        source_ip=_client_ip(request), service=APP,
+    )
+    return row or {}
 
 
 class TriggerSync(BaseModel):

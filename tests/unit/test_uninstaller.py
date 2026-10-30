@@ -243,3 +243,95 @@ def test_uninstaller_refuses_a_bundle_inside_the_application_directory(tmp_path)
 
     with pytest.raises(uninstaller.UninstallError, match="must not overlap"):
         uninstaller.load_manifest(path)
+
+
+def test_uninstaller_help_lists_the_sample_data_purge():
+    import subprocess
+
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "patchtrack_uninstall.py"), "--help"],
+        capture_output=True, text=True, check=False,
+    )
+
+    assert result.returncode == 0
+    assert "--purge-sample-data" in result.stdout
+
+
+def _ready_state():
+    return uninstaller.RuntimeState(
+        ready=True,
+        detail="docker compose is available",
+        networks=["patchtrack_default"],
+        volumes=["patchtrack_pgdata", "patchtrack_reports"],
+        image_present=True,
+    )
+
+
+def test_sample_data_purge_runs_only_the_purge_script(tmp_path, monkeypatch):
+    import types
+
+    path, _, install, _ = write_manifest(tmp_path)
+    script = install / "scripts" / "purge-sample-data.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("# placeholder\n")
+    manifest = uninstaller.load_manifest(path)
+
+    monkeypatch.setattr(uninstaller.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(uninstaller, "inspect_runtime", lambda _m: _ready_state())
+    calls = []
+
+    def fake_run_command(command, **kwargs):
+        calls.append((command, kwargs))
+        return types.SimpleNamespace(
+            returncode=0,
+            stdout="Sample data purge (dry run)\n    would remove: 4 assets",
+            stderr="",
+        )
+
+    monkeypatch.setattr(uninstaller.base, "run_command", fake_run_command)
+
+    result = uninstaller.purge_sample_data(
+        manifest, uninstaller.Options(check=True)
+    )
+
+    assert result == 0
+    command, kwargs = calls[0]
+    assert command[0] == "docker"
+    assert command[1:3] == ["run", "--rm"]
+    assert "patchtrack_default" in command
+    assert "patchtrack_reports:/var/lib/patchtrack/reports:z" in command
+    assert "--dry-run" in command
+    assert "/opt/patchtrack/scripts/purge-sample-data.py" in command
+    assert command[-1] == "--dry-run"
+    assert kwargs["capture"] is True
+    # The manifest is not rewritten during a dry run.
+    assert json.loads(path.read_text()).get("sample_data") is None
+
+
+def test_sample_data_purge_requires_a_running_stack(tmp_path, monkeypatch):
+    path, _, install, _ = write_manifest(tmp_path)
+    script = install / "scripts" / "purge-sample-data.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("# placeholder\n")
+    manifest = uninstaller.load_manifest(path)
+
+    monkeypatch.setattr(uninstaller.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        uninstaller, "inspect_runtime",
+        lambda _m: uninstaller.RuntimeState(ready=True, networks=[]),
+    )
+
+    assert uninstaller.purge_sample_data(
+        manifest, uninstaller.Options(check=True)
+    ) == 1
+
+
+def test_sample_data_purge_refuses_to_combine_removal_modes(tmp_path):
+    path, _, _, _ = write_manifest(tmp_path)
+    manifest = uninstaller.load_manifest(path)
+
+    result = uninstaller.purge_sample_data(
+        manifest, uninstaller.Options(purge_sample_data=True, purge_data=True)
+    )
+
+    assert result == 1

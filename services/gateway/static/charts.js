@@ -9,26 +9,28 @@
  *  - hover tooltip on every mark
  */
 
-const SURFACE = "#171b21";
-const INK = "#f0f3f6";
-const INK_2 = "#b3bdc8";
-const MUTED = "#7f8b98";
-const BORDER = "#2c333d";
+const SURFACE = "#0f0f1c";
+const INK = "#f5f2ff";
+const INK_2 = "#c3bfe0";
+const MUTED = "#918dae";
+const BORDER = "#2c2b4d";
+const ACCENT = "#ff2d95";
 
 export const STATUS = {
-  compliant: "#0ca30c",
-  non_compliant: "#d03b3b",
-  unknown: "#fab219",
-  stale: "#7f8b98",
-  excluded: "#4a5560",
+  compliant: "#22e6a6",
+  non_compliant: "#ff3b6b",
+  unknown: "#ffb020",
+  stale: "#8d8aa8",
+  excluded: "#4b4a63",
+  critical: "#ff3b6b",
 };
 
 export const SEVERITY = {
-  critical: "#d03b3b",
-  important: "#ec835a",
-  moderate: "#fab219",
-  low: "#3987e5",
-  unknown: "#7f8b98",
+  critical: "#ff2d6f",
+  important: "#ff8a3d",
+  moderate: "#ffd23f",
+  low: "#38c6ff",
+  unknown: "#8d8aa8",
 };
 
 const NS = "http://www.w3.org/2000/svg";
@@ -41,6 +43,45 @@ function el(tag, attrs = {}, text) {
   }
   if (text !== undefined) node.textContent = text;
   return node;
+}
+
+/* Chart marks are painted with a vertical tint rather than a flat fill: the
+   loud end sits at the data end, the deep end at the baseline. It gives the
+   neon console theme its signature glowing bars without making every series
+   unreadable. */
+function shade(hex, toward, amount) {
+  const value = parseInt(hex.slice(1), 16);
+  const target = toward === "white" ? 255 : 0;
+  const channels = [(value >> 16) & 255, (value >> 8) & 255, value & 255]
+    .map((c) => Math.round(c + (target - c) * amount));
+  return `#${channels.map((c) => c.toString(16).padStart(2, "0")).join("")}`;
+}
+
+let gradientSeq = 0;
+
+function gradientFactory(svg, vertical = true) {
+  const cache = new Map();
+  return (color) => {
+    if (cache.has(color)) return cache.get(color);
+    const id = `pt-grad-${gradientSeq += 1}`;
+    const grad = el("linearGradient", {
+      id,
+      x1: "0", y1: "0",
+      x2: vertical ? "0" : "1", y2: vertical ? "1" : "0",
+    });
+    grad.appendChild(el("stop", {
+      offset: "0%", "stop-color": shade(color, "white", 0.34),
+    }));
+    grad.appendChild(el("stop", {
+      offset: "100%", "stop-color": shade(color, "black", 0.12),
+    }));
+    const defs = el("defs");
+    defs.appendChild(grad);
+    svg.appendChild(defs);
+    const value = `url(#${id})`;
+    cache.set(color, value);
+    return value;
+  };
 }
 
 function niceMax(value) {
@@ -227,7 +268,7 @@ export function stackedColumns(container, options) {
   }
   const {
     rows, keys, labels, colors, height = 220,
-    valueLabel = "servers", showTotals = true,
+    valueLabel = "servers", showTotals = true, onSelect,
     label = "Server counts by group, split by compliance state",
   } = options;
   if (!rows || rows.length === 0) {
@@ -241,6 +282,7 @@ export function stackedColumns(container, options) {
   const totals = rows.map((r) => keys.reduce((sum, k) => sum + (r[k] || 0), 0));
   const max = niceMax(Math.max(...totals));
   const svg = frame(container, height, label, width);
+  const fill = gradientFactory(svg);
 
   for (let i = 0; i <= 4; i += 1) {
     const value = (max / 4) * i;
@@ -273,7 +315,7 @@ export function stackedColumns(container, options) {
         y: isTop ? y : y + 1,
         width: barW,
         height: Math.max(1, h - (isTop ? 0 : 1)),
-        fill: colors[segment.key],
+        fill: fill(colors[segment.key]),
         rx: isTop ? 4 : 0,
         ry: isTop ? 4 : 0,
       });
@@ -282,6 +324,10 @@ export function stackedColumns(container, options) {
           tipRow(labels[k], compact(row[k] || 0), colors[k])),
         tipRow(valueLabel, compact(total)),
       ]));
+      if (onSelect) {
+        rect.style.cursor = "pointer";
+        rect.addEventListener("click", () => onSelect(row));
+      }
       svg.appendChild(rect);
       if (isTop && h > 14) {
         svg.appendChild(el("rect", {
@@ -296,16 +342,21 @@ export function stackedColumns(container, options) {
       svg.appendChild(el("text", {
         x: cx, y: pad.top + plotH - (total / max) * plotH - 7,
         "text-anchor": "middle", class: "axis-tick",
-        style: "fill:#f0f3f6;font-weight:600",
+        style: `fill:${INK};font-weight:600`,
       }, compact(total)));
     }
     // Wide enough for the longest platform name ("Microsoft Windows"); the
     // old 16-character cut rendered it as "Microsoft Windo…".
     const label = String(row.group).length > 24
       ? `${String(row.group).slice(0, 23)}…` : row.group;
-    svg.appendChild(el("text", {
+    const groupText = el("text", {
       x: cx, y: height - 12, "text-anchor": "middle", class: "axis-label",
-    }, label));
+    }, label);
+    if (onSelect) {
+      groupText.style.cursor = "pointer";
+      groupText.addEventListener("click", () => onSelect(row));
+    }
+    svg.appendChild(groupText);
   });
 }
 
@@ -318,7 +369,7 @@ export function stackedRows(container, options) {
     return;
   }
   const {
-    rows, keys, labels, colors, maxRows = 7, withPct = false,
+    rows, keys, labels, colors, maxRows = 7, withPct = false, onSelect,
     label = "Server counts by group, split by compliance state",
   } = options;
   if (!rows || rows.length === 0) {
@@ -336,20 +387,26 @@ export function stackedRows(container, options) {
     1, ...shown.map((r) => keys.reduce((s, k) => s + (r[k] || 0), 0))
   );
   const svg = frame(container, height, label, width);
+  const fill = gradientFactory(svg, false);
 
   shown.forEach((row, index) => {
     const y = index * rowH + 6;
     const total = keys.reduce((s, k) => s + (row[k] || 0), 0);
     const groupLabel = String(row.group).length > 22
       ? `${String(row.group).slice(0, 21)}…` : row.group;
-    svg.appendChild(el("text", {
+    const groupText = el("text", {
       x: pad.left - 10, y: y + 15, "text-anchor": "end", class: "axis-label",
-      style: "fill:#b3bdc8",
-    }, groupLabel));
+      style: `fill:${INK_2}`,
+    }, groupLabel);
+    if (onSelect) {
+      groupText.style.cursor = "pointer";
+      groupText.addEventListener("click", () => onSelect(row));
+    }
+    svg.appendChild(groupText);
 
     const fullW = (total / max) * plotW;
     svg.appendChild(el("rect", {
-      x: pad.left, y, width: fullW, height: 14, rx: 3, fill: "#242b34",
+      x: pad.left, y, width: fullW, height: 14, rx: 3, fill: "#1e1e38",
     }));
     let cursor = pad.left;
     keys.forEach((key) => {
@@ -357,12 +414,17 @@ export function stackedRows(container, options) {
       if (value <= 0) return;
       const w = (value / max) * plotW;
       const rect = el("rect", {
-        x: cursor + 1, y, width: Math.max(1, w - 2), height: 14, fill: colors[key],
+        x: cursor + 1, y, width: Math.max(1, w - 2), height: 14,
+        fill: fill(colors[key]),
       });
       bindTip(rect, tipBody(row.group, [
         ...keys.map((k) => tipRow(labels[k], compact(row[k] || 0), colors[k])),
         tipRow("Total", compact(total)),
       ]));
+      if (onSelect) {
+        rect.style.cursor = "pointer";
+        rect.addEventListener("click", () => onSelect(row));
+      }
       svg.appendChild(rect);
       cursor += w;
     });
@@ -373,7 +435,7 @@ export function stackedRows(container, options) {
       : compact(total);
     svg.appendChild(el("text", {
       x: width - 4, y: y + 11, "text-anchor": "end", class: "axis-tick",
-      style: "fill:#f0f3f6;font-weight:600",
+      style: `fill:${INK};font-weight:600`,
     }, text));
   });
 }
@@ -399,6 +461,7 @@ export function donut(container, options) {
   const stroke = 26;
   const circumference = 2 * Math.PI * radius;
   const gap = 2.5;
+  const paint = gradientFactory(svg);
   let offset = 0;
 
   rows.forEach((row) => {
@@ -406,7 +469,7 @@ export function donut(container, options) {
     const frac = row.value / total;
     const length = Math.max(0, frac * circumference - gap);
     const arc = el("circle", {
-      cx, cy, r: radius, fill: "none", stroke: row.color,
+      cx, cy, r: radius, fill: "none", stroke: paint(row.color),
       "stroke-width": stroke,
       "stroke-dasharray": `${length} ${circumference - length}`,
       "stroke-dashoffset": -offset,
@@ -423,11 +486,11 @@ export function donut(container, options) {
 
   svg.appendChild(el("text", {
     x: cx, y: cy - 6, "text-anchor": "middle",
-    style: "fill:#f0f3f6;font-size:26px;font-weight:650;letter-spacing:-.5px",
+    style: `fill:${INK};font-size:26px;font-weight:650;letter-spacing:-.5px`,
   }, centerValue ?? compact(total)));
   svg.appendChild(el("text", {
     x: cx, y: cy + 16, "text-anchor": "middle",
-    style: "fill:#7f8b98;font-size:11.5px",
+    style: `fill:${MUTED};font-size:11.5px`,
   }, centerLabel));
   container.appendChild(svg);
 }
@@ -488,17 +551,17 @@ export function trendLine(container, options) {
     .map((p, i) => `${i === 0 ? "M" : "L"}${x(i)},${y(Number(p.value))}`)
     .join(" ");
   svg.appendChild(el("path", {
-    d: path, fill: "none", stroke: "#3987e5", "stroke-width": 2,
+    d: path, fill: "none", stroke: ACCENT, "stroke-width": 2,
     "stroke-linejoin": "round", "stroke-linecap": "round",
   }));
 
   points.forEach((point, i) => {
     const dot = el("circle", {
-      cx: x(i), cy: y(Number(point.value)), r: 4.5, fill: "#3987e5",
+      cx: x(i), cy: y(Number(point.value)), r: 4.5, fill: ACCENT,
       stroke: SURFACE, "stroke-width": 2,
     });
     bindTip(dot, tipBody(point.label, [
-      tipRow("Compliance", `${Number(point.value).toFixed(1)}${unit}`, "#3987e5"),
+      tipRow("Compliance", `${Number(point.value).toFixed(1)}${unit}`, ACCENT),
       target ? tipRow("Target", `${target}${unit}`, "#ec835a") : null,
     ]));
     svg.appendChild(dot);
@@ -514,7 +577,7 @@ export function trendLine(container, options) {
   svg.appendChild(el("text", {
     x: x(points.length - 1), y: y(Number(last.value)) - 10,
     "text-anchor": "end", class: "axis-tick",
-    style: "fill:#f0f3f6;font-weight:600",
+    style: `fill:${INK};font-weight:600`,
   }, `${Number(last.value).toFixed(1)}${unit}`));
 }
 
@@ -573,7 +636,7 @@ export function targetColumns(container, options) {
     svg.appendChild(bar);
     svg.appendChild(el("text", {
       x: cx, y: y - 7, "text-anchor": "middle", class: "axis-tick",
-      style: "fill:#f0f3f6;font-weight:600",
+      style: `fill:${INK};font-weight:600`,
     }, `${value.toFixed(1)}${unit}`));
     // Narrow panes cannot fit every period label without overlap.
     const labelled = band >= 46 || i % 2 === 0 || i === points.length - 1;
@@ -626,16 +689,17 @@ export function severityBars(container, rows) {
   svg.setAttribute("aria-label",
     `Outstanding findings by severity: ${data.map((r) => `${r.severity} ${r.count}`).join(", ")}`);
   svg.style.height = `${height}px`;
+  const paint = gradientFactory(svg, false);
   data.forEach((row, i) => {
     const y = i * 32 + 4;
     const w = (row.count / max) * plotW;
     svg.appendChild(el("text", {
       x: pad.left - 10, y: y + 13, "text-anchor": "end", class: "axis-label",
-      style: "fill:#b3bdc8;text-transform:capitalize",
+      style: `fill:${INK_2};text-transform:capitalize`,
     }, row.severity));
     const bar = el("rect", {
       x: pad.left, y, width: Math.max(2, w), height: 16, rx: 3,
-      fill: SEVERITY[row.severity] || MUTED,
+      fill: paint(SEVERITY[row.severity] || MUTED),
     });
     bindTip(bar, tipBody(row.severity, [
       tipRow("Outstanding patches", compact(row.count), SEVERITY[row.severity]),
@@ -643,14 +707,90 @@ export function severityBars(container, rows) {
     svg.appendChild(bar);
     svg.appendChild(el("text", {
       x: width - 4, y: y + 13, "text-anchor": "end", class: "axis-tick",
-      style: "fill:#f0f3f6;font-weight:600",
+      style: `fill:${INK};font-weight:600`,
     }, compact(row.count)));
   });
   container.appendChild(svg);
 }
 
+/* -------------------------------------------------- concentration curve */
+/* Cumulative share of outstanding patches against share of affected servers.
+ * The diagonal is perfect evenness; the further above it the curve sits, the
+ * more the backlog is concentrated in a few servers. */
+export function concentrationCurve(container, points) {
+  if (!container.isConnected) {
+    queueChartDraw(container, () => {
+      if (container.isConnected) concentrationCurve(container, points);
+    });
+    return;
+  }
+  const data = (points || []).filter((p) => p && p.patch_share !== undefined);
+  if (data.length < 2) {
+    emptyState(container, "No outstanding patches to plot.");
+    return;
+  }
+  const height = 220;
+  const width = widthFor(container);
+  const pad = { left: 44, right: 16, top: 10, bottom: 30 };
+  const plotW = width - pad.left - pad.right;
+  const plotH = height - pad.top - pad.bottom;
+  const x = (share) => pad.left + (share / 100) * plotW;
+  const y = (share) => pad.top + plotH - (share / 100) * plotH;
+  container.innerHTML = "";
+  const svg = el("svg", {
+    viewBox: `0 0 ${width} ${height}`, class: "chart", role: "img",
+  });
+  svg.setAttribute("aria-label",
+    `Concentration: the top ${data[0].server_share}% of affected servers hold ` +
+    `${data[0].patch_share}% of outstanding patches; the top 10% hold ` +
+    `${data[9] ? data[9].patch_share : "—"}%.`);
+  svg.style.height = `${height}px`;
+  for (const tick of [0, 25, 50, 75, 100]) {
+    svg.appendChild(el("line", {
+      x1: pad.left, y1: y(tick), x2: width - pad.right, y2: y(tick),
+      stroke: BORDER, "stroke-width": 1,
+    }));
+    svg.appendChild(el("text", {
+      x: pad.left - 8, y: y(tick) + 4, "text-anchor": "end",
+      class: "axis-tick", style: `fill:${MUTED}`,
+    }, `${tick}%`));
+    svg.appendChild(el("text", {
+      x: x(tick), y: height - 10, "text-anchor": "middle",
+      class: "axis-tick", style: `fill:${MUTED}`,
+    }, `${tick}%`));
+  }
+  svg.appendChild(el("line", {
+    x1: x(0), y1: y(0), x2: x(100), y2: y(100),
+    stroke: MUTED, "stroke-width": 1, "stroke-dasharray": "4 4",
+  }));
+  const path = data.map((p, i) =>
+    `${i === 0 ? "M" : "L"}${x(p.server_share)},${y(p.patch_share)}`).join(" ");
+  svg.appendChild(el("path", {
+    d: `${path} L${x(100)},${y(0)} Z`, fill: "rgba(255,45,149,.14)",
+  }));
+  svg.appendChild(el("path", {
+    d: path, fill: "none", stroke: ACCENT, "stroke-width": 2.5,
+    "stroke-linejoin": "round", "stroke-linecap": "round",
+  }));
+  for (const point of data) {
+    const dot = el("circle", {
+      cx: x(point.server_share), cy: y(point.patch_share), r: 3.5,
+      fill: ACCENT, stroke: SURFACE, "stroke-width": 2,
+    });
+    bindTip(dot, {
+      title: `Top ${point.server_share}% of affected servers`,
+      rows: [{
+        label: "Outstanding patches", value: `${point.patch_share}%`,
+        color: ACCENT,
+      }, { label: "Servers", value: String(point.servers) }],
+    });
+    svg.appendChild(dot);
+  }
+  container.appendChild(svg);
+}
+
 /* ------------------------------------------------------------------ sparkline */
-export function sparkline(container, points, color = "#3987e5") {
+export function sparkline(container, points, color = ACCENT) {
   if (!points || points.length < 2) {
     container.innerHTML = "";
     return;

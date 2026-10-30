@@ -13,8 +13,8 @@ check that verifies it. Status meanings:
 
 | Req | Implementation | Verification | Status |
 |-----|----------------|--------------|--------|
-| BR-1 Authoritative inventory | `services/inventory/app/sync.py` (`upsert_asset`, `run_assetexplorer_sync`), `connectors/assetexplorer.py` | `test_reconciliation.py` (create/rename/alias), `test_engine.py` population rules | Implemented, environment-dependent (live AssetExplorer field names unverified) |
-| BR-2 Authoritative patch assessment | `connectors/satellite.py`, `sccm.py`, `solaris.py`; `sync.ingest_assessments` | `test_reconciliation.py` matching tests | Implemented, environment-dependent |
+| BR-1 Authoritative inventory | `services/inventory/app/sync.py` (`upsert_asset`, `run_assetexplorer_sync`), `connectors/assetexplorer.py` | `test_reconciliation.py` (create/rename/alias), `test_engine.py` population rules, `test_integration_probe.py` (documented V3 request/response/paging) | Implemented, environment-dependent (live AssetExplorer field names unverified) |
+| BR-2 Authoritative patch assessment | `connectors/satellite.py`, `sccm.py`, `solaris_ssh.py`; `sync.ingest_assessments` | `test_reconciliation.py` matching tests; `test_solaris_ssh.py` (multi-target partial failure, baseline diff, pinned keys) | Implemented, environment-dependent |
 | BR-3 Five compliance states | `compliance/app/engine.py` | `test_engine.py` — one test per state plus ordering | Implemented + tested |
 | BR-4 Documented numerator/denominator | `engine.Population`, `methodology` in `evaluator.create_snapshot`, PDF methodology section | `test_engine.py` denominator tests; `test_report_pdf.py` | Implemented + tested |
 | BR-5 Freshness | `engine.evaluate_asset` (`exact_age_hours`) | `test_engine.py` boundary tests | Implemented + tested |
@@ -36,7 +36,7 @@ check that verifies it. Status meanings:
 | C-3 No production credentials in source control | `.env` gitignored; `secret_ref` accepts references only | `secrets.validate_reference`; `test_secrets.py` |
 | C-4 Never disable TLS verification | `verify_tls` defaults true; plain HTTP requires an explicit, audited opt-out; external `sslmode` requires TLS | `inventory /integrations/{key}`; `test_secrets.py` |
 | C-5 SELinux not required to be disabled | `:Z` mounts; no `setenforce` anywhere; troubleshooting documents the correct fix | `docker-compose.yml`; `troubleshooting.md` |
-| C-6 No assumed SSH collection | No SSH client import anywhere; Solaris is a file drop | `connectors/solaris.py`; code search |
+| C-6 SSH is never assumed or unmanaged | Solaris SSH is opt-in per target, key-only, forced-command, with a pinned SHA-256 host key; no other connector opens SSH | `connectors/solaris_ssh.py` (`_PinnedHostKey`, `ParamikoExecutor`); `test_solaris_ssh.py` |
 | C-7 No silent wrong association | `sync.match_asset` returns `(None, "ambiguous")`; conflicts table | `test_reconciliation.py` ambiguity test |
 | C-8 No silent report replacement | `generate_report` returns early when completed; partial unique index; retry renders the same snapshot | `test_report_pdf.py` determinism; `reporting/reports` constraints |
 | C-9 No static or fabricated data | The SPA calls live APIs; demo data is opt-in, synthetic and marked `raw.demo_data`; generated snapshots also record `synthetic_history` in their methodology; empty states render as `n/a` | `test_report_pdf.py` empty population; `scripts/seed-demo.py` docstring; `test_seed_demo.py` |
@@ -74,6 +74,7 @@ check that verifies it. Status meanings:
 | Gap | Impact | Owner to close |
 |-----|--------|----------------|
 | AssetExplorer/Satellite/SCCM field names unverified against live systems | Collections may need `extra.field_map` or an endpoint adjustment before they work | Deployment engineer, with the source-system administrator |
+| SCCM's native Administration Service has no missing-updates projection and uses Windows-integrated auth | A read-only compliance facade or export must be provided; PatchTrack will not join the SMS Provider itself | Deployment engineer, with the SCCM administrator |
 | No Docker execution on the build host | Compose and SELinux behaviour unproven here | Deployment engineer on the target RHEL/Rocky 9.8 host |
 | systemd units never started | `deploy/systemd/*.service` pass `systemd-analyze verify`, but no `patchtrack` account or postgresql-13 service exists on the build host | Deployment engineer, on the target |
 | SMTP path untested | Delivery failure handling is code-reviewed, not exercised | Operations, with a test relay |

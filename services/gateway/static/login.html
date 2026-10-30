@@ -5,18 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark">
 <title>Sign in — PatchTrack</title>
+<link rel="icon" type="image/png" href="/static/brand/favicon.png">
 <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
 <div class="login-wrap">
   <section class="login-hero">
-    <div class="brand" style="border:0;padding:0">
-      <div class="brand-mark">PT</div>
-      <div>
-        <div class="brand-name" style="font-size:16px">PatchTrack</div>
-        <div class="brand-sub">Enterprise patch compliance</div>
-      </div>
-    </div>
+    <img class="login-brand" src="/static/brand/logo-tagline.png"
+         alt="PatchTrack — track, monitor, stay compliant">
     <h1>One reliable view of enterprise patch compliance.</h1>
     <p>PatchTrack consolidates server inventory from ManagedEngine AssetExplorer and
        patch assessments from Red Hat Satellite, Microsoft Configuration Manager and the
@@ -31,6 +27,7 @@
 
   <section class="login-panel">
     <form class="login-form" id="login-form" autocomplete="on">
+      <img class="login-panel-logo" src="/static/brand/logo.png" alt="PatchTrack">
       <div>
         <h2 id="form-title">Sign in</h2>
         <p class="muted" id="form-hint">Use your PatchTrack account.</p>

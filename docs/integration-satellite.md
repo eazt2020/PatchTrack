@@ -28,7 +28,8 @@ inventory container ──HTTPS GET /api/v2──▶ Satellite :443
 | TLS | `verify_tls=true`; install the Satellite CA on the host |
 | Page size | `page_size` (default 100) |
 | Timeout | `read_timeout_s` (default 60) |
-| Errata concurrency | `workers` (default 1, max 8; benchmark before raising) |
+| Errata concurrency | `extra.workers` (default 1, max 8; benchmark before raising) |
+| Host filter | `extra.host_search` (optional Satellite search string, e.g. `organization = Production`) |
 
 The service account needs only read access to hosts and errata. A least-privilege
 role with `view_hosts` and `view_errata` is sufficient; do not use the
@@ -36,10 +37,18 @@ Satellite administrator account.
 
 ## Calls made
 
-1. `GET /api/v2/hosts?search=subscription_status = valid&page=N&per_page=M`
-   — paginated until `len(items) >= total`.
+1. `GET /api/v2/hosts?page=N&per_page=M` — paginated until
+   `len(items) >= total`. When `extra.host_search` is set it is sent as the
+   `search` parameter.
 2. For each host: `GET /api/v2/hosts/{id}/errata`
    with `search=errata_type = security or errata_type = bugfix or errata_type = enhancement`.
+
+There is deliberately **no implicit `subscription_status = valid` filter**.
+With Simple Content Access (SCA) enabled — the default for current Satellite
+6 installations — Satellite reports `subscription_status` as `unknown` or
+`disabled`, so that filter silently collects zero hosts. Use
+`extra.host_search` only when a narrower scope is genuinely wanted, and make
+sure the filter still matches hosts in an SCA organisation.
 
 Hosts without an `id` or `name` are skipped. Hosts with no errata produce a
 **complete assessment with zero findings** — that is a real "this host is
@@ -59,6 +68,11 @@ patched" statement, not an absence of data.
 | errata `severity` | mapped: critical, important, moderate, low pass through; `security` → important; `bugfix` → moderate; `enhancement` → low; anything else → `unknown` |
 | errata `title`/`summary` | finding title |
 | errata `issued`/`updated_at` | `released_at` (feeds remediation due dates) |
+
+Satellite renders host timestamps as either ISO 8601
+(`2026-09-30T16:30:00Z`) or Foreman/Rails form
+(`2026-09-30 16:30:00 UTC`); both are parsed as UTC. Errata `issued` values
+use ISO 8601.
 
 `assessed_at` is Satellite's `updated_at`. If Satellite has not updated a
 host in longer than the policy's `freshness_hours`, that host will be

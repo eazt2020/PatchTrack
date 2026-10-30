@@ -27,6 +27,7 @@ umask 0077
 
 BACKUP_DIR="${PATCHTRACK_BACKUP_DIR:-/var/lib/patchtrack/backups}"
 REPORT_DIR="${PATCHTRACK_REPORT_DIR:-/var/lib/patchtrack/reports}"
+UPLOAD_DIR="${PATCHTRACK_RESTORE_UPLOAD_DIR:-/var/lib/patchtrack/restore-uploads}"
 POLL_SECONDS="${PATCHTRACK_BACKUP_POLL_SECONDS:-10}"
 RETENTION_DEFAULT="${PATCHTRACK_BACKUP_RETENTION:-7}"
 APP_VERSION="${PATCHTRACK_VERSION:-unknown}"
@@ -309,10 +310,289 @@ recover_interrupted() {
          SET status = 'failed', finished_at = now(),
              message = 'The backup worker restarted before this archive completed.'
        WHERE status = 'running'" >/dev/null
+  "${PSQL[@]}" -c "
+      UPDATE shared.restore_runs
+         SET status = 'failed', finished_at = now(),
+             message = 'The backup worker restarted before this restore completed.'
+       WHERE status = 'running'" >/dev/null 2>&1 || true
   mkdir -p -- "$BACKUP_DIR/.tmp"
   find "$BACKUP_DIR/.tmp" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
   chmod 0750 "$BACKUP_DIR"
   chgrp 0 "$BACKUP_DIR" 2>/dev/null || true
+  # The uploads volume is created root-owned by the runtime, but reporting runs
+  # as uid 1001 and writes the files. This worker runs as root with CHOWN.
+  mkdir -p -- "$UPLOAD_DIR"
+  chown 1001:0 "$UPLOAD_DIR" 2>/dev/null || true
+  chmod 0770 "$UPLOAD_DIR"
+}
+
+# ------------------------------------------------------------------ restore
+# A restore replaces the live database and the report volume with an archive's
+# contents. It runs here because this is the only container with pg_restore at
+# the server's major version, and because it can terminate the application's
+# connections without a second service to coordinate with. The application
+# engines use pool_pre_ping, so they reconnect to the restored database.
+DB_BASE="${DB_URL%/*}"
+DB_NAME="${DB_URL%%\?*}"
+DB_NAME="${DB_NAME##*/}"
+ADMIN_URL="${DB_BASE}/postgres"
+
+claim_restore() {
+  "${PSQL[@]}" -F '|' -c "
+    WITH candidate AS (
+        SELECT id FROM shared.restore_runs
+        WHERE status = 'queued'
+        ORDER BY requested_at, id
+        FOR UPDATE SKIP LOCKED
+        LIMIT 1
+    )
+    UPDATE shared.restore_runs r
+       SET status = 'running', started_at = now(), message = ''
+      FROM candidate c
+     WHERE r.id = c.id
+    RETURNING r.id, r.backup_id, r.filename, r.requested_by, r.requested_at,
+              r.source, r.sha256, r.display_name"
+}
+
+finish_restore_failed() {
+  local id="$1" message="$2"
+  message="${message:0:1000}"
+  "${PSQL[@]}" -v id="$id" -v message="$message" >/dev/null <<'SQL' || true
+UPDATE shared.restore_runs
+   SET status = 'failed', finished_at = now(), message = :'message'
+ WHERE id = :'id'::uuid;
+SQL
+}
+
+manifest_value() {
+  # The manifest is generated here with one value per line, so a targeted sed
+  # avoids requiring a JSON parser the PostgreSQL image does not ship.
+  sed -n "s/^  \"$1\": \"\\([^\"]*\\)\",\{0,1\}$/\\1/p" "$2" | head -n 1
+}
+
+schema_number() {
+  # Migrations are named "021_restore_runs": compare the numeric prefix, so
+  # "9_x" sorts before "021_x" and a name is not rejected for having a suffix.
+  local n
+  n="$(printf '%s' "${1:-}" \
+    | sed -n 's/^[[:space:]]*0*\([0-9][0-9]*\).*/\1/p')"
+  if [[ -n "$n" ]]; then printf '%s' "$((10#$n))"; fi
+}
+
+drop_database() {
+  local name="$1"
+  psql "$ADMIN_URL" -X -q -v ON_ERROR_STOP=1 \
+    -c "DROP DATABASE IF EXISTS \"$name\"" >/dev/null 2>&1 || true
+}
+
+swap_database() {
+  local old_db="$1" new_db="$2" attempt
+  for attempt in 1 2 3 4 5; do
+    # Renaming requires no other session on either database. Application
+    # connections are pre-pinged, so terminating them is safe: the services
+    # reconnect to the same name once the swap is done.
+    psql "$ADMIN_URL" -X -q -c \
+      "SELECT pg_terminate_backend(pid) FROM pg_stat_activity \
+        WHERE datname = '$DB_NAME' AND pid <> pg_backend_pid()" >/dev/null || true
+    if psql "$ADMIN_URL" -X -q -v ON_ERROR_STOP=1 \
+        -c "ALTER DATABASE \"$DB_NAME\" RENAME TO \"$old_db\"" >/dev/null 2>&1; then
+      if psql "$ADMIN_URL" -X -q -v ON_ERROR_STOP=1 \
+          -c "ALTER DATABASE \"$new_db\" RENAME TO \"$DB_NAME\"" >/dev/null 2>&1; then
+        return 0
+      fi
+      # Put the original back rather than leave the installation without a
+      # database under its configured name.
+      psql "$ADMIN_URL" -X -q -c \
+        "ALTER DATABASE \"$old_db\" RENAME TO \"$DB_NAME\"" >/dev/null 2>&1 || true
+      return 1
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+record_restore_completed() {
+  # The archive's own restore_runs data may predate this table, so make sure it
+  # exists before writing the outcome into the restored database. Columns added
+  # after 021 are added here too, so an older archive can still record the run.
+  "${PSQL[@]}" -v id="$1" -v backup_id="$2" -v filename="$3" \
+      -v by="$4" -v requested_at="$5" -v message="$6" \
+      -v source="$7" -v sha="$8" -v display="$9" >/dev/null <<'SQL' || return 1
+CREATE SCHEMA IF NOT EXISTS shared;
+CREATE TABLE IF NOT EXISTS shared.restore_runs (
+    id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    backup_id       uuid,
+    source          text NOT NULL DEFAULT 'archive',
+    filename        text NOT NULL DEFAULT '',
+    display_name    text NOT NULL DEFAULT '',
+    sha256          text NOT NULL DEFAULT '',
+    status          text NOT NULL DEFAULT 'queued',
+    requested_by    text NOT NULL DEFAULT '',
+    requested_at    timestamptz NOT NULL DEFAULT now(),
+    started_at      timestamptz,
+    finished_at     timestamptz,
+    message         text NOT NULL DEFAULT ''
+);
+ALTER TABLE shared.restore_runs
+    ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'archive';
+ALTER TABLE shared.restore_runs
+    ADD COLUMN IF NOT EXISTS sha256 text NOT NULL DEFAULT '';
+ALTER TABLE shared.restore_runs
+    ADD COLUMN IF NOT EXISTS display_name text NOT NULL DEFAULT '';
+INSERT INTO shared.restore_runs
+    (id, backup_id, source, filename, display_name, sha256, status,
+     requested_by, requested_at, started_at, finished_at, message)
+VALUES (:'id'::uuid, NULLIF(:'backup_id', '')::uuid, :'source', :'filename',
+        :'display', :'sha', 'completed', :'by', :'requested_at'::timestamptz,
+        now(), now(), :'message')
+ON CONFLICT (id) DO UPDATE SET
+    status = 'completed', finished_at = now(), message = EXCLUDED.message;
+SQL
+}
+
+copy_backup_history() {
+  local old_db="$1" old_url="$DB_BASE/$old_db"
+  # backup_runs data is excluded from archives, so a restored installation
+  # would otherwise forget which archives exist on its own volume.
+  for table in shared.backup_runs shared.backup_worker; do
+    pg_dump --dbname="$old_url" --data-only --no-owner --no-privileges \
+      --table="$table" 2>/dev/null \
+      | "${PSQL[@]}" >/dev/null 2>&1 || true
+  done
+}
+
+restore_archive() {
+  local id="$1" backup_id="$2" filename="$3" requested_by="$4"
+  local requested_at="$5" source="$6" sha="$7" display="$8" work="$9"
+  local archive path expected actual m_app m_schema current_schema
+  local stamp old_db new_db message warning="" label
+
+  label="${display:-$filename}"
+  if [[ "$source" == "upload" ]]; then
+    path="$UPLOAD_DIR/$filename"
+  else
+    path="$BACKUP_DIR/$filename"
+  fi
+  if [[ -z "$filename" || "${filename##*/}" != "$filename" || ! -f "$path" ]]; then
+    finish_restore_failed "$id" "The archive file is missing from the server."
+    return 1
+  fi
+
+  if [[ "$source" == "upload" ]]; then
+    expected="$sha"
+  else
+    expected="$("${PSQL[@]}" -c \
+      "SELECT COALESCE(sha256, '') FROM shared.backup_runs WHERE id = '$backup_id'::uuid")"
+  fi
+  actual="$(sha256sum "$path" | cut -d' ' -f1)"
+  if [[ -z "$expected" || "$expected" != "$actual" ]]; then
+    finish_restore_failed "$id" "The archive's SHA-256 does not match its record."
+    return 1
+  fi
+
+  rm -rf -- "$work"
+  mkdir -p -- "$work/extract"
+  if ! tar -xzf "$path" -C "$work/extract"; then
+    finish_restore_failed "$id" "The archive could not be extracted."
+    return 1
+  fi
+  if ! ( cd "$work/extract" && sha256sum -c SHA256SUMS ) >"$work/verify.log" 2>&1; then
+    finish_restore_failed "$id" "The archive's contents failed digest verification."
+    return 1
+  fi
+
+  m_app="$(manifest_value app_version "$work/extract/manifest.json")"
+  m_schema="$(manifest_value schema_version "$work/extract/manifest.json")"
+  current_schema="$("${PSQL[@]}" -c \
+    "SELECT COALESCE(max(version), 'unknown') FROM shared.schema_migrations")"
+  if [[ "$m_app" != "$APP_VERSION" ]]; then
+    finish_restore_failed "$id" \
+      "The archive is from PatchTrack ${m_app:-unknown}, not $APP_VERSION."
+    return 1
+  fi
+  if [[ -z "$(schema_number "$m_schema")" || -z "$(schema_number "$current_schema")" \
+        || "$(schema_number "$m_schema")" -gt "$(schema_number "$current_schema")" ]]; then
+    finish_restore_failed "$id" \
+      "The archive's schema (${m_schema:-unknown}) is newer or unreadable."
+    return 1
+  fi
+
+  # Unpack the report files before touching anything live, so a corrupt tar
+  # cannot leave the installation half-restored.
+  mkdir -p -- "$work/reports"
+  if ! tar -xzf "$work/extract/reports.tar.gz" -C "$work/reports"; then
+    finish_restore_failed "$id" "The report archive could not be extracted."
+    return 1
+  fi
+
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  old_db="patchtrack_pre_restore_${stamp}"
+  new_db="patchtrack_restore_${id:0:8}"
+  drop_database "$new_db"
+  if ! psql "$ADMIN_URL" -X -q -v ON_ERROR_STOP=1 \
+      -c "CREATE DATABASE \"$new_db\"" >/dev/null; then
+    finish_restore_failed "$id" "The restore database could not be created."
+    return 1
+  fi
+  if ! pg_restore --dbname="$DB_BASE/$new_db" --no-owner --no-privileges \
+      "$work/extract/database.dump" >"$work/restore.log" 2>&1; then
+    drop_database "$new_db"
+    finish_restore_failed "$id" "pg_restore reported an error; see the worker log."
+    return 1
+  fi
+
+  # The swap is the point of no easy return. Keep a copy of the live report
+  # volume beside the archives so a failed report restore can be undone by an
+  # administrator.
+  if ! tar -czf "$BACKUP_DIR/pre-restore-reports-${stamp}.tar.gz" \
+      -C "$REPORT_DIR" . >/dev/null 2>&1; then
+    drop_database "$new_db"
+    finish_restore_failed "$id" "The pre-restore report snapshot could not be written."
+    return 1
+  fi
+  if ! swap_database "$old_db" "$new_db"; then
+    drop_database "$new_db"
+    finish_restore_failed "$id" \
+      "The database could not be swapped; the live database is unchanged."
+    return 1
+  fi
+
+  if find "$REPORT_DIR" -mindepth 1 -delete 2>/dev/null; then
+    if ! tar -xzf "$work/extract/reports.tar.gz" -C "$REPORT_DIR"; then
+      warning=" The report volume could not be replaced; pre-restore-reports-${stamp}.tar.gz holds the previous files."
+    fi
+  else
+    warning=" The report volume could not be cleared; pre-restore-reports-${stamp}.tar.gz holds the previous files."
+  fi
+
+  copy_backup_history "$old_db" || true
+  message="Restored from $label. The previous database is $old_db; drop it after verification."
+  if ! record_restore_completed "$id" "$backup_id" "$filename" \
+      "$requested_by" "$requested_at" "$message" "$source" "$actual" "$label"; then
+    log "restore $id completed but its status row could not be written"
+  fi
+  rm -rf -- "$work"
+  log "restore $id completed from $label; previous database $old_db${warning}"
+  return 0
+}
+
+run_restore() {
+  local id="$1" backup_id="$2" filename="$3" requested_by="$4"
+  local requested_at="$5" source="$6" sha="$7" display="$8"
+  local work="$BACKUP_DIR/.tmp/restore-$id"
+  log "starting restore $id from ${display:-${filename:-unknown}}"
+  local ok=1
+  if restore_archive "$id" "$backup_id" "$filename" "$requested_by" \
+      "$requested_at" "$source" "$sha" "$display" "$work"; then
+    ok=0
+  fi
+  rm -rf -- "$work"
+  # An uploaded file was for this one attempt; the queue is the record, and
+  # retaining it would grow the upload volume with no way to browse it.
+  if [[ "$source" == "upload" ]]; then
+    rm -f -- "$UPLOAD_DIR/$filename"
+  fi
+  return "$ok"
 }
 
 main() {
@@ -356,6 +636,19 @@ main() {
       continue
     fi
     if [[ -z "$row" ]]; then
+      local restore_row rid rbackup rfilename rby rreq rsource rsha rdisplay
+      if restore_row="$(claim_restore 2>/dev/null)"; then
+        if [[ -n "$restore_row" ]]; then
+          IFS='|' read -r rid rbackup rfilename rby rreq rsource rsha rdisplay \
+            <<<"$restore_row"
+          log "starting restore $rid requested by ${rby:-unknown}"
+          run_restore "$rid" "$rbackup" "$rfilename" "$rby" "$rreq" \
+            "$rsource" "$rsha" "$rdisplay" || true
+          continue
+        fi
+      else
+        log "could not read the restore queue; retrying"
+      fi
       sleep "$POLL_SECONDS" || true
       continue
     fi

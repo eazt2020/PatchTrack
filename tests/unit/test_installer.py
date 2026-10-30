@@ -616,3 +616,71 @@ def test_airgap_bundle_must_not_overlap_the_install_directories(tmp_path):
     problems = installer.validate_config(cfg)
 
     assert any("bundle directory must not overlap" in problem for problem in problems)
+
+
+def test_installer_accepts_sample_data_options():
+    args = installer.parse_args(
+        ["--yes", "--sample-assets", "250", "--sample-years", "3"]
+    )
+    assert args.sample_data is False
+    assert args.sample_assets == 250
+    assert args.sample_years == 3
+
+    args = installer.parse_args(["--yes", "--sample-data"])
+    assert args.sample_data is True
+
+
+def test_installer_reads_sample_data_from_the_environment(monkeypatch):
+    monkeypatch.setenv("PATCHTRACK_INSTALL_SAMPLE_DATA", "yes")
+    monkeypatch.setenv("PATCHTRACK_INSTALL_SAMPLE_ASSETS", "500")
+    monkeypatch.setenv("PATCHTRACK_INSTALL_SAMPLE_YEARS", "2")
+
+    cfg = installer.config_from_env(installer.parse_args(["--yes"]))
+
+    assert cfg.sample_data is True
+    assert cfg.sample_assets == 500
+    assert cfg.sample_years == 2
+
+
+def test_sample_data_options_imply_sample_data_and_are_validated(monkeypatch):
+    monkeypatch.delenv("PATCHTRACK_INSTALL_SAMPLE_DATA", raising=False)
+    cfg = installer.config_from_env(
+        installer.parse_args(["--yes", "--sample-assets", "25"])
+    )
+    assert cfg.sample_data is True
+    assert installer.validate_config(cfg) == []
+
+    cfg.sample_assets = 0
+    assert any("sample server count" in item for item in installer.validate_config(cfg))
+    cfg.sample_assets = installer.MAX_SAMPLE_ASSETS + 1
+    assert any("sample server count" in item for item in installer.validate_config(cfg))
+
+    cfg = installer.Config(sample_data=True, sample_years=0)
+    assert any("sample history years" in item for item in installer.validate_config(cfg))
+
+
+def test_sample_data_command_mounts_secrets_and_scripts_read_only(tmp_path):
+    cfg = installer.Config(
+        install_dir=tmp_path / "opt" / "patchtrack",
+        config_dir=tmp_path / "etc" / "patchtrack",
+        sample_data=True,
+    )
+
+    command = installer.sample_data_command(
+        cfg, "docker", "seed-demo.py", "--assets", "10", "--years", "1"
+    )
+
+    assert command[:4] == ["docker", "run", "--rm", "--network"]
+    assert "patchtrack_default" in command
+    assert f"{cfg.secrets_dir / 'database_url'}:/run/secrets/database_url:ro,z" in command
+    assert f"{cfg.secrets_dir / 'jwt_secret'}:/run/secrets/jwt_secret:ro,z" in command
+    assert (
+        f"{cfg.install_dir / 'scripts' / 'seed-demo.py'}"
+        ":/opt/patchtrack/scripts/seed-demo.py:ro,z"
+    ) in command
+    assert "PATCHTRACK_DATABASE_URL_FILE=/run/secrets/database_url" in command
+    assert "PATCHTRACK_JWT_SECRET_FILE=/run/secrets/jwt_secret" in command
+    assert command[-6:] == [
+        "python", "/opt/patchtrack/scripts/seed-demo.py", "--assets", "10", "--years", "1"
+    ]
+    assert cfg.admin_password not in command

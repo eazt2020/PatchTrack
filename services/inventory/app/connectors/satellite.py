@@ -47,9 +47,15 @@ class SatelliteClient:
         verify_tls: bool = True,
         client: httpx.Client | None = None,
         workers: int = 1,
+        host_search: str = "",
     ) -> None:
         self.base_url = base_url.rstrip("/") + "/api/v2"
         self.page_size = page_size
+        # No implicit subscription filter: with Simple Content Access enabled,
+        # Satellite reports subscription_status as unknown/disabled, so
+        # "valid" would silently collect zero hosts. Administrators can still
+        # narrow collection with extra.host_search.
+        self.host_search = (host_search or "").strip()
         # Per-host errata is the expensive part (one or more requests each).
         # Concurrency is opt-in: benchmark against the real Satellite first,
         # because an unbounded fan-out is indistinguishable from a load test
@@ -98,11 +104,10 @@ class SatelliteClient:
         hosts: list[dict] = []
         page = 1
         while True:
-            body = self._get(
-                "/hosts",
-                {"page": page, "per_page": self.page_size,
-                 "search": "subscription_status = valid"},
-            )
+            params = {"page": page, "per_page": self.page_size}
+            if self.host_search:
+                params["search"] = self.host_search
+            body = self._get("/hosts", params)
             results = body.get("results", [])
             hosts.extend(results)
             total = int(body.get("total", len(hosts)))
@@ -130,8 +135,8 @@ class SatelliteClient:
                     hostname=str(hostname).split(".")[0],
                     fqdn=str(hostname),
                     ip_address=host.get("ip"),
-                    os_name=host.get("operatingsystem_name", "RHEL"),
-                    os_version=host.get("content_facet_attributes", {}).get(
+                    os_name=host.get("operatingsystem_name") or "RHEL",
+                    os_version=(host.get("content_facet_attributes") or {}).get(
                         "content_view_version", ""
                     ),
                     assessed_at=_parse_time(host.get("updated_at")),
@@ -180,8 +185,13 @@ def _parse_time(value: str | None) -> datetime | None:
     """
     if not value:
         return None
+    text = str(value).strip()
+    # Foreman/Rails renders timestamps as "2026-10-30 04:12:00 UTC" in many
+    # responses, which is not ISO 8601; the errata API uses "...Z".
+    if text.endswith(" UTC"):
+        text = text[:-4] + "+00:00"
     try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
     except ValueError:
         log.warning("Satellite returned an unparseable timestamp: %r", value)

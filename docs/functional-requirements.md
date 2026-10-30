@@ -164,13 +164,24 @@ real source system this repository cannot reach.
 ## Known gaps for this release
 
 - **AssetExplorer API shape is not confirmed against a live installation.**
-  The connector implements the documented `/api/v3/assets/servers` shape with a
-  configurable field map; it must be verified against the customer's
-  AssetExplorer version before being enabled.
-- **SCCM collection requires an approved read-only view or export.** The
-  connector targets the Administration Service REST shape; a customer whose
-  SCCM has no such endpoint must supply the export path.
-- **Solaris collection is a file drop.** No SSH collection exists, by design.
+  The connector implements ManageEngine's documented V3 Assets API
+  (`/api/v3/asset_servers`, `input_data` paging, `AUTHORIZATION` integration
+  key, build 7700+) with a configurable field map. It has been exercised
+  against a simulator of that documented shape; custom field names and the
+  customer's build still need verification before it is enabled.
+- **SCCM collection requires an approved read-only compliance facade.** The
+  native Administration Service exposes device identity but no joined
+  missing-updates projection, and requires Windows-integrated authentication;
+  the connector sends a bearer token. A customer must supply a facade (or
+  export) exposing one device row with `MissingUpdates`; `extra.api_path`
+  selects its route.
+- **Solaris is collected directly over SSH, per host.** Solaris 11.4+ uses the
+  host's IPS catalogue to report a pending SRU; Solaris 10 can only enumerate
+  installed patches and is assessed against an administrator-supplied baseline
+  (no baseline means Unknown, not compliant). The collector has been exercised
+  against unit-level fixtures and a documented contract, not against a live
+  Solaris server; the first deployment should test each target before enabling
+  its schedule. The watched-inbox path remains for hosts SSH cannot reach.
 - **OIDC sign-in is not implemented**, though the schema and the "external
   identity" error path exist.
 - **No Docker-based end-to-end test has been run on this host** (Docker is not

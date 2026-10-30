@@ -29,22 +29,96 @@ def http_client(handler) -> httpx.Client:
 
 def test_assetexplorer_probe_reports_the_first_page() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/api/v3/assets/servers"
-        assert request.headers["Authorization"] == "Bearer test-secret"
-        return httpx.Response(200, json={"data": [{"asset_id": "AE-1"}]})
+        assert request.url.path == "/api/v3/asset_servers"
+        assert request.url.params["input_data"] == (
+            '{"list_info":{"start_index":1,"row_count":1}}'
+        )
+        return httpx.Response(200, json={
+            "response_status": {"status_code": 2000, "status": "success"},
+            "list_info": {"has_more_rows": False, "start_index": 1, "row_count": 1},
+            "asset_servers": [{"id": "4101", "name": "srv-dc-01"}],
+        })
 
     with AssetExplorerClient(
         "https://ae.example.com", secret="test-secret",
-        # An injected client owns its own headers; the connector only builds
-        # them when it creates the client itself.
-        client=httpx.Client(
-            headers={"Authorization": "Bearer test-secret"},
-            transport=httpx.MockTransport(handler),
-        ),
+        client=http_client(handler),
     ) as client:
         detail = client.probe()
 
     assert "1 record" in detail
+
+
+def test_assetexplorer_sends_the_on_premise_integration_key() -> None:
+    client = AssetExplorerClient(
+        "https://ae.example.com",
+        auth_method="integration_key",
+        secret="integration-key-value",
+        transport=httpx.MockTransport(lambda request: httpx.Response(200)),
+    )
+    try:
+        assert client._client.headers["AUTHORIZATION"] == "integration-key-value"
+        assert client._client.headers["Accept"].endswith(
+            "application/vnd.manageengine.sdp.v3+json"
+        )
+    finally:
+        client.close()
+
+
+def test_assetexplorer_pages_with_input_data_and_has_more_rows() -> None:
+    seen_starts: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        data = json.loads(request.url.params["input_data"])
+        start = data["list_info"]["start_index"]
+        seen_starts.append(start)
+        rows = {
+            1: [{"id": "1", "name": "srv-1"}, {"id": "2", "name": "srv-2"}],
+            3: [{"id": "3", "name": "srv-3"}],
+        }[start]
+        return httpx.Response(200, json={
+            "response_status": {"status_code": 2000, "status": "success"},
+            "list_info": {
+                "has_more_rows": start == 1,
+                "start_index": start,
+                "row_count": 2,
+            },
+            "asset_servers": rows,
+        })
+
+    with AssetExplorerClient(
+        "https://ae.example.com", secret="k", page_size=2,
+        client=http_client(handler),
+    ) as client:
+        records = client.fetch_assets()
+
+    assert seen_starts == [1, 3]
+    assert [r.source_id for r in records] == ["1", "2", "3"]
+
+
+def test_assetexplorer_raises_when_response_status_is_not_success() -> None:
+    with AssetExplorerClient(
+        "https://ae.example.com", secret="k",
+        client=http_client(lambda request: httpx.Response(200, json={
+            "response_status": {
+                "status_code": 4010, "status": "failed",
+                "messages": [{"message": "Invalid API key"}],
+            }
+        })),
+    ) as client:
+        with pytest.raises(AssetExplorerError, match="Invalid API key"):
+            client.probe()
+
+
+def test_assetexplorer_api_path_is_configurable() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v3/assets"
+        return httpx.Response(200, json={"assets": [{"id": "1", "name": "a"}]})
+
+    with AssetExplorerClient(
+        "https://ae.example.com", secret="k", api_path="/api/v3/assets",
+        client=http_client(handler),
+    ) as client:
+        assert client.probe().startswith("AssetExplorer answered")
 
 
 @pytest.mark.parametrize("status", [401, 403])
@@ -114,6 +188,52 @@ def test_sccm_probe_reports_authentication_failure() -> None:
     ) as client:
         with pytest.raises(SccmError, match="authentication failed"):
             client.probe()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{}, {"error": {"code": "InternalError"}}, {"value": "not-a-list"}, []],
+)
+def test_sccm_rejects_a_response_without_a_value_array(payload) -> None:
+    # A 200 with no device array is a broken view, not a patched estate.
+    with SccmClient(
+        "https://sccm.example.com", token="t",
+        client=http_client(lambda request: httpx.Response(200, json=payload)),
+    ) as client:
+        with pytest.raises(SccmError, match="value|not a JSON object"):
+            client.probe()
+        with pytest.raises(SccmError, match="value|not a JSON object"):
+            client.fetch_assessments()
+
+
+def test_sccm_api_path_is_configurable() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/reporting/patch-compliance"
+        return httpx.Response(200, json={"value": []})
+
+    with SccmClient(
+        "https://sccm.example.com", token="t", api_path="reporting/patch-compliance",
+        client=http_client(handler),
+    ) as client:
+        assert "0 device" in client.probe()
+
+
+def test_sccm_takes_the_first_address_from_an_ip_array() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"value": [{
+            "ResourceID": 16777220,
+            "Name": "app01.contoso.com",
+            "IPAddresses": ["10.20.0.11", "fe80::1"],
+            "MissingUpdates": [{"CI_ID": 35001, "Title": "Update"}],
+        }]})
+
+    with SccmClient(
+        "https://sccm.example.com", token="t", client=http_client(handler),
+    ) as client:
+        (assessment,) = client.fetch_assessments()
+
+    assert assessment.ip_address == "10.20.0.11"
+    assert assessment.findings[0].advisory_id == "35001"
 
 
 def write_document(inbox: Path, name: str, payload: dict) -> None:

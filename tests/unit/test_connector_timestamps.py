@@ -25,6 +25,8 @@ def test_missing_or_malformed_timestamp_is_unknown(parse, value):
     [
         (satellite._parse_time, "2026-09-30T16:30:00Z"),
         (satellite._parse_time, "2026-09-30T16:30:00+00:00"),
+        # Foreman/Rails renders many timestamps with a " UTC" suffix.
+        (satellite._parse_time, "2026-09-30 16:30:00 UTC"),
         (sccm._parse_time, "2026-09-30T16:30:00Z"),
         (sccm._parse_time, "/Date(1790785800000)/"),
     ],
@@ -77,6 +79,39 @@ class _FakeClient:
                 "severity": "critical", "issued": "2026-09-01T00:00:00Z",
             }], "total": 1})
         return _Response({"results": self.hosts, "total": 2})
+
+
+class _CapturingClient(_FakeClient):
+    def __init__(self):
+        super().__init__()
+        self.params: list[dict] = []
+
+    def get(self, url, params=None):
+        self.params.append(dict(params or {}))
+        return super().get(url, params)
+
+
+def test_satellite_collects_every_host_without_a_subscription_filter():
+    # Simple Content Access makes subscription_status unknown/disabled, so an
+    # implicit "valid" filter would collect zero hosts without reporting an
+    # error.
+    client = _CapturingClient()
+    connector = satellite.SatelliteClient(
+        "https://satellite.example.com", username="u", password="p", client=client)
+    connector.fetch_assessments()
+
+    # The first request is the host list; no implicit subscription filter.
+    assert "search" not in client.params[0]
+
+
+def test_satellite_honours_an_administrator_host_search():
+    client = _CapturingClient()
+    connector = satellite.SatelliteClient(
+        "https://satellite.example.com", username="u", password="p",
+        client=client, host_search="organization = Production")
+    connector.fetch_assessments()
+
+    assert client.params[0]["search"] == "organization = Production"
 
 
 def test_concurrent_errata_preserves_host_order_and_unknown_timestamps():

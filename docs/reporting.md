@@ -7,9 +7,12 @@
 | Monthly management report | `monthly_management` | Management, service owners | Calendar month |
 | Quarterly compliance report | `quarterly_compliance` | Risk, audit, regulators | Calendar quarter |
 | Inventory register | `inventory_register` | Platform teams | Any period |
+| Executive board pack | `board_pack` | Board, executive sponsors | Latest daily snapshot |
 
-All three render from the same `compliance.snapshots` row. That is what
-guarantees the PDF agrees with the dashboard and the API for that period.
+All four render from the same `compliance.snapshots` row. That is what
+guarantees the PDF agrees with the dashboard and the API for that period. The
+board pack is queued from the dashboard's **Export board pack** button and
+always uses the most recent recorded daily snapshot, never live rows.
 
 ## 2. File properties
 
@@ -25,6 +28,11 @@ guarantees the PDF agrees with the dashboard and the API for that period.
 - Typography: section headings are left-aligned and body paragraphs are
   justified. Every table is left-aligned and sized to the 174 mm text column,
   so its edges line up with the headings and paragraphs above and below it.
+- Colour: the palette follows the console theme, with the magenta–violet–cyan
+  accent band on the cover and running header, violet headings and
+  colour-coded KPIs and status cells. All tones are darkened for print, and the
+  page background stays white so reports read cleanly on paper and in
+  photocopies.
 - File mode `0640`; the directory is on a dedicated volume.
 
 ## 3. Structure
@@ -101,6 +109,12 @@ handwritten signatures.
 | `logo_data` | Cover logo, as a PNG/JPEG data URI; `logo_filename` is the label shown in Settings |
 | `preparer_name`, `preparer_title` | Cover "Prepared by" line and sign-off block |
 | `concur_name`, `concur_title` | Cover concurrence line and sign-off block |
+
+When no logo is uploaded, reports use the bundled PatchTrack mark: the logo
+with its tagline on the cover, rendered on a near-black plaque so the neon
+artwork keeps its contrast on white paper, and the square mark in the running
+header. An uploaded organisation logo always takes precedence over the bundled
+mark.
 
 These are edited at **Administration → Settings → Report branding** and read
 by `services/reporting/app/service.py::build_context`. The logo is stored in

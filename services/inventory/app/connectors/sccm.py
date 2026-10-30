@@ -34,6 +34,28 @@ class SccmError(RuntimeError):
     pass
 
 
+def _device_rows(response: httpx.Response) -> list:
+    """Return the OData ``value`` array, or fail.
+
+    An empty list means "the view reports no devices". A body without a
+    ``value`` array (an error envelope, a proxy page, ``{}``) is a broken
+    contract and must not be mistaken for a patched estate.
+    """
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise SccmError("SCCM returned malformed JSON") from exc
+    if not isinstance(body, dict):
+        raise SccmError("SCCM response is not a JSON object")
+    devices = body.get("value")
+    if not isinstance(devices, list):
+        raise SccmError("SCCM response does not contain a 'value' array")
+    return devices
+
+
+DEFAULT_API_PATH = "/SMS_REST/DeviceCompliance"
+
+
 class SccmClient:
     key = "sccm"
 
@@ -45,10 +67,12 @@ class SccmClient:
         timeout_s: float = 60.0,
         page_size: int = 200,
         verify_tls: bool = True,
+        api_path: str = DEFAULT_API_PATH,
         client: httpx.Client | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.page_size = page_size
+        self.api_path = "/" + api_path.lstrip("/")
         headers = {"Accept": "application/json"}
         if token:
             headers["Authorization"] = f"Bearer {token}"
@@ -69,7 +93,7 @@ class SccmClient:
         """One-device query: endpoint, TLS and token, without collection."""
         try:
             response = self._client.get(
-                f"{self.base_url}/SMS_REST/DeviceCompliance",
+                f"{self.base_url}{self.api_path}",
                 params={"$top": 1, "$skip": 0},
             )
         except httpx.HTTPError as exc:
@@ -80,18 +104,14 @@ class SccmClient:
             raise SccmError(
                 f"SCCM returned HTTP {response.status_code} for compliance query"
             )
-        try:
-            body = response.json()
-        except ValueError as exc:
-            raise SccmError("SCCM returned malformed JSON") from exc
-        devices = body.get("value", []) if isinstance(body, dict) else []
+        devices = _device_rows(response)
         return (
             "SCCM answered with HTTP 200; "
             f"{len(devices)} device record(s) in the first page"
         )
 
     def fetch_assessments(self) -> list[PatchAssessment]:
-        url = f"{self.base_url}/SMS_REST/DeviceCompliance"
+        url = f"{self.base_url}{self.api_path}"
         assessments: list[PatchAssessment] = []
         skip = 0
         while True:
@@ -107,11 +127,7 @@ class SccmClient:
                 raise SccmError(
                     f"SCCM returned HTTP {response.status_code} for compliance query"
                 )
-            try:
-                body = response.json()
-            except ValueError as exc:
-                raise SccmError("SCCM returned malformed JSON") from exc
-            devices = body.get("value", [])
+            devices = _device_rows(response)
             for device in devices:
                 assessment = self._normalise(device)
                 if assessment is not None:
@@ -124,41 +140,64 @@ class SccmClient:
         return assessments
 
     def _normalise(self, device: dict) -> PatchAssessment | None:
+        if not isinstance(device, dict):
+            log.warning("SCCM returned a non-object device record: %s", device)
+            return None
         name = device.get("Name") or device.get("ResourceName")
         resource_id = device.get("ResourceID") or device.get("ResourceId")
         if not name or resource_id is None:
             log.warning("SCCM device record missing identity: %s", device)
             return None
         updates = device.get("MissingUpdates") or device.get("RequiredUpdates") or []
-        findings = tuple(
-            NormalisedFinding(
-                advisory_id=str(u.get("ArticleID") or u.get("BulletinID") or u.get("ID")),
-                title=str(u.get("Title") or u.get("Name") or ""),
-                severity=SEVERITY_MAP.get(
-                    str(u.get("Severity") or "unspecified").lower(), "unknown"
-                ),
-                category=str(u.get("Classification") or "update"),
-                released_at=_parse_time(u.get("DateReleased") or u.get("DatePosted")),
-                source_reference=str(u.get("CI_ID") or ""),
+        findings = []
+        for update in updates:
+            if not isinstance(update, dict):
+                continue
+            advisory_id = (
+                update.get("ArticleID") or update.get("BulletinID")
+                or update.get("ID") or update.get("CI_ID")
             )
-            for u in updates
-            if isinstance(u, dict)
-        )
+            if advisory_id is None:
+                log.warning("SCCM update record missing an identifier: %s", update)
+                continue
+            findings.append(
+                NormalisedFinding(
+                    advisory_id=str(advisory_id),
+                    title=str(update.get("Title") or update.get("Name") or ""),
+                    severity=SEVERITY_MAP.get(
+                        str(update.get("Severity") or "unspecified").lower(), "unknown"
+                    ),
+                    category=str(update.get("Classification") or "update"),
+                    released_at=_parse_time(
+                        update.get("DateReleased") or update.get("DatePosted")
+                    ),
+                    source_reference=str(update.get("CI_ID") or ""),
+                )
+            )
         return PatchAssessment(
             source_system="sccm",
             source_ref=str(resource_id),
             hostname=str(name).split(".")[0],
             fqdn=str(name),
-            ip_address=device.get("IPAddresses") or device.get("IPAddress"),
+            ip_address=_first_ip(device.get("IPAddresses") or device.get("IPAddress")),
             os_name=device.get("OperatingSystemNameAndVersion") or "Windows Server",
             os_version=str(device.get("OSVersion") or ""),
             assessed_at=_parse_time(
                 device.get("LastDDR") or device.get("LastAssessmentTime")
             ),
             status="complete" if device.get("AssessmentComplete", True) else "partial",
-            findings=findings,
+            findings=tuple(findings),
             source_reference=f"sccm:device/{resource_id}",
         )
+
+
+def _first_ip(value: object) -> str | None:
+    """SCCM returns IPAddresses as an array; the contract is one address."""
+    if isinstance(value, (list, tuple)):
+        value = next((item for item in value if item), None)
+    if not value:
+        return None
+    return str(value)
 
 
 def _parse_time(value: str | None) -> datetime | None:

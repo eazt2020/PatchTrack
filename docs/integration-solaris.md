@@ -2,135 +2,214 @@
 
 ## Role
 
-Solaris hosts have no supported agent path in this environment and direct SSH
-access is **not assumed**. Collection therefore uses an approved read-only
-process: the organisation's existing Solaris tooling writes one JSON
-assessment file per host into a drop location, and PatchTrack ingests it.
+PatchTrack collects Solaris patch state directly from each server. There is no
+centralised configuration manager to depend on, so each host is a target in
+PatchTrack with its own address, credential reference, pinned SSH host key and
+Solaris major version. A sync contacts every enabled target concurrently and
+writes one assessment per host; one unreachable host does not stop the others.
 
-PatchTrack does not open an SSH connection to any host, does not install an
-agent, and does not execute commands on Solaris.
+The collector is a fixed, read-only command. PatchTrack never opens an
+interactive shell, never forwards ports, never runs commands supplied by the
+target and never installs anything.
 
-## Two ingestion paths
+## Two Solaris generations, two honest models
 
-### Path A — watched inbox (batch, preferred)
+| Host | What the collector can see | How PatchTrack assesses it |
+|------|----------------------------|----------------------------|
+| Solaris 11.4+ | The installed `entire` version and the newest `entire` version in the IPS catalogue | The latest SRU is a pending finding when it is newer than the installed one. Oracle does not publish severity or CVE data in IPS metadata, so findings are `unknown` severity unless the organisation classifies them. |
+| Solaris 10 | Only the patches that are *installed* — there is no local catalogue of available patches | PatchTrack diffs installed revisions against the **Solaris 10 baseline** assigned to the target. A patch is satisfied when the installed revision is at least the required revision. |
 
-A directory mounted into the inventory container:
+A Solaris 10 target with **no baseline** produces no assessment and a target
+error. It is Unknown, never "fully patched". This is deliberate: an empty
+patch list from a host that cannot enumerate available patches is not evidence
+of compliance.
+
+`smpatch` and Oracle Update Manager are not used. They depend on the Oracle
+update service and credentials that are frequently absent on isolated
+Solaris 10 estates.
+
+## Host requirements
+
+1. An unprivileged account able to run the two read-only commands the collector
+   needs (`pkg list` for 11, `showrev -p` for 10). No sudo is required.
+2. An unencrypted OpenSSH private key for that account. The key is stored as a
+   PatchTrack secret reference (`file:` or `env:`), never in the database.
+3. The pinned SHA-256 host key fingerprint recorded from the server's console
+   or a trusted first connection. A blank or mismatched fingerprint is an
+   error.
+4. The collector installed at `/opt/patchtrack/collect-solaris` (source:
+   `deploy/solaris/collect-solaris`).
+
+Forced command, key-only authentication and `restrict` keep the account able
+to do exactly one thing:
 
 ```
-/var/lib/patchtrack/solaris-inbox/*.json
+# /etc/ssh/sshd_config.d/patchtrack.conf
+Match User patchtrack
+    PasswordAuthentication no
+    PubkeyAuthentication yes
+    PermitTTY no
+    X11Forwarding no
+    AllowTcpForwarding no
+    PermitTunnel no
+    PermitUserEnvironment no
+    ForceCommand /opt/patchtrack/collect-solaris --format=json
 ```
 
-The Solaris job writes files here; a scheduled or manual `solaris` sync reads
-every `*.json` file, parses it, and ingests it. Files are **left in place** —
-PatchTrack does not delete or move them, because deleting evidence is not its
-job. Housekeeping is the collection job's responsibility (for example, moving
-processed files to its own archive).
+Restart `sshd` after validating the configuration with `sshd -t`. The account
+needs a locked password (`passwd -l patchtrack`).
 
-Use a host path or named volume with the correct SELinux label (`:Z`) and make
-it writable only by the collection account and readable by the container.
+## Collector contract
 
-### Path B — API upload (interactive / scripted)
+The collector prints exactly one JSON object to stdout.
 
-`POST /api/compliance/solaris/ingest` with a list of records. Requires
-`sync:run`. Every upload is recorded in `compliance.solaris_uploads` with the
-SHA-256 of the submitted payload (canonical JSON, sorted keys).
+Solaris 11.4+:
+
+```json
+{
+  "hostname": "solaris-db01",
+  "fqdn": "solaris-db01",
+  "os_name": "Oracle Solaris",
+  "os_version": "11.4",
+  "zone": "global",
+  "assessed_at": "2026-10-25T02:00:00Z",
+  "collector_version": 1,
+  "patches": [
+    {"patch_id": "SOLARIS-11.4-SRU-48", "title": "Solaris 11.4 SRU 48", "category": "update"}
+  ]
+}
+```
+
+Solaris 10:
+
+```json
+{
+  "hostname": "solaris-app01",
+  "fqdn": "solaris-app01",
+  "os_name": "Oracle Solaris",
+  "os_version": "10",
+  "zone": "global",
+  "assessed_at": "2026-10-25T02:00:00Z",
+  "collector_version": 1,
+  "installed_patches": [
+    {"patch_id": "147147", "revision": "26"},
+    {"patch_id": "148888", "revision": "14"}
+  ]
+}
+```
+
+A malformed document, a non-zero exit or an unreachable host is a collection
+failure for that target. It never becomes a zero-finding assessment. For
+Solaris 11, an unreadable IPS catalogue also exits non-zero (`3`), because
+"cannot determine" must not be reported as "no updates".
+
+## Configuring targets in PatchTrack
+
+Open **Integrations → Solaris → Manage hosts**. Each target records:
+
+| Field | Meaning |
+|-------|---------|
+| Name | Stable identity. It becomes the source reference (`solaris:<name>`) and survives host renames. |
+| Hostname / port | SSH endpoint |
+| Username | Forced-command account |
+| Private key reference | `file:/etc/patchtrack/secrets/<host>.key` or `env:<NAME>` |
+| Pinned host key | `SHA256:…`. Leaving it blank makes the first test fail and report the actual fingerprint. |
+| Solaris version | 10 or 11 |
+| Zone | `global` or a non-global zone name, recorded on the target |
+| Baseline | Required for Solaris 10; ignored for 11 |
+| Collector command | Optional per-target override; must be an absolute path |
+
+**Test** probes one saved target: SSH, host key, authentication, collector
+output and baseline presence. It writes no assessment. A full sync is
+**Run now** (or the scheduler).
+
+The card's **Configure** action controls the integration itself: display name,
+enabled flag, sync interval, the default collector command, SSH concurrency and
+the fallback inbox path. Hosts, keys and baselines remain under **Manage
+hosts**.
+
+## Solaris 10 baselines
+
+A baseline is an administrator-supplied list of the patches that must be
+installed, validated on upload:
 
 ```json
 [
-  {
-    "hostname": "solaris-db01",
-    "fqdn": "solaris-db01.example.com",
-    "ip_address": "10.20.0.11",
-    "os_name": "Oracle Solaris",
-    "os_version": "11.4",
-    "assessed_at": "2026-10-25T02:00:00Z",
-    "patches": [
-      {
-        "patch_id": "356890-01",
-        "title": "SunOS 5.11: kernel update",
-        "severity": "important",
-        "released_at": "2026-09-02",
-        "category": "kernel",
-        "url": "https://support.oracle.com/…"
-      }
-    ]
-  }
+  {"patch_id": "147147-26", "title": "Kernel update", "severity": "critical"},
+  {"patch_id": "148888", "min_revision": 12, "title": "SSH", "obsoletes": ["148000"]}
 ]
 ```
 
-## Document contract
+- `patch_id` may carry the required revision (`147147-26`). When `min_revision`
+  is also supplied, `min_revision` wins.
+- `obsoletes` lists older patches that a satisfied entry replaces. An obsolete
+  patch is not reported as missing when the replacing entry is installed.
+- `severity` is one of critical, important, moderate, low. Anything else is
+  stored as `unknown`; PatchTrack does not invent a severity Oracle never
+  published.
+- Duplicate patch ids and more than 50,000 entries are rejected.
+- A baseline's Solaris major version must match the target's.
 
-| Field | Required | Notes |
-|-------|----------|-------|
-| `hostname` | yes | Without it the record is rejected |
-| `fqdn` | no | Used first for matching |
-| `ip_address` | no | Used for matching only |
-| `os_name` | no | Defaults to `Oracle Solaris` |
-| `os_version` | no | |
-| `assessed_at` | recommended | ISO 8601. If absent the ingest time is used — which makes freshness meaningless; always supply it |
-| `patches` | yes (may be empty) | Must be a list |
-| `patches[].patch_id` | yes | Missing it rejects the whole document |
-| `patches[].severity` | no | critical/security → critical; important → important; recommended/moderate → moderate; low/optional → low; else `unknown` |
-| `patches[].title`/`synopsis` | no | |
-| `patches[].released_at` | no | Feeds remediation due dates |
-| `patches[].url` | no | Stored as source reference |
+Baselines are named and versioned by name, not mutated implicitly: create a
+new baseline for a new quarter and repoint targets at it. The old baseline
+remains available for the audit trail.
 
-An empty `patches` list is a valid, meaningful statement: the host has no
-outstanding patches.
+## Ingestion fallback: watched inbox / API upload
 
-## Validation rules
+SSH targets take precedence. When no SSH targets are configured, the `solaris`
+integration still accepts the original batch model:
 
-- A file that is not valid JSON, not an object, or missing `hostname` or a
-  `patch_id` causes a `SolarisIngestError`, and the **whole run fails** rather
-  than silently ingesting a partial set of files. Fix the file and re-run.
-- A record that parses but does not resolve to exactly one inventory asset is
-  **rejected** and written to `inventory.reconciliation_conflicts` with reason
-  `assessment_unmatched`. It is not guessed onto a "nearest" host.
-- Inbox files are read with `json.loads` on UTF-8 text; nothing is executed.
+- `/var/lib/patchtrack/solaris-inbox/*.json` — one document per host using the
+  `patches` contract above (files are left in place), or
+- `POST /api/compliance/solaris/ingest` with a list of documents (`sync:run`).
+  Each upload is recorded in `compliance.solaris_uploads` with the SHA-256 of
+  the canonical payload.
+
+This path remains useful for hosts that cannot be reached from PatchTrack or
+during a transition. Once SSH targets exist, the inbox is no longer read: two
+sources writing the same host would fight over its assessment.
 
 ## Matching to inventory
 
-For each Solaris record:
+Each assessment is linked to exactly one asset:
 
-1. exact FQDN (case-insensitive), then
-2. exact hostname (case-insensitive), then
-3. exact IP.
+1. the stable source link (`solaris:<target name>`), then
+2. exact FQDN, then exact hostname, then exact IP.
 
-A match must be **unique**. Two assets sharing the hostname (common when a
-Solaris host has both a physical and a logical identity) yields a conflict and
-a rejected record. Resolve it in AssetExplorer or via the reconciliation view.
-
-## Why not SSH
-
-The requirement is explicit that direct SSH collection must not be assumed.
-Reasons that hold in practice:
-
-- opening an inbound path from a central tool to every Solaris host widens the
-  attack surface and usually cannot be approved;
-- credentials for hundreds of hosts would have to be stored centrally;
-- the existing Solaris team already has an approved collection mechanism.
-
-If the organisation later approves an SSH-based collector, it should write the
-same JSON documents — the ingestion contract is the boundary and does not need
-to change.
+A match must be unique. Anything else is rejected into
+`inventory.reconciliation_conflicts` with reason `assessment_unmatched`; it is
+never guessed onto a nearby host.
 
 ## Failure behaviour
 
 | Condition | Result |
 |-----------|--------|
-| Inbox directory missing | No files; run reports zero records (not an error) |
-| One malformed file | Run `failed` with the filename in the error; no partial ingest |
-| Record does not match inventory | Record rejected, conflict recorded, run `partial` |
-| Source link already established | Re-ingest updates the same asset |
+| One target unreachable | That target records `last_error`; the run is `partial`; other targets are ingested |
+| Every target fails | Run `failed`; no assessments; no inventory is deleted |
+| Solaris 10 target without a baseline | Target error (unless other targets succeed, then `partial`) |
+| Baseline entry invalid | Target error naming the baseline and entry |
+| Host key missing or mismatched | Target error; no connection accepted |
+| Collector prints malformed JSON | Target error |
+| Collector exits non-zero | Target error including its stderr |
+| Inbox file malformed (fallback mode) | Whole run `failed`; no partial ingest |
+
+A failed collection never classifies a host as compliant and never removes its
+previous assessment.
+
+## Secrets
+
+`secret_ref` is a reference, not a key. The API rejects anything that does not
+start with `env:` or `file:`. Private keys must be unencrypted OpenSSH keys;
+passphrase-protected keys are refused rather than prompting. Mount key files
+read-only and restrict them to the service account.
 
 ## Operational notes
 
-- Schedule the Solaris sync after the collection job writes its files, with
-  enough margin that a slow host does not produce a half-complete batch. The
-  fail-whole-run behaviour is deliberate: a partially ingested batch is harder
-  to reason about than no batch at all.
-- Keep `freshness_hours` at least twice the collection interval (weekly job →
-  192 hours), or Solaris hosts will oscillate between Stale and Compliant.
-- Monitor `compliance.solaris_uploads` for unexpected rejections; a sudden run
-  of `rejected` rows is usually an AssetExplorer field change breaking the
-  hostname match.
+- Schedule the sync at least as often as the freshness threshold expects. A
+  every-6-hours sync with a 48-hour freshness threshold gives room for two
+  missed runs before hosts go Stale.
+- Keep `freshness_hours` at least twice the collection interval.
+- Use one target per non-global zone only when the zone has its own patch
+  state that matters; otherwise the global zone's assessment is the host's.
+- Review `last_error` on the target list after upgrades: a changed host key is
+  the most common failure and is reported with both fingerprints.

@@ -25,6 +25,7 @@ REPORT_TITLES = {
     "monthly_management": "Monthly Patch Management Report",
     "quarterly_compliance": "Quarterly Patch Compliance Report",
     "inventory_register": "Server Inventory Register",
+    "board_pack": "Executive Board Pack",
 }
 
 

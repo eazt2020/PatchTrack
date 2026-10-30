@@ -180,7 +180,7 @@ empty `secret_ref`.
 | sync_interval_minutes | 5..10080 |
 | connect_timeout_s, read_timeout_s, page_size | |
 | verify_tls | default true; disabling is audited |
-| extra | jsonb: field map, Satellite username, Solaris inbox path |
+| extra | jsonb: field map, Satellite username, SCCM API path, Solaris inbox path and collector/worker overrides |
 
 ### `inventory.sync_runs`
 
@@ -189,6 +189,46 @@ One row per collection attempt: integration, trigger (`schedule`, `manual`,
 counts (seen/created/updated/rejected/unmatched) and an error summary.
 
 A failed run leaves every asset and assessment row untouched.
+
+### `inventory.solaris_targets`
+
+One row per Solaris server or zone collected directly over SSH. Targets are
+independent of the single `inventory.integrations` row: that row controls
+scheduling and inbox fallback, while each target owns its address, credential
+reference and trust anchor.
+
+| Column | Notes |
+|--------|-------|
+| id | uuid PK |
+| name | UNIQUE; the stable source identity (`solaris:<name>`) |
+| hostname, port | SSH endpoint (port 1–65535) |
+| username | forced-command account |
+| secret_ref | private-key reference (`env:`/`file:`), never the key |
+| host_key | pinned `SHA256:` fingerprint; empty is refused at connect |
+| os_major | 10 or 11 |
+| zone | `global` or a non-global zone name |
+| baseline_id | FK to `inventory.solaris_baselines`, `ON DELETE SET NULL`; required for Solaris 10 |
+| collector_command | optional absolute-path override |
+| enabled | disabled targets are skipped by a sync |
+| connect_timeout_s, read_timeout_s | per-target timeouts |
+| last_success_at, last_error | target health, updated by each run |
+
+### `inventory.solaris_baselines`
+
+The administrator-supplied list of patches that Solaris 10 hosts must have.
+
+| Column | Notes |
+|--------|-------|
+| id | uuid PK |
+| name | UNIQUE |
+| os_major | 10 or 11; must match every target that uses it |
+| description, source | provenance |
+| entries | jsonb array of `{patch_id, min_revision, title, severity, category, url, obsoletes}`; validated on write (max 50,000, no duplicate patch ids) |
+| created_by, created_at, updated_at | attribution |
+
+Baselines are immutable by convention: create a new named baseline for a new
+quarter and repoint targets, so an old assessment can still be explained by
+the baseline that produced it.
 
 ### `inventory.assets`
 
@@ -408,7 +448,7 @@ accepted/rejected, record count, message.
 
 | Column | Notes |
 |--------|-------|
-| report_type | `monthly_management` \| `quarterly_compliance` \| `inventory_register` |
+| report_type | `monthly_management` \| `quarterly_compliance` \| `inventory_register` \| `board_pack` |
 | period_start, period_end | |
 | snapshot_id | the snapshot the report renders |
 | status | `queued` \| `generating` \| `completed` \| `failed` |

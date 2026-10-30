@@ -69,7 +69,7 @@ def parse_solaris_document(payload: dict) -> PatchAssessment:
         if not isinstance(patch, dict) or not patch.get("patch_id"):
             raise SolarisIngestError("patch entry missing patch_id")
         severity = SEVERITY_MAP.get(
-            str(patch.get("severity") or "moderate").lower(), "unknown"
+            str(patch.get("severity") or "unknown").lower(), "unknown"
         )
         findings.append(
             NormalisedFinding(

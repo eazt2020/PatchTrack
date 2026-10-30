@@ -14,7 +14,7 @@
 name: patchtrack
 
 x-service-defaults: &service-defaults
-  image: patchtrack:${PATCHTRACK_VERSION:-3.0.5}
+  image: patchtrack:${PATCHTRACK_VERSION:-3.0.7}
   build:
     context: .
     dockerfile: deploy/container/Dockerfile
@@ -143,6 +143,10 @@ services:
       # Archives are written by the worker and only read here, to serve a
       # download after an authenticated, audited request.
       - backups:/var/lib/patchtrack/backups:ro,z
+      # Uploaded archives are staged here by this service and read by the
+      # worker. Kept apart from the backups volume so retention never treats an
+      # upload as an archive PatchTrack produced.
+      - restore-uploads:/var/lib/patchtrack/restore-uploads:z
     depends_on:
       postgres:
         condition: service_healthy
@@ -166,7 +170,7 @@ services:
     environment:
       PATCHTRACK_BACKUP_DIR: /var/lib/patchtrack/backups
       PATCHTRACK_REPORT_DIR: /var/lib/patchtrack/reports
-      PATCHTRACK_VERSION: ${PATCHTRACK_VERSION:-3.0.5}
+      PATCHTRACK_VERSION: ${PATCHTRACK_VERSION:-3.0.7}
       # This container needs the database URL and nothing else from .env.
       POSTGRES_PASSWORD: ""
       PATCHTRACK_JWT_SECRET: ""
@@ -178,7 +182,10 @@ services:
     volumes:
       - ./deploy/backup/backup-worker.sh:/opt/patchtrack/backup-worker.sh:ro,Z
       - backups:/var/lib/patchtrack/backups:z
-      - reports:/var/lib/patchtrack/reports:ro,z
+      # Writable for restore: an archive's reports.tar.gz replaces this volume.
+      - reports:/var/lib/patchtrack/reports:z
+      # Uploads written by reporting; read, digest-checked and removed here.
+      - restore-uploads:/var/lib/patchtrack/restore-uploads:z
     depends_on:
       postgres:
         condition: service_healthy
@@ -189,6 +196,14 @@ services:
       - /tmp:mode=1777,size=64m
     security_opt:
       - no-new-privileges:true
+    # Restore replaces the report volume from an archive owned by uid 1001:0.
+    # Extraction must create those files through the volume's 0755 directory
+    # and set their owner, which root cannot do with every capability dropped.
+    # Both are scoped to this container and are what the image's tar needs.
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
     cap_drop:
       - ALL
     logging:
@@ -260,6 +275,7 @@ volumes:
   pgdata:
   reports:
   backups:
+  restore-uploads:
   solaris-inbox:
   prometheus-data:
   tls:

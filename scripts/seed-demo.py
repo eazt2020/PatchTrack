@@ -694,6 +694,19 @@ def seed(asset_count: int = 100, years: int = 5) -> None:
         print(f"  {source:10s} assessments={len(assessments):3d} "
               f"matched={counts['matched']:3d} unmatched={counts['unmatched']}")
 
+    # Unmatched demo assessments raise reconciliation conflicts that have no
+    # asset to hang from. Mark the ones this run created so that
+    # scripts/purge-sample-data.py can identify them without guessing.
+    with connection() as conn:
+        conn.execute(
+            text(
+                "UPDATE inventory.reconciliation_conflicts "
+                "SET payload = payload || '{\"demo_data\": true}'::jsonb "
+                "WHERE detected_at >= :started"
+            ),
+            {"started": now},
+        )
+
     print(f"Generating {years} years of synthetic daily snapshots…")
     policy, version_id = active_policy()
     with connection() as conn:

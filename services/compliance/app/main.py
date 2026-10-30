@@ -7,6 +7,7 @@ snapshots, remediation visibility and Solaris ingestion.
 from __future__ import annotations
 
 import json
+import math
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
 
@@ -31,7 +32,11 @@ from patchtrack_common.security import Principal, require_permission
 from .engine import (
     DIMENSIONS,
     aggregate,
+    concentration,
+    excluded_breakdown,
+    finding_sla,
     group_breakdown,
+    movers,
     parse_period_key,
     period_bounds,
     period_key,
@@ -108,6 +113,143 @@ def _selected(evaluations, assets, filters: dict[str, str]):
     return chosen_assets, selected
 
 
+def _filter_sql(filters: dict[str, str]) -> tuple[str, dict[str, Any]]:
+    """WHERE fragments for the asset columns the dashboard can filter on."""
+    clauses = ["a.in_scope"]
+    params: dict[str, Any] = {}
+    for key, value in filters.items():
+        column = FILTER_FIELDS.get(key)
+        if column is None or not value:
+            continue
+        clauses.append(f"{column} = :f_{key}")
+        params[f"f_{key}"] = value
+    return " AND ".join(clauses), params
+
+
+def _remediation_insight(filters: dict[str, str]) -> dict[str, Any]:
+    """Remediation SLA for current findings, plus the oldest advisories.
+
+    Only findings attached to each asset's latest assessment are current; an
+    old assessment's findings are history and are not counted. The due date is
+    the one stored on the finding, which is the date the policy produced when
+    the finding was ingested.
+    """
+    where, params = _filter_sql(filters)
+    today = datetime.now(UTC).date()
+    soon = today + timedelta(days=7)
+    totals = fetch_one(
+        f"""
+        SELECT count(*)::int AS total,
+               count(*) FILTER (WHERE f.remediation_due < :today)::int
+                 AS overdue,
+               count(*) FILTER (
+                 WHERE f.remediation_due >= :today
+                   AND f.remediation_due <= :soon)::int AS due_soon,
+               count(*) FILTER (WHERE f.remediation_due > :soon)::int
+                 AS on_track,
+               count(*) FILTER (WHERE f.remediation_due IS NULL)::int
+                 AS undated,
+               coalesce(max(:today - f.remediation_due)
+                 FILTER (WHERE f.remediation_due < :today), 0)::int
+                 AS oldest_days
+        FROM compliance.findings f
+        JOIN inventory.asset_effective a ON a.id = f.asset_id
+        JOIN compliance.asset_latest_assessment la
+          ON la.assessment_id = f.assessment_id
+        WHERE {where}
+        """,
+        **params, today=today, soon=soon,
+    ) or {}
+    oldest = fetch_all(
+        f"""
+        SELECT f.advisory_id, max(f.title) AS title, max(f.severity) AS severity,
+               min(f.remediation_due) AS due, count(DISTINCT f.asset_id)::int
+                 AS affected_servers
+        FROM compliance.findings f
+        JOIN inventory.asset_effective a ON a.id = f.asset_id
+        JOIN compliance.asset_latest_assessment la
+          ON la.assessment_id = f.assessment_id
+        WHERE {where} AND f.remediation_due < :today
+        GROUP BY f.advisory_id
+        ORDER BY due, affected_servers DESC
+        LIMIT 5
+        """,
+        **params, today=today,
+    )
+    for row in oldest:
+        due = row["due"]
+        if isinstance(due, datetime):
+            due = due.date()
+        row["days_overdue"] = (today - due).days if due else None
+        row["due"] = due.isoformat() if due else None
+    return {
+        "total": totals.get("total", 0),
+        "overdue": totals.get("overdue", 0),
+        "due_soon": totals.get("due_soon", 0),
+        "on_track": totals.get("on_track", 0),
+        "undated": totals.get("undated", 0),
+        "due_soon_days": 7,
+        "oldest_days_overdue": totals.get("oldest_days", 0),
+        "oldest": oldest,
+    }
+
+
+def _snapshot_panel_for_month(month_start) -> dict[str, Any] | None:
+    """The latest daily snapshot inside one calendar month, with its groups."""
+    snapshot = fetch_one(
+        """
+        SELECT id, period_start FROM compliance.snapshots
+        WHERE scope = 'daily'
+          AND period_start >= :start
+          AND period_start < (CAST(:start AS date) + interval '1 month')
+        ORDER BY period_start DESC, captured_at DESC LIMIT 1
+        """,
+        start=month_start,
+    )
+    if snapshot is None:
+        return None
+    rows = fetch_all(
+        """
+        SELECT group_key, total_servers, compliant, non_compliant, unknown,
+               stale, finding_count
+        FROM compliance.snapshot_groups
+        WHERE snapshot_id = :id AND dimension = 'business_group'
+        """,
+        id=snapshot["id"],
+    )
+    return {
+        "period_start": snapshot["period_start"],
+        "rows": _snapshot_group_rows(rows),
+    }
+
+
+def _movers_insight() -> dict[str, Any]:
+    """Month-over-month business-service compliance movement.
+
+    Recorded snapshots store one dimension per snapshot, so this panel is
+    fleet-wide: it cannot follow the live dimension filters without inventing
+    numbers the snapshots do not hold.
+    """
+    months = fetch_all(
+        """
+        SELECT DISTINCT date_trunc('month', period_start)::date AS month
+        FROM compliance.snapshots WHERE scope = 'daily'
+        ORDER BY month DESC LIMIT 2
+        """
+    )
+    if len(months) < 2:
+        return {"current": None, "previous": None, "rows": []}
+    current = _snapshot_panel_for_month(months[0]["month"])
+    previous = _snapshot_panel_for_month(months[1]["month"])
+    if current is None or previous is None:
+        return {"current": None, "previous": None, "rows": []}
+    return {
+        "current": current["period_start"].isoformat(),
+        "previous": previous["period_start"].isoformat(),
+        "rows": movers(current["rows"], previous["rows"]),
+    }
+
+
 # --------------------------------------------------------------------------- summary
 @app.get("/summary")
 def summary(
@@ -150,6 +292,13 @@ def summary(
     selected_assets, selected = _selected(evaluations, assets, filters)
     pop = aggregate(list(selected.values()), target_pct=policy.get("target_pct"))
     freshness = _freshness()
+    threshold = policy.get("freshness_hours")
+    for source in freshness["sources"]:
+        age = source.get("age_hours")
+        source["freshness_hours"] = threshold
+        source["stale"] = (
+            age is None or (threshold is not None and age > float(threshold))
+        )
     return {
         "generated_at": datetime.now(UTC).isoformat(),
         "mode": "live",
@@ -178,6 +327,12 @@ def summary(
             list(selected.values()), selected_assets, "application_group"
         ),
         "severity": severity_breakdown(list(selected.values())),
+        "dashboard": {
+            "remediation": _remediation_insight(filters),
+            "concentration": concentration(selected.values()),
+            "excluded": excluded_breakdown(selected.values(), selected_assets),
+            "movers": _movers_insight(),
+        },
     }
 
 
@@ -307,6 +462,11 @@ def _period_summary(value: str) -> dict[str, Any]:
             "compliance_pct": compliance_pct,
             "target_pct": target_pct,
             "gap_pct": gap_pct,
+            "gap_servers": (
+                max(0, math.ceil(target_pct / 100 * in_scope)
+                    - int(snapshot["compliant_servers"] or 0))
+                if target_pct is not None and in_scope > 0 else None
+            ),
             "critical_findings": snapshot["critical_findings"],
             "total_findings": snapshot["total_findings"],
         },
@@ -393,14 +553,45 @@ def _freshness() -> dict[str, Any]:
     )
     per_source = fetch_all(
         """
-        SELECT integration_key, max(finished_at) AS at FROM inventory.sync_runs
-        WHERE status IN ('success', 'partial') GROUP BY integration_key
+        SELECT r.integration_key, max(r.finished_at) AS at,
+               max(i.display_name) AS display_name, max(i.kind) AS kind
+        FROM inventory.sync_runs r
+        LEFT JOIN inventory.integrations i ON i.key = r.integration_key
+        WHERE r.status IN ('success', 'partial')
+        GROUP BY r.integration_key
         """
     )
+    # Every configured source is listed, including one that has never synced:
+    # silence about a missing feed is indistinguishable from a healthy one.
+    configured = fetch_all(
+        "SELECT key, display_name, kind FROM inventory.integrations ORDER BY key"
+    )
+    known = {r["integration_key"]: r for r in per_source}
+    now = datetime.now(UTC)
+    sources = []
+    for row in configured:
+        last = known.get(row["key"])
+        at = last["at"] if last else None
+        age = None
+        if at is not None:
+            aware = at if at.tzinfo else at.replace(tzinfo=UTC)
+            age = round((now - aware).total_seconds() / 3600, 1)
+        sources.append({
+            "key": row["key"],
+            "label": row["display_name"] or row["key"],
+            "kind": row["kind"],
+            "synced_at": at,
+            "age_hours": age,
+            # The freshness threshold is attached by the caller that knows the
+            # active policy; this layer reports the age and leaves the verdict
+            # to the policy, so the two never drift apart.
+        })
+    sources.sort(key=lambda s: (s["age_hours"] is None, -(s["age_hours"] or 0)))
     return {
         "inventory_synced_at": inventory["at"] if inventory else None,
         "patch_synced_at": patch["at"] if patch else None,
         "per_source": {r["integration_key"]: r["at"] for r in per_source},
+        "sources": sources,
     }
 
 
@@ -686,8 +877,11 @@ def findings(
         clauses.append("a.business_group = :bg")
         params["bg"] = business_group
     if overdue:
-        clauses.append("f.released_at IS NOT NULL AND f.released_at + "
-                       "interval '30 days' < now()")
+        # The due date is stored on the finding when it is ingested, from the
+        # policy's remediation days for its severity. Re-deriving it here from
+        # released_at would quietly use a different rule than the dashboard.
+        clauses.append("f.remediation_due IS NOT NULL "
+                       "AND f.remediation_due < CURRENT_DATE")
     where = " AND ".join(clauses)
     # Count the same rows the page query can return: findings are only listed
     # while their assessment is the asset's latest, so the count must apply

@@ -34,6 +34,12 @@ from .connectors.base import AssetRecord, PatchAssessment
 from .connectors.satellite import SatelliteClient, SatelliteError
 from .connectors.sccm import SccmClient, SccmError
 from .connectors.solaris import SolarisIngestError, load_inbox
+from .connectors.solaris_ssh import (
+    DEFAULT_COLLECTOR_COMMAND,
+    SolarisSshClient,
+    SolarisSshError,
+    SolarisTarget,
+)
 
 log = logging.getLogger(__name__)
 
@@ -77,6 +83,72 @@ def _settings_row(conn, key: str) -> dict[str, Any] | None:
         text("SELECT * FROM inventory.integrations WHERE key = :k"), {"k": key}
     ).mappings().first()
     return dict(row) if row else None
+
+
+def load_solaris_targets(*, enabled_only: bool = True) -> list[SolarisTarget]:
+    """Read configured SSH targets, with the assigned baseline resolved."""
+    with connection() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT t.*, b.name AS baseline_name, b.entries AS baseline_entries
+                FROM inventory.solaris_targets t
+                LEFT JOIN inventory.solaris_baselines b ON b.id = t.baseline_id
+                WHERE (:enabled_only = false OR t.enabled)
+                ORDER BY t.name
+                """
+            ),
+            {"enabled_only": enabled_only},
+        ).mappings().all()
+    targets: list[SolarisTarget] = []
+    for row in rows:
+        baseline = None
+        if row["baseline_id"] and row["baseline_entries"] is not None:
+            baseline = {
+                "id": str(row["baseline_id"]),
+                "name": row["baseline_name"] or "",
+                "entries": row["baseline_entries"],
+            }
+        targets.append(
+            SolarisTarget(
+                id=str(row["id"]),
+                name=row["name"],
+                hostname=row["hostname"],
+                username=row["username"],
+                secret_ref=row["secret_ref"],
+                os_major=int(row["os_major"]),
+                port=int(row["port"]),
+                host_key=row["host_key"] or "",
+                zone=row["zone"] or "global",
+                collector_command=row["collector_command"] or "",
+                connect_timeout_s=int(row["connect_timeout_s"]),
+                read_timeout_s=int(row["read_timeout_s"]),
+                baseline=baseline,
+            )
+        )
+    return targets
+
+
+def _record_solaris_target_health(
+    targets: list[SolarisTarget], errors: list[dict[str, str]]
+) -> None:
+    failed = {item["target"]: item["error"] for item in errors}
+    with connection() as conn:
+        for target in targets:
+            error = failed.get(target.name, "")
+            conn.execute(
+                text(
+                    """
+                    UPDATE inventory.solaris_targets
+                    SET last_error = :error,
+                        last_success_at = CASE WHEN :error = ''
+                            THEN now() ELSE last_success_at END,
+                        updated_at = now()
+                    WHERE id = :id
+                    """
+                ),
+                {"id": target.id, "error": error[:1000]},
+            )
 
 
 def _start_run(conn, integration_key: str, trigger: str, requested_by: str) -> str:
@@ -130,12 +202,14 @@ def _build_assetexplorer(settings, secret: str) -> AssetExplorerClient:
         extra = json.loads(extra)
     return AssetExplorerClient(
         settings["endpoint"],
-        auth_method=settings.get("auth_method", "bearer"),
+        auth_method=settings.get("auth_method", "integration_key"),
         secret=secret,
         timeout_s=float(settings.get("connect_timeout_s") or 30),
+        read_timeout_s=float(settings.get("read_timeout_s") or 60),
         page_size=int(settings.get("page_size") or 200),
         verify_tls=bool(settings.get("verify_tls", True)),
         field_map=extra.get("field_map"),
+        api_path=extra.get("api_path", "/api/v3/asset_servers"),
     )
 
 
@@ -549,6 +623,9 @@ def _run_patch_sync(
     extra = settings.get("extra") or {}
     if isinstance(extra, str):
         extra = json.loads(extra)
+    mode = "http" if source_key != "solaris" else "inbox"
+    target_errors: list[dict[str, str]] = []
+    solaris_targets: list[SolarisTarget] = []
 
     try:
         secret = resolve_secret(settings.get("secret_ref") or "")
@@ -560,7 +637,8 @@ def _run_patch_sync(
                 timeout_s=float(settings.get("read_timeout_s") or 60),
                 page_size=int(settings.get("page_size") or 100),
                 verify_tls=bool(settings.get("verify_tls", True)),
-                workers=int(settings.get("workers") or 1),
+                workers=int(extra.get("workers") or 1),
+                host_search=str(extra.get("host_search") or ""),
             ) as client:
                 assessments = client.fetch_assessments()
         elif source_key == "sccm":
@@ -569,21 +647,55 @@ def _run_patch_sync(
                 timeout_s=float(settings.get("read_timeout_s") or 60),
                 page_size=int(settings.get("page_size") or 200),
                 verify_tls=bool(settings.get("verify_tls", True)),
+                api_path=str(extra.get("api_path") or "/SMS_REST/DeviceCompliance"),
             ) as client:
                 assessments = client.fetch_assessments()
         else:
-            inbox = Path(extra.get("inbox") or "/var/lib/patchtrack/solaris-inbox")
-            loaded = load_inbox(inbox)
-            assessments = [a for _, a in loaded]
-    except (SatelliteError, SccmError, SolarisIngestError, SecretError) as exc:
+            solaris_targets = load_solaris_targets()
+            if solaris_targets:
+                mode = "ssh"
+                result = SolarisSshClient(
+                    solaris_targets,
+                    collector_command=str(
+                        extra.get("collector_command") or DEFAULT_COLLECTOR_COMMAND
+                    ),
+                    workers=int(extra.get("workers") or 4),
+                ).collect()
+                assessments = result.assessments
+                target_errors = result.errors
+            else:
+                inbox = Path(extra.get("inbox") or "/var/lib/patchtrack/solaris-inbox")
+                loaded = load_inbox(inbox)
+                assessments = [a for _, a in loaded]
+    except (
+        SatelliteError, SccmError, SolarisIngestError, SolarisSshError, SecretError,
+    ) as exc:
         with connection() as conn:
             _finish_run(conn, run_id, "failed", error=str(exc))
         log.error("%s collection failed: %s", source_key, exc)
         return {"status": "failed", "run_id": run_id, "error": str(exc)}
 
+    if mode == "ssh":
+        _record_solaris_target_health(solaris_targets, target_errors)
+        if solaris_targets and not assessments and target_errors:
+            error = "; ".join(
+                f"{item['target']}: {item['error']}" for item in target_errors
+            )[:1000]
+            with connection() as conn:
+                _finish_run(
+                    conn, run_id, "failed", error=error,
+                    details={"source": source_key, "mode": mode,
+                             "targets": target_errors},
+                )
+            return {
+                "status": "failed", "run_id": run_id, "error": error,
+                "targets": target_errors,
+            }
+
     counts = ingest_assessments(assessments, run_id=run_id, source_key=source_key)
     status = (
         "success" if counts["failed"] == 0 and counts["unmatched"] == 0
+        and not target_errors
         else "partial"
     )
     with connection() as conn:
@@ -591,9 +703,13 @@ def _run_patch_sync(
             conn, run_id, status, seen=len(assessments),
             updated=counts["matched"], rejected=counts["failed"],
             unmatched=counts["unmatched"],
-            details={"source": source_key},
+            details={"source": source_key, "mode": mode,
+                     "targets": target_errors},
         )
-    return {"status": status, "run_id": run_id, "seen": len(assessments), **counts}
+    return {
+        "status": status, "run_id": run_id, "seen": len(assessments),
+        "targets": target_errors, **counts,
+    }
 
 
 def resolve_conflict(

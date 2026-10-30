@@ -1,0 +1,109 @@
+#!/bin/sh
+# PatchTrack Solaris collector.
+#
+# Read-only. Prints one JSON document describing this host:
+#
+#   Solaris 11.4+  {"patches": [...]}   pending SRU identified from IPS
+#   Solaris 10     {"installed_patches": [...]}  for baseline diffing
+#
+# It never installs, refreshes or changes anything. Install it at
+# /opt/patchtrack/collect-solaris on each host and expose it through an SSH
+# forced command (see docs/integration-solaris.md).
+#
+# Exit codes: 0 success, 2 usage, 3 the host state cannot be determined.
+# A non-zero exit is a collection failure. It is never treated as "fully
+# patched".
+
+set -u
+
+usage_error() {
+    echo "usage: collect-solaris --format=json" >&2
+    exit 2
+}
+
+for arg in "$@"; do
+    case "$arg" in
+        --format=json) ;;
+        *) usage_error ;;
+    esac
+done
+
+json_escape() {
+    # Hostnames, versions and package names are restricted to this set; refuse
+    # anything else rather than emit broken JSON.
+    printf '%s' "$1" | tr -cd 'A-Za-z0-9._:@+-'
+}
+
+hostname=$(json_escape "$(uname -n)")
+release=$(json_escape "$(uname -r)")
+now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+zone=$(command -v zonename >/dev/null 2>&1 && json_escape "$(zonename)") || zone="global"
+
+case "$release" in
+    5.11*)
+        # Oracle Solaris 11.4 and later: IPS.
+        pkg_cmd=""
+        for candidate in /usr/bin/pkg /bin/pkg; do
+            [ -x "$candidate" ] && pkg_cmd=$candidate && break
+        done
+        if [ -z "$pkg_cmd" ]; then
+            echo "collector: pkg not found on a Solaris 11 host" >&2
+            exit 3
+        fi
+        installed=$("$pkg_cmd" list -H -o pkg.version entire 2>/dev/null \
+            | awk -F. '$3 ~ /^[0-9]+$/ { if ($3 + 0 > max) { max = $3 + 0; line = $0 } } END { print line }')
+        latest=$("$pkg_cmd" list -afH -o pkg.version entire 2>/dev/null \
+            | awk -F. '$3 ~ /^[0-9]+$/ { if ($3 + 0 > max) { max = $3 + 0; line = $0 } } END { print line }')
+        if [ -z "$installed" ] || [ -z "$latest" ]; then
+            # No catalog means "cannot tell", not "no updates".
+            echo "collector: cannot read the entire package from IPS" >&2
+            exit 3
+        fi
+        installed_sru=$(printf '%s' "$installed" | awk -F. '{print $3}')
+        latest_sru=$(printf '%s' "$latest" | awk -F. '{print $3}')
+        case "$installed_sru$latest_sru" in
+            *[!0-9]*|'') echo "collector: unexpected IPS version format" >&2; exit 3 ;;
+        esac
+        os_version=11.4
+        if [ "$latest_sru" -gt "$installed_sru" ]; then
+            patches=$(printf '{"patch_id":"SOLARIS-11.4-SRU-%s","title":"Solaris 11.4 SRU %s","category":"update"}' \
+                "$latest_sru" "$latest_sru")
+            patch_block="[$patches]"
+        else
+            patch_block="[]"
+        fi
+        printf '{"hostname":"%s","fqdn":"%s","os_name":"Oracle Solaris","os_version":"%s","zone":"%s","assessed_at":"%s","collector_version":1,"patches":%s}\n' \
+            "$hostname" "$hostname" "$os_version" "$zone" "$now" "$patch_block"
+        ;;
+    5.10*)
+        # Solaris 10 has no local catalogue of available patches. Emit what is
+        # installed; PatchTrack diffs it against the administrator's baseline.
+        if ! command -v showrev >/dev/null 2>&1; then
+            echo "collector: showrev not found" >&2
+            exit 3
+        fi
+        entries=$(showrev -p 2>/dev/null | awk '
+            /^Patch: / {
+                id = $2
+                split(id, parts, "-")
+                base = parts[1]
+                rev = parts[2]
+                if (base != "" && rev != "" && !(base in seen)) {
+                    seen[base] = 1
+                    n++
+                    printf "%s{\"patch_id\":\"%s\",\"revision\":\"%s\"}", (n > 1 ? "," : ""), base, rev
+                }
+            }
+        ')
+        if [ -z "$entries" ] && ! showrev -p 2>/dev/null | grep -q '^Patch: '; then
+            echo "collector: showrev returned no patch list" >&2
+            exit 3
+        fi
+        printf '{"hostname":"%s","fqdn":"%s","os_name":"Oracle Solaris","os_version":"10","zone":"%s","assessed_at":"%s","collector_version":1,"installed_patches":[%s]}\n' \
+            "$hostname" "$hostname" "$zone" "$now" "$entries"
+        ;;
+    *)
+        echo "collector: unsupported Solaris release $release" >&2
+        exit 3
+        ;;
+esac

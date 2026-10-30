@@ -11,19 +11,19 @@ read-only view. It never deploys, approves or expires an update.
 SCCM installations differ in what they expose. Choose one and record the choice
 in the integration configuration.
 
-### Path A — Administration Service (REST), preferred
+### Path A — read-only compliance view exposed over REST, preferred
 
 | Setting | Value |
 |---------|-------|
-| Endpoint | `https://sccm.example.com` (the connector appends `/SMS_REST/DeviceCompliance`) |
+| Endpoint | `https://sccm-reporting.example.com` (the facade root) |
+| API path | `extra.api_path` (default `/SMS_REST/DeviceCompliance`) |
 | Auth | Bearer token from the organisation's approved credential process (`secret_ref`) |
 | TLS | `verify_tls=true`; SCCM's certificate must be issued by a CA the container trusts |
 | Page size | `page_size` (default 200) via `$top` |
 | Pagination | `$skip` until a short page is returned (hard cap 1,000,000 rows) |
 
-The endpoint must be a **read-only view** — a custom WMI/SQL view exposed by
-the Administration Service, or a purpose-built REST facade — not the full
-SMS Provider. PatchTrack requires:
+The endpoint must be a **purpose-built read-only facade**, not the native
+Configuration Manager Administration Service. PatchTrack requires:
 
 ```json
 {
@@ -51,6 +51,33 @@ SMS Provider. PatchTrack requires:
 }
 ```
 
+#### Why the native Administration Service cannot be used directly
+
+The Administration Service is an OData v4 endpoint rooted at
+`https://<SMSProviderFQDN>/AdminService/`, with routes
+`/AdminService/v1.0/<ClassName>` and `/AdminService/wmi/<ClassName>`. Two
+properties rule it out as PatchTrack's endpoint:
+
+- **It has no missing-updates projection on `Device`.** The `Device` class
+  carries identity, OS and last-inventory fields but not the updates a device
+  is missing. Compliance is spread across `SMS_UpdateComplianceStatus`
+  (`ResourceID`, `CI_ID`, `Status`), `SMS_UpdateInfo` (title, severity,
+  article) and `Device`; producing findings means joining them. A single
+  device row with `MissingUpdates` is a facade's output, not the provider's.
+- **It authenticates Windows-integrated administrators**
+  (`Invoke-RestMethod ... -UseDefaultCredentials`), not a bearer token. The
+  connector sends a bearer token and does not implement NTLM/Kerberos.
+
+The facade may sit in front of the site database or the provider; either way
+it performs the join and exposes one row per device. A SQL view over
+`v_UpdateComplianceStatus`, `v_UpdateInfo` and `v_R_System` is the usual
+implementation. Configure `extra.api_path` when the facade does not use the
+default route.
+
+Do **not** give PatchTrack a SQL login to the Configuration Manager database.
+The SCCM site database is a write-capable operational store; a reporting view
+or an export is the correct boundary.
+
 ### Path B — approved export
 
 Where no safe REST surface exists, the organisation's data pipeline writes the
@@ -59,10 +86,6 @@ operational arrangement, not a code path: the connector's input contract is
 identical, so either the export is served by a small read-only HTTP endpoint
 (configure Path A against it) or it is ingested by the same normaliser in an
 approved script.
-
-Do **not** give PatchTrack a SQL login to the Configuration Manager database.
-The SCCM site database is a write-capable operational store; a reporting view
-or an export is the correct boundary.
 
 ## Normalisation
 
@@ -82,7 +105,12 @@ or an export is the correct boundary.
 | update `DateReleased` / `DatePosted` | `released_at` |
 
 Records without a name or a resource id are skipped and logged. An update
-object that is not an object is dropped rather than crashing the run.
+object that is not an object, or that carries no `ArticleID`, `BulletinID`,
+`ID` or `CI_ID`, is dropped rather than producing a finding without an
+identifier.
+
+`IPAddresses` is an array in the native provider and in the facade contract;
+the first non-empty value is used for matching.
 
 `assessment_status = partial` still produces findings, but the freshness rule
 applies to `assessed_at` as usual. A device whose `AssessmentComplete` is false
@@ -113,7 +141,7 @@ device in an unmanaged workgroup. Do not "fix" it by excluding the host.
 | Timeout / connection error | Sync run `failed`, no assessments written |
 | 401/403 | `failed`, "SCCM authentication failed" |
 | Other HTTP error | `failed` with the status |
-| Malformed JSON, missing `value` | `failed` |
+| Malformed JSON, non-object body, or no `value` array | `failed` — never a successful empty collection |
 | One device unparseable | Device skipped and logged; run `partial` |
 
 ## Configuring it
@@ -126,14 +154,17 @@ PATCH /api/inventory/integrations/sccm
   "secret_ref": "env:PATCHTRACK_SCCM_TOKEN",
   "enabled": true,
   "sync_interval_minutes": 720,
-  "verify_tls": true
+  "verify_tls": true,
+  "extra": { "api_path": "/SMS_REST/DeviceCompliance" }
 }
 ```
 
 ## Verification checklist
 
-1. From inside the inventory container, fetch one page of the endpoint with the
-   same token and confirm the shape matches the contract above.
+1. From inside the inventory container, fetch one page of the facade with the
+   same token (`-H "Authorization: Bearer …"`) and confirm the shape matches
+   the contract above. Pointing this at the native `AdminService` returns 401
+   or 404 by design.
 2. Manual sync; expect `status: success` (or `partial` with an explained
    unmatched count).
 3. Confirm the Windows population moves out of Unknown in

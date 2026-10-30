@@ -97,7 +97,59 @@ backups screen; compare it with the downloaded file if it crossed an untrusted
 link. Read `manifest.json` and confirm `app_version` and `schema_version`
 against the target installation — the "same version" rule means both.
 
-### Restore an in-app archive
+### Restore from the console
+
+An administrator can also restore a **completed** archive without leaving the
+console: **Administration → Data backups → Restore** on the archive row, then
+type `RESTORE` in the dialog. The request writes a `restore.requested` audit
+event and queues a row in `shared.restore_runs`; the same backup worker performs
+it with `pg_restore`. Only one restore may be queued or running at a time, and
+backups are blocked while it runs.
+
+The worker:
+
+1. Refuses an archive whose outer SHA-256 does not match the database row, whose
+   internal `SHA256SUMS` does not verify, or whose `manifest.json` release or
+   schema is newer than this installation. Nothing is changed on a refusal.
+2. Restores into a scratch database named `patchtrack_restore_<id>`, then swaps
+   names: the live database becomes `patchtrack_pre_restore_<UTC>`, the scratch
+   database becomes `patchtrack`. The old database is **not** dropped.
+3. Snapshots the current report volume to `pre-restore-reports-<UTC>.tar.gz`
+   inside the backups volume, then replaces the volume's contents with
+   `reports.tar.gz` from the archive.
+4. Copies the live `shared.backup_runs` and `shared.backup_worker` history into
+   the restored database, so the previous archives remain listed, and records
+   the result in `shared.restore_runs`.
+
+A downloaded archive can also be restored without shell access: choose
+**Restore from a downloaded archive** on the same screen, pick the `.tar.gz`
+saved by Download, and type `RESTORE`. The console streams the upload to the
+`restore-uploads` volume (separate from the backups volume, so retention never
+treats it as an archive PatchTrack produced), checks its manifest against this
+release and schema before queueing, and the worker verifies the digest it
+recorded while receiving the file. The uploaded copy is removed after the
+attempt; the restore history keeps the operator's filename. An upload is
+limited by `PATCHTRACK_RESTORE_UPLOAD_MAX_BYTES` (4 GiB by default); other
+requests keep the ordinary `PATCHTRACK_MAX_REQUEST_BYTES` limit.
+
+Services use `pool_pre_ping`, so they reconnect to the renamed database within
+seconds. Expect a brief window of failed writes while the swap happens; sign in
+again if the session was invalidated by the restored user table.
+
+After a console restore, check that the dashboard, a report download and the
+audit trail look right. When satisfied, delete the retained database (it keeps
+the pre-restore estate and its disk footprint):
+
+```bash
+docker compose exec -T postgres psql -U patchtrack -d postgres -c \
+  "DROP DATABASE \"patchtrack_pre_restore_<stamp>\""
+```
+
+The pre-restore report snapshot can be removed from the backups volume once the
+reports check out. The console restore is a same-host convenience: for a new
+host, or if the console is unavailable, use the host-side steps below.
+
+### Restore an in-app archive (host-side)
 
 The archive carries a full schema, so it can rebuild a same-release database.
 Restore into a **new** database first, verify it, and only then swap it in.

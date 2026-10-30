@@ -120,9 +120,9 @@ export function statePill(state) {
   const key = state || "unknown";
   return h("span", { class: `pill ${key}` },
     h("span", { class: "dot", style: {
-      background: key === "compliant" ? "#0ca30c"
-        : key === "non_compliant" ? "#d03b3b"
-          : key === "excluded" ? "#4a5560" : "#fab219",
+      background: key === "compliant" ? "#22e6a6"
+        : key === "non_compliant" ? "#ff3b6b"
+          : key === "excluded" ? "#4b4a63" : "#ffb020",
     } }),
     STATE_LABELS[key] || key);
 }
@@ -131,8 +131,12 @@ export function pill(value, label) {
   return h("span", { class: `pill ${value}` }, label || value);
 }
 
-export function statTile({ label, value, sub, delta, tone, meter, foot, accent }) {
+export function statTile({ label, value, sub, delta, tone, meter, foot, accent,
+  href }) {
   const card = h("div", { class: "card stat" });
+  // The headline number takes the tile's accent, so the KPI row reads as the
+  // reference board's row of differently coloured instruments.
+  if (accent) card.style.setProperty("--stat-accent", accent);
   const labelRow = h("div", { class: "stat-label" });
   if (accent) {
     labelRow.appendChild(h("span", { class: "dot", style: { background: accent } }));
@@ -152,11 +156,17 @@ export function statTile({ label, value, sub, delta, tone, meter, foot, accent }
     const bar = h("div", { class: "meter" },
       h("span", { style: {
         width: `${Math.max(0, Math.min(100, meter))}%`,
-        background: accent || "#3987e5",
+        background: accent || "#ff2d95",
       } }));
     card.appendChild(bar);
   }
   if (foot) card.appendChild(h("div", { class: "stat-foot" }, foot));
+  // A tile that opens the list behind its number carries the whole card, so
+  // the target is the same size as the thing that looked clickable.
+  if (href) {
+    return h("a", { class: "stat-link", href, "aria-label": `${label}: ${value}` },
+      card);
+  }
   return card;
 }
 

@@ -7,7 +7,7 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from patchtrack_common import timezones as timezone_settings
 from patchtrack_common.db import connection, fetch_all, fetch_one
@@ -19,6 +19,7 @@ from .engine import (
     aggregate,
     evaluate_asset,
     group_breakdown,
+    rule_for,
     severity_breakdown,
 )
 
@@ -61,7 +62,7 @@ def load_assets() -> dict[str, AssetInput]:
         """
         SELECT a.id, a.hostname, a.os_family, a.os_version, a.environment,
                a.business_group, a.application_group, a.lifecycle_status,
-               a.in_scope, a.patch_source,
+               a.in_scope, a.exclusion_reason, a.patch_source,
                asmt.assessed_at, asmt.status AS assessment_status,
                asmt.critical_count, asmt.important_count, asmt.moderate_count,
                asmt.low_count, asmt.total_patches
@@ -94,6 +95,7 @@ def load_assets() -> dict[str, AssetInput]:
             application_group=row["application_group"] or "UNKNOWN",
             lifecycle_status=row["lifecycle_status"],
             in_scope=row["in_scope"],
+            exclusion_reason=row["exclusion_reason"] or "",
             patch_source=row["patch_source"] or "",
             assessment_at=row["assessed_at"],
             assessment_status=row["assessment_status"],
@@ -148,9 +150,68 @@ def persist_states(
             )
 
 
+def apply_remediation_due(
+    assets: dict[str, AssetInput], policy: dict[str, Any]
+) -> int:
+    """Record the SLA due date on findings that do not have one yet.
+
+    The due date is fixed when a finding is first evaluated: released date
+    plus the remediation window of the rule that applies to its asset. Only
+    rows with ``remediation_due IS NULL`` are touched, so a later policy edit
+    never rewrites an SLA that was already recorded. Assets are grouped by
+    their effective remediation window so one statement covers each group.
+    """
+    groups: dict[tuple[tuple[str, int], ...], list[str]] = {}
+    for asset_id, asset in assets.items():
+        days = rule_for(policy, asset).get("remediation_days") or {}
+        window = tuple(sorted(
+            (str(severity), int(value))
+            for severity, value in days.items() if value is not None
+        ))
+        if window:
+            groups.setdefault(window, []).append(asset_id)
+    updated = 0
+    with connection() as conn:
+        for window, asset_ids in groups.items():
+            cases = " ".join(
+                f"WHEN :sev_{index} THEN :days_{index}"
+                for index in range(len(window))
+            )
+            params: dict[str, Any] = {
+                f"sev_{index}": severity
+                for index, (severity, _) in enumerate(window)
+            }
+            params.update({
+                f"days_{index}": days
+                for index, (_, days) in enumerate(window)
+            })
+            params["asset_ids"] = asset_ids
+            params["severities"] = [severity for severity, _ in window]
+            result = conn.execute(
+                text(
+                    f"""
+                    UPDATE compliance.findings
+                       SET remediation_due = released_at::date
+                             + CASE severity {cases} END
+                     WHERE asset_id IN :asset_ids
+                       AND remediation_due IS NULL
+                       AND released_at IS NOT NULL
+                       AND severity IN :severities
+                    """
+                ).bindparams(
+                    bindparam("asset_ids", expanding=True),
+                    bindparam("severities", expanding=True),
+                ),
+                params,
+            )
+            updated += result.rowcount or 0
+    return updated
+
+
 def refresh_compliance(*, now: datetime | None = None) -> dict[str, Any]:
     assets, evaluations, policy, version_id = evaluate_all(now=now)
     persist_states(evaluations, version_id)
+    apply_remediation_due(assets, policy)
     pop = aggregate(
         list(evaluations.values()), target_pct=policy.get("target_pct")
     )

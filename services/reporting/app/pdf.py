@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+from pathlib import Path
 from xml.sax.saxutils import escape as _xml_escape
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -23,6 +24,7 @@ from reportlab.lib.enums import TA_JUSTIFY, TA_LEFT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
+from reportlab.lib.utils import ImageReader
 from reportlab.platypus import (
     BaseDocTemplate,
     CondPageBreak,
@@ -39,13 +41,41 @@ from reportlab.platypus import (
 )
 from reportlab.platypus.tableofcontents import TableOfContents
 
-BRAND_DARK = colors.HexColor("#1b2430")
-BRAND_ACCENT = colors.HexColor("#2f81f7")
-COMPLIANT = colors.HexColor("#2ea043")
-NON_COMPLIANT = colors.HexColor("#d73a49")
-UNKNOWN = colors.HexColor("#d29922")
-MUTED = colors.HexColor("#5b6673")
-GRID = colors.HexColor("#d8dee4")
+# The PDF mirrors the console's neon palette, but every colour here is tuned
+# for paper: the page itself stays white, accents are darkened to hold contrast
+# when printed or photocopied, and no panel relies on a glow to be legible.
+BRAND_DARK = colors.HexColor("#241436")
+BRAND_ACCENT = colors.HexColor("#c2185b")
+BRAND_VIOLET = colors.HexColor("#5b3fd8")
+BRAND_CYAN = colors.HexColor("#0e7490")
+COMPLIANT = colors.HexColor("#0b7a5c")
+NON_COMPLIANT = colors.HexColor("#c81e4a")
+UNKNOWN = colors.HexColor("#9a5b00")
+MUTED = colors.HexColor("#5d5870")
+# Table rules need to survive a mono office printer, so they are drawn a step
+# darker and heavier than the hairline used for decorative dividers.
+GRID = colors.HexColor("#9d8db8")
+PANEL_TINT = colors.HexColor("#f9f1f8")
+BODY_INK = colors.HexColor("#2b2440")
+
+# Bundled product marks, used only when the deployment has not uploaded an
+# organisation logo. The tagline version sits on the cover as a dark plaque so
+# the neon artwork keeps its contrast on white paper; the square mark goes in
+# the running header.
+ASSET_DIR = Path(__file__).with_name("assets")
+DEFAULT_COVER_LOGO = ASSET_DIR / "logo-tagline.png"
+DEFAULT_HEADER_LOGO = ASSET_DIR / "logo.png"
+_LOGO_BYTES: dict[str, bytes | None] = {}
+
+
+def _asset_bytes(path: Path) -> bytes | None:
+    key = str(path)
+    if key not in _LOGO_BYTES:
+        try:
+            _LOGO_BYTES[key] = path.read_bytes()
+        except OSError:  # a missing asset must never break a report
+            _LOGO_BYTES[key] = None
+    return _LOGO_BYTES[key]
 
 
 @dataclass
@@ -117,7 +147,7 @@ def _styles() -> dict[str, ParagraphStyle]:
         # document rather than a stack of ragged-right labels.
         "body": ParagraphStyle(
             "PatchBody", parent=base["Normal"], fontSize=9.5, leading=13.5,
-            textColor=colors.HexColor("#24292f"), alignment=TA_JUSTIFY,
+            textColor=BODY_INK, alignment=TA_JUSTIFY,
         ),
         "small": ParagraphStyle(
             "PatchSmall", parent=base["Normal"], fontSize=8, leading=11,
@@ -127,12 +157,12 @@ def _styles() -> dict[str, ParagraphStyle]:
         # statements wrap inside the cell rather than being truncated.
         "cell": ParagraphStyle(
             "PatchCell", parent=base["Normal"], fontName="Helvetica",
-            fontSize=7, leading=9, textColor=colors.HexColor("#24292f"),
+            fontSize=7, leading=9, textColor=BODY_INK,
             alignment=TA_LEFT,
         ),
         "cell_head": ParagraphStyle(
             "PatchCellHead", parent=base["Normal"], fontName="Helvetica-Bold",
-            fontSize=7, leading=9, textColor=BRAND_DARK, alignment=TA_LEFT,
+            fontSize=7, leading=9, textColor=colors.white, alignment=TA_LEFT,
         ),
         # Cover styles are deliberately far from the body scale: the cover is
         # read at a glance, from a printed page or a board pack thumbnail.
@@ -227,9 +257,14 @@ class _NumberedDoc(BaseDocTemplate):
         width, height = A4
         canvas.setFillColor(BRAND_DARK)
         canvas.rect(0, height - 12 * mm, width, 12 * mm, stroke=0, fill=1)
+        _accent_band(canvas, 0, height - 12 * mm, width, 1.2 * mm)
+        text_x = 18 * mm
+        if not (self.context.logo_data or self.context.logo_path):
+            _draw_default_mark(canvas, 18 * mm, height - 10.6 * mm, 8 * mm)
+            text_x = 28.5 * mm
         canvas.setFillColor(colors.white)
         canvas.setFont("Helvetica-Bold", 9)
-        canvas.drawString(18 * mm, height - 8 * mm,
+        canvas.drawString(text_x, height - 8 * mm,
                           _clip(self.context.organization, 48))
         canvas.setFont("Helvetica", 8)
         canvas.drawRightString(width - 18 * mm, height - 8 * mm,
@@ -242,11 +277,14 @@ class _NumberedDoc(BaseDocTemplate):
         canvas.saveState()
         canvas.setFillColor(BRAND_DARK)
         canvas.rect(0, height - 42 * mm, width, 42 * mm, stroke=0, fill=1)
-        canvas.setFillColor(BRAND_ACCENT)
-        canvas.rect(0, height - 44.5 * mm, width, 2.5 * mm, stroke=0, fill=1)
+        _accent_band(canvas, 0, height - 44.5 * mm, width, 2.5 * mm)
+        text_x = 18 * mm
+        if not (self.context.logo_data or self.context.logo_path):
+            _draw_default_mark(canvas, 18 * mm, height - 31.5 * mm, 10 * mm)
+            text_x = 32 * mm
         canvas.setFillColor(colors.white)
         canvas.setFont("Helvetica-Bold", 10)
-        canvas.drawString(18 * mm, height - 26 * mm,
+        canvas.drawString(text_x, height - 26 * mm,
                           _clip(self.context.organization, 48))
         canvas.setFont("Helvetica", 8)
         canvas.drawRightString(width - 18 * mm, height - 26 * mm,
@@ -276,14 +314,34 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else f"{text[:limit - 1]}…"
 
 
+def _accent_band(canvas, x: float, y: float, width: float,
+                 height: float) -> None:
+    """The console's magenta–violet–cyan rule, flattened for print."""
+    segment = width / 3
+    for index, colour in enumerate((BRAND_ACCENT, BRAND_VIOLET, BRAND_CYAN)):
+        canvas.setFillColor(colour)
+        canvas.rect(x + segment * index, y, segment + 0.5, height,
+                    stroke=0, fill=1)
+
+
 def _logo_flowable(context: ReportContext, width: float,
                    height: float) -> Image | None:
-    """An uploaded logo wins; a legacy path is only a fallback."""
+    """An uploaded logo wins; a legacy path is only a fallback.
+
+    When neither is configured the bundled PatchTrack mark is used, so a fresh
+    installation still ships branded reports without an upload step.
+    """
     source: Any = context.logo_data
     if source is None and context.logo_path:
         source = context.logo_path
     if not source:
-        return None
+        source = _asset_bytes(DEFAULT_COVER_LOGO)
+        if not source:
+            return None
+        image = Image(io.BytesIO(source), width=width, height=height,
+                      kind="proportional")
+        image.hAlign = "LEFT"
+        return image
     try:
         image = Image(io.BytesIO(source) if context.logo_data else source,
                       width=width, height=height, kind="proportional")
@@ -291,6 +349,19 @@ def _logo_flowable(context: ReportContext, width: float,
         return image
     except Exception:  # noqa: BLE001 - a bad logo must not break the report
         return None
+
+
+def _draw_default_mark(canvas, x: float, y: float, size: float) -> None:
+    """Draw the square bundled mark on the dark band, if it is available."""
+    data = _asset_bytes(DEFAULT_HEADER_LOGO)
+    if not data:
+        return
+    try:
+        canvas.drawImage(ImageReader(io.BytesIO(data)), x, y, width=size,
+                         height=size, mask="auto", preserveAspectRatio=True,
+                         anchor="sw")
+    except Exception:  # noqa: BLE001 - never fail a report over branding
+        return
 
 
 def _kpi_table(context: ReportContext, styles: dict[str, ParagraphStyle]) -> Table:
@@ -311,8 +382,9 @@ def _kpi_table(context: ReportContext, styles: dict[str, ParagraphStyle]) -> Tab
     table.setStyle(
         TableStyle(
             [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f2f5f8")),
-                ("TEXTCOLOR", (0, 0), (-1, 0), MUTED),
+                ("BACKGROUND", (0, 0), (-1, 0), BRAND_DARK),
+                ("LINEABOVE", (0, 0), (-1, 0), 1.4, BRAND_ACCENT),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
                 ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 7.5),
                 ("FONT", (0, 1), (-1, 1), "Helvetica-Bold", 17),
                 ("TEXTCOLOR", (1, 1), (1, 1), COMPLIANT),
@@ -320,7 +392,7 @@ def _kpi_table(context: ReportContext, styles: dict[str, ParagraphStyle]) -> Tab
                 ("TEXTCOLOR", (3, 1), (4, 1), UNKNOWN),
                 ("ALIGN", (0, 0), (-1, -1), "CENTER"),
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("GRID", (0, 0), (-1, -1), 0.5, GRID),
+                ("GRID", (0, 0), (-1, -1), 0.7, GRID),
                 ("TOPPADDING", (0, 0), (-1, -1), 5),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
             ]
@@ -526,8 +598,8 @@ def _group_table(rows: list[dict[str, Any]], label: str,
                 ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 7.5),
                 ("FONT", (0, 1), (-1, -1), "Helvetica", 7.8),
                 ("ROWBACKGROUNDS", (0, 1), (-1, -1),
-                 [colors.white, colors.HexColor("#f7f9fb")]),
-                ("GRID", (0, 0), (-1, -1), 0.4, GRID),
+                 [colors.white, colors.HexColor("#fcf8fd")]),
+                ("GRID", (0, 0), (-1, -1), 0.7, GRID),
                 ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
                 ("TOPPADDING", (0, 0), (-1, -1), 3),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
@@ -538,11 +610,11 @@ def _group_table(rows: list[dict[str, Any]], label: str,
 
 
 SEVERITY_COLOURS = {
-    "critical": colors.HexColor("#b3202d"),
-    "important": colors.HexColor("#d4622f"),
-    "moderate": colors.HexColor("#b58200"),
-    "low": colors.HexColor("#2f6fb5"),
-    "unknown": colors.HexColor("#5b6673"),
+    "critical": colors.HexColor("#c2185b"),
+    "important": colors.HexColor("#b45309"),
+    "moderate": colors.HexColor("#8a6100"),
+    "low": colors.HexColor("#0e7490"),
+    "unknown": colors.HexColor("#5d5870"),
 }
 
 
@@ -593,13 +665,13 @@ def _trend_chart(rows: list[dict[str, Any]], target: float | None = None) -> Dra
         y = chart.y + (float(target) / 100.0) * chart.height
         drawing.add(Line(
             chart.x, y, chart.x + chart.width, y,
-            strokeColor=colors.HexColor("#d4622f"), strokeWidth=1,
+            strokeColor=BRAND_VIOLET, strokeWidth=1,
             strokeDashArray=[4, 3],
         ))
         drawing.add(String(
             chart.x + chart.width + 2, y - 3, f"Target {float(target):.0f}%",
             fontName="Helvetica", fontSize=6.5,
-            fillColor=colors.HexColor("#d4622f"),
+            fillColor=BRAND_VIOLET,
         ))
     return drawing
 
@@ -617,9 +689,12 @@ def _cover_story(context: ReportContext,
     snap = context.snapshot
     prepared_name = _escape(context.preparer_name or context.generated_by)
     prepared_title = _escape(context.preparer_title or "Report preparer")
+    default_brand = not (context.logo_data or context.logo_path)
+    logo_width, logo_height = ((56 * mm, 56 * mm) if default_brand
+                               else (58 * mm, 22 * mm))
     story: list[Any] = [
         Spacer(1, 6 * mm),
-        _logo_flowable(context, 58 * mm, 22 * mm) or Spacer(1, 0),
+        _logo_flowable(context, logo_width, logo_height) or Spacer(1, 0),
         Spacer(1, 8 * mm),
         Paragraph(_escape(context.organization), styles["cover_org"]),
         Spacer(1, 3 * mm),
@@ -646,7 +721,7 @@ def _cover_story(context: ReportContext,
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("TOPPADDING", (0, 0), (-1, -1), 3),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-        ("LINEBELOW", (0, 0), (-1, -2), 0.3, GRID),
+        ("LINEBELOW", (0, 0), (-1, -2), 0.5, GRID),
     ]))
     story += [table, Spacer(1, 30 * mm)]
 
@@ -789,12 +864,12 @@ def _abbreviations_table() -> Table:
     table.setStyle(
         TableStyle(
             [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f2f5f8")),
-                ("TEXTCOLOR", (0, 0), (-1, 0), MUTED),
+                ("BACKGROUND", (0, 0), (-1, 0), BRAND_DARK),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
                 ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 7.5),
                 ("FONT", (0, 1), (0, -1), "Helvetica-Bold", 8.2),
                 ("FONT", (1, 1), (1, -1), "Helvetica", 8.2),
-                ("GRID", (0, 0), (-1, -1), 0.4, GRID),
+                ("GRID", (0, 0), (-1, -1), 0.7, GRID),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ("TOPPADDING", (0, 0), (-1, -1), 4),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
@@ -953,10 +1028,11 @@ def render_report(context: ReportContext) -> bytes:
         table.setStyle(
             TableStyle(
                 [
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f2f5f8")),
+                    ("BACKGROUND", (0, 0), (-1, 0), BRAND_DARK),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
                     ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 7.5),
                     ("FONT", (0, 1), (-1, -1), "Helvetica", 7.8),
-                    ("GRID", (0, 0), (-1, -1), 0.4, GRID),
+                    ("GRID", (0, 0), (-1, -1), 0.7, GRID),
                     ("ALIGN", (-1, 1), (-1, -1), "RIGHT"),
                 ]
             )
@@ -1033,8 +1109,8 @@ def render_report(context: ReportContext) -> bytes:
                                            52 * mm, 18 * mm, 23 * mm, 20 * mm],
                           repeatRows=1, splitInRow=1, hAlign="LEFT")
             table.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f2f5f8")),
-                ("GRID", (0, 0), (-1, -1), 0.4, GRID),
+                ("BACKGROUND", (0, 0), (-1, 0), BRAND_DARK),
+                ("GRID", (0, 0), (-1, -1), 0.7, GRID),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ("TOPPADDING", (0, 0), (-1, -1), 2),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
@@ -1081,8 +1157,8 @@ def render_report(context: ReportContext) -> bytes:
                                            17 * mm, 36 * mm, 16 * mm],
                           repeatRows=1, splitInRow=1, hAlign="LEFT")
             table.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f2f5f8")),
-                ("GRID", (0, 0), (-1, -1), 0.4, GRID),
+                ("BACKGROUND", (0, 0), (-1, 0), BRAND_DARK),
+                ("GRID", (0, 0), (-1, -1), 0.7, GRID),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ("TOPPADDING", (0, 0), (-1, -1), 2),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
@@ -1156,10 +1232,11 @@ def render_report(context: ReportContext) -> bytes:
         table.setStyle(
             TableStyle(
                 [
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f2f5f8")),
+                    ("BACKGROUND", (0, 0), (-1, 0), BRAND_DARK),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
                     ("FONT", (0, 0), (-1, 0), "Helvetica-Bold", 7.5),
                     ("FONT", (0, 1), (-1, -1), "Helvetica", 7.8),
-                    ("GRID", (0, 0), (-1, -1), 0.4, GRID),
+                    ("GRID", (0, 0), (-1, -1), 0.7, GRID),
                 ]
             )
         )

@@ -158,7 +158,8 @@ Practical guidance:
 |----------------|----------------------------|
 | Satellite synced hourly | 6 |
 | SCCM synced daily | 48 |
-| Solaris file drop weekly | 192 |
+| Solaris SSH targets weekly | 192 |
+| Solaris inbox drop weekly | 192 |
 
 A threshold shorter than the collection interval guarantees that servers
 oscillate between Stale and Compliant — a configuration error, visible as a

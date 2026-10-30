@@ -16,8 +16,12 @@ from compliance.app.engine import (
     DEFAULT_POLICY,
     AssetInput,
     aggregate,
+    concentration,
     evaluate_asset,
+    excluded_breakdown,
+    finding_sla,
     group_breakdown,
+    movers,
     period_bounds,
     remediation_due,
     rule_for,
@@ -277,6 +281,104 @@ def test_remediation_due_is_none_for_unconfigured_severity():
     configured = policy(default_rule={"blocking_severities": [], "remediation_days": {}})
     assert remediation_due(configured, asset(), "critical",
                            datetime(2026, 10, 1, tzinfo=UTC)) is None
+
+
+# ------------------------------------------------------------ insights
+def test_gap_servers_is_the_shortfall_to_target():
+    pop = aggregate([
+        evaluate_asset(asset(asset_id=str(i)), policy(), now=NOW)
+        for i in range(90)
+    ] + [
+        evaluate_asset(asset(asset_id=f"bad{i}",
+                             severity_counts={"critical": 1}),
+                       policy(), now=NOW)
+        for i in range(10)
+    ], target_pct=95.0)
+    assert pop.compliance_pct == 90.0
+    assert pop.gap_servers == 5   # ceil(95% of 100) - 90
+    assert pop.as_dict()["gap_servers"] == 5
+
+
+def test_gap_servers_is_zero_when_target_met():
+    pop = aggregate([
+        evaluate_asset(asset(asset_id=str(i)), policy(), now=NOW)
+        for i in range(20)
+    ], target_pct=95.0)
+    assert pop.gap_servers == 0
+
+
+def test_gap_servers_is_none_without_a_population():
+    pop = aggregate([], target_pct=95.0)
+    assert pop.gap_servers is None
+
+
+def test_finding_sla_buckets_by_recorded_due_date():
+    from datetime import date
+    today = date(2026, 10, 31)
+    rows = [
+        {"remediation_due": date(2026, 10, 1)},   # 30 days overdue
+        {"remediation_due": date(2026, 10, 30)},  # 1 day overdue
+        {"remediation_due": date(2026, 11, 5)},   # due soon
+        {"remediation_due": date(2026, 12, 1)},   # on track
+        {"remediation_due": None},                # undated
+    ]
+    result = finding_sla(rows, today=today)
+    assert result == {
+        "total": 5, "overdue": 2, "due_soon": 1, "on_track": 1,
+        "undated": 1, "due_soon_days": 7, "oldest_days_overdue": 30,
+    }
+
+
+def test_concentration_reports_affected_curve():
+    evaluations = [
+        evaluate_asset(asset(asset_id="a", severity_counts={"critical": 6}),
+                       policy(), now=NOW),
+        evaluate_asset(asset(asset_id="b", severity_counts={"critical": 3}),
+                       policy(), now=NOW),
+        evaluate_asset(asset(asset_id="c", severity_counts={"critical": 1}),
+                       policy(), now=NOW),
+        evaluate_asset(asset(asset_id="d"), policy(), now=NOW),
+    ]
+    result = concentration(evaluations)
+    assert result["population"] == 4
+    assert result["affected"] == 3
+    assert result["total_patches"] == 10
+    assert result["top_1pct_share"] == 60.0
+    assert result["top_10_servers_share"] == 100.0
+    assert result["top_30_servers_share"] == 100.0
+    assert result["points"][-1]["patch_share"] == 100.0
+
+
+def test_excluded_breakdown_uses_the_recorded_reason():
+    out = asset(asset_id="x", in_scope=False, exclusion_reason="Lab kit")
+    legacy = asset(asset_id="y", lifecycle_status="retired")
+    evaluations = [evaluate_asset(out, policy(), now=NOW),
+                   evaluate_asset(legacy, policy(), now=NOW),
+                   evaluate_asset(asset(asset_id="z"), policy(), now=NOW)]
+    result = excluded_breakdown(evaluations, {"x": out, "y": legacy})
+    assert result["total"] == 2
+    assert {row["reason"]: row["count"] for row in result["reasons"]} == {
+        "Lab kit": 1, "Asset lifecycle is retired": 1,
+    }
+
+
+def test_movers_compare_only_groups_present_in_both_periods():
+    current = [
+        {"group": "Payments", "in_scope": 10, "compliant": 9},
+        {"group": "Retail", "in_scope": 10, "compliant": 5},
+        {"group": "New", "in_scope": 4, "compliant": 4},
+    ]
+    previous = [
+        {"group": "Payments", "in_scope": 10, "compliant": 7},
+        {"group": "Retail", "in_scope": 10, "compliant": 6},
+    ]
+    rows = movers(current, previous)
+    assert rows[0] == {
+        "group": "Payments", "compliance_pct": 90.0, "previous_pct": 70.0,
+        "change_pp": 20.0, "servers": 10,
+    }
+    assert [row["group"] for row in rows] == ["Payments", "Retail"]
+    assert rows[1]["change_pp"] == -10.0
 
 
 # ------------------------------------------------------------ periods

@@ -7,7 +7,7 @@
 
 import { api, download } from "/static/api.js";
 import {
-  STATUS, donut, legend, severityBars,
+  STATUS, concentrationCurve, donut, legend, severityBars,
   stackedColumns, stackedRows, targetColumns, trendLine,
 } from "/static/charts.js";
 import {
@@ -156,6 +156,9 @@ const state = {
     // "2026") and is validated against the recorded snapshots on every render,
     // so a key for a period that no longer exists falls back to Live.
     period: stored("patchtrack.period", ""),
+    // Arrange mode is deliberately not persisted: a reader who rearranged the
+    // panels once should not find drag handles on every later visit.
+    arranging: false,
   },
   kiosk: stored("patchtrack.kiosk", "0") === "1",
 };
@@ -808,7 +811,10 @@ function startDashboardRefresh(seconds) {
   dashboardTimer = setInterval(() => {
     // Do not pull the page out from under an operator who is reading it in a
     // hidden tab or filling in a dialog. The next tick catches up.
-    if (document.hidden || state.route !== "dashboard") return;
+    // A refresh would rebuild the board and drop a panel mid-drag, so it waits
+    // until the reader leaves arrange mode.
+    if (document.hidden || state.route !== "dashboard"
+        || state.dashboard.arranging) return;
     if (document.getElementById("modal-root").childElementCount) return;
     renderDashboard({ silent: true }).catch(() => {
       lastRefresh.textContent =
@@ -876,12 +882,42 @@ function periodNote(period, dimensions) {
         "the current inventory.")));
 }
 
+/* Click-through keeps the dashboard filters the reader can see: the server
+ * register reads them from the same state, so the list opens narrowed the
+ * same way the tile was. */
+function serversLink(stateName) {
+  if (!can("compliance:view")) return null;
+  const extra = filterQuery();
+  return `#/servers?state=${encodeURIComponent(stateName)}${extra ? `&${extra}` : ""}`;
+}
+
+function drillToServers(stateName, changes = {}) {
+  if (!can("compliance:view")) return;
+  for (const [key, value] of Object.entries(changes)) {
+    if (Object.prototype.hasOwnProperty.call(state.filters, key)) {
+      state.filters[key] = value;
+    }
+  }
+  navigate("servers", { state: stateName });
+}
+
 function kpiRow(summary) {
   const k = summary.kpis;
   const target = k.target_pct;
   const gap = k.gap_pct;
   const met = gap !== null && gap >= 0;
-  return h("div", { class: "grid grid-kpi" },
+  const short = k.gap_servers;
+  const quarterly = summary.policy?.quarterly_target_pct;
+  const gapFoot = short === null || short === undefined
+    ? (quarterly !== null && quarterly !== undefined
+      ? `Quarterly target ${fmtPct(quarterly, 0)}` : "")
+    : short === 0
+      ? `Target met · quarterly target ${fmtPct(quarterly, 0)}`
+      : `${fmtNumber(short)} server${short === 1 ? "" : "s"} short · quarterly target ${
+        fmtPct(quarterly, 0)}`;
+  const remediation = summary.dashboard?.remediation;
+  const overdue = remediation?.overdue || 0;
+  return h("div", { class: `grid grid-kpi${remediation ? " grid-kpi-6" : ""}` },
     statTile({
       label: "Total servers (in scope)",
       value: fmtNumber(k.in_scope),
@@ -889,7 +925,8 @@ function kpiRow(summary) {
         ? `${fmtNumber(k.excluded)} excluded of ${fmtNumber(k.total_servers)}`
         : "",
       foot: "Active lifecycle, in compliance scope",
-      accent: "#3987e5",
+      accent: "#22d3ee",
+      href: serversLink(""),
     }),
     statTile({
       label: "Compliant",
@@ -901,6 +938,7 @@ function kpiRow(summary) {
       meter: k.in_scope ? (k.compliant / k.in_scope) * 100 : 0,
       accent: STATUS.compliant,
       foot: "No outstanding blocking findings",
+      href: serversLink("compliant"),
     }),
     statTile({
       label: "Non-compliant",
@@ -910,6 +948,7 @@ function kpiRow(summary) {
       meter: k.in_scope ? (k.non_compliant / k.in_scope) * 100 : 0,
       accent: STATUS.non_compliant,
       foot: "Blocking findings outstanding",
+      href: serversLink("non_compliant"),
     }),
     statTile({
       label: "Unknown / no data",
@@ -921,7 +960,22 @@ function kpiRow(summary) {
       meter: k.in_scope ? ((k.unknown + k.stale) / k.in_scope) * 100 : 0,
       accent: STATUS.unknown,
       foot: "Counted against compliance, never as compliant",
+      href: serversLink("unknown"),
     }),
+    remediation ? statTile({
+      label: "Overdue findings",
+      value: fmtNumber(overdue),
+      sub: `of ${fmtNumber(remediation.total)} current`,
+      delta: remediation.oldest_days_overdue
+        ? `${fmtNumber(remediation.oldest_days_overdue)}d oldest` : null,
+      tone: overdue ? "bad" : "good",
+      meter: remediation.total
+        ? (overdue / remediation.total) * 100 : 0,
+      accent: overdue ? STATUS.critical : STATUS.compliant,
+      foot: `${fmtNumber(remediation.due_soon)} due within ${
+        remediation.due_soon_days} days`,
+      href: can("findings:view") ? "#/findings?overdue=true" : null,
+    }) : null,
     statTile({
       label: "Compliance vs target",
       value: fmtPct(k.compliance_pct),
@@ -930,9 +984,208 @@ function kpiRow(summary) {
       tone: gap === null ? "neutral" : met ? "good" : "bad",
       meter: k.compliance_pct ?? 0,
       accent: met ? STATUS.compliant : STATUS.critical,
-      foot: summary.policy?.name || "Baseline policy",
+      foot: gapFoot || summary.policy?.name || "Baseline policy",
     }),
   );
+}
+
+/* ------------------------------------------------------------- insight panels */
+function segmentBar(segments) {
+  const total = segments.reduce((sum, s) => sum + (s.value || 0), 0);
+  const track = h("div", { class: "sla-track", role: "img",
+    "aria-label": segments.map((s) => `${s.label} ${s.value}`).join(", ") });
+  for (const segment of segments) {
+    if (!segment.value) continue;
+    track.appendChild(h("span", {
+      style: {
+        width: `${(segment.value / total) * 100}%`,
+        background: segment.color,
+      },
+      title: `${segment.label}: ${segment.value}`,
+    }));
+  }
+  return track;
+}
+
+function remediationCard(remediation) {
+  const body = h("div", { class: "stack" },
+    segmentBar([
+      { label: "On track", value: remediation.on_track, color: STATUS.compliant },
+      { label: "Due within 7 days", value: remediation.due_soon, color: STATUS.unknown },
+      { label: "Overdue", value: remediation.overdue, color: STATUS.non_compliant },
+      { label: "No due date", value: remediation.undated, color: STATUS.excluded },
+    ]),
+    h("div", { class: "legend legend-wrap" },
+      h("span", { class: "legend-item" },
+        h("span", { class: "legend-swatch", style: { background: STATUS.compliant } }),
+        `On track ${fmtNumber(remediation.on_track)}`),
+      h("span", { class: "legend-item" },
+        h("span", { class: "legend-swatch", style: { background: STATUS.unknown } }),
+        `Due ≤ ${remediation.due_soon_days}d ${fmtNumber(remediation.due_soon)}`),
+      h("span", { class: "legend-item" },
+        h("span", { class: "legend-swatch", style: { background: STATUS.non_compliant } }),
+        `Overdue ${fmtNumber(remediation.overdue)}`),
+      h("span", { class: "legend-item" },
+        h("span", { class: "legend-swatch", style: { background: STATUS.excluded } }),
+        `Undated ${fmtNumber(remediation.undated)}`)),
+    remediation.oldest?.length
+      ? h("div", { class: "insight-list" },
+        h("div", { class: "insight-list-title" }, "Oldest overdue advisories"),
+        ...remediation.oldest.map((item) => h("div", { class: "insight-row" },
+          h("div", { class: "insight-main" },
+            h("div", { class: "insight-title", title: item.title },
+              item.advisory_id || item.title),
+            h("div", { class: "insight-sub" },
+              `${fmtNumber(item.affected_servers)} server${
+                Number(item.affected_servers) === 1 ? "" : "s"} · due ${
+                fmtDate(item.due)}`)),
+          pill(item.severity, item.severity),
+          h("span", { class: "insight-bad" },
+            `${fmtNumber(item.days_overdue)}d over`))))
+      : h("p", { class: "muted small" },
+        "No current finding is past its remediation due date."));
+  return card("Remediation SLA",
+    `${fmtNumber(remediation.overdue)} overdue of ${fmtNumber(remediation.total)} current findings`,
+    body,
+    can("findings:view")
+      ? h("a", { class: "card-link", href: "#/findings?overdue=true" },
+        "View overdue →")
+      : null);
+}
+
+function severityCard(summary) {
+  const body = h("div");
+  severityBars(body, (summary.severity || []).map((row) => ({
+    severity: row.severity, count: row.count,
+  })));
+  const blocking = (summary.severity || [])
+    .filter((row) => row.severity === "critical" || row.severity === "important")
+    .reduce((sum, row) => sum + Number(row.count || 0), 0);
+  return card("Findings by severity",
+    `${fmtNumber(blocking)} blocking (critical + important)`,
+    body);
+}
+
+function freshnessCard(summary) {
+  const sources = summary.freshness?.sources || [];
+  if (!sources.length) {
+    return card("Data freshness by source", "No collection has completed yet",
+      h("p", { class: "muted small" },
+        "Configure a source integration to begin collecting inventory and patch data."));
+  }
+  const threshold = Number(summary.policy?.freshness_hours) || 48;
+  const body = h("div", { class: "fresh-list" }, ...sources.map((source) => {
+    const age = source.age_hours;
+    const width = age === null ? 100 : Math.max(3,
+      Math.min(100, (age / (threshold * 2)) * 100));
+    const state = age === null ? "Never synced" : source.stale ? "Stale" : "Fresh";
+    const color = age === null ? STATUS.excluded
+      : source.stale ? STATUS.non_compliant : STATUS.compliant;
+    return h("div", { class: "fresh-row" },
+      h("div", { class: "fresh-head" },
+        h("div", { class: "fresh-name" }, source.label),
+        h("span", { class: "fresh-state", style: { color } }, state)),
+      h("div", { class: "fresh-track" },
+        h("span", { style: { width: `${width}%`, background: color } })),
+      h("div", { class: "fresh-sub" },
+        age === null
+          ? "No successful collection recorded"
+          : `${age < 1 ? "<1" : fmtNumber(age)}h old · ${
+            fmtDate(source.synced_at, true)}`));
+  }));
+  return card("Data freshness by source",
+    `Policy threshold ${fmtNumber(threshold)}h`,
+    body);
+}
+
+function moversCard(movement) {
+  const rows = movement?.rows || [];
+  const body = rows.length
+    ? table([
+      { label: "Business service", key: "group" },
+      { label: "Now", numeric: true, render: (r) => fmtPct(r.compliance_pct) },
+      { label: "Change", numeric: true, render: (r) => h("span", {
+        style: { color: r.change_pp >= 0 ? STATUS.compliant : STATUS.non_compliant,
+          fontWeight: 600 },
+      }, `${r.change_pp >= 0 ? "+" : ""}${Number(r.change_pp).toFixed(1)} pp`) },
+    ], rows, {
+      compact: true, export: false,
+      empty: "No comparable monthly snapshots.",
+    })
+    : h("p", { class: "muted small" },
+      "Two months of recorded snapshots are needed before movement can be compared.");
+  return card("Top movers",
+    movement?.current
+      ? `${fmtDate(movement.previous)} → ${fmtDate(movement.current)} · whole fleet`
+      : "Whole fleet · recorded monthly snapshots",
+    body);
+}
+
+function concentrationCard(concentration) {
+  const body = h("div");
+  concentrationCurve(body, concentration?.points || []);
+  const note = h("div", { class: "concentration-note" },
+    h("div", {},
+      h("strong", {}, fmtPct(concentration?.top_10_pct_share)),
+      h("span", {}, " of outstanding patches sit in the top 10% of affected servers")),
+    h("div", { class: "muted small" },
+      `${fmtNumber(concentration?.affected)} affected of ${
+        fmtNumber(concentration?.population)} in-scope servers · ${
+        fmtNumber(concentration?.total_patches)} patches outstanding`));
+  return card("Missing-patch concentration",
+    "Cumulative share of patches by share of affected servers",
+    h("div", { class: "stack" }, body, note));
+}
+
+function excludedCard(excluded) {
+  const rows = excluded?.reasons || [];
+  const max = Math.max(1, ...rows.map((row) => Number(row.count) || 0));
+  return card("Excluded assets",
+    `${fmtNumber(excluded?.total)} excluded from the compliance denominator`,
+    rows.length
+      ? h("div", { class: "reason-list" }, ...rows.map((row) => h("div", {
+        class: "reason-row",
+      },
+      h("div", { class: "reason-head" },
+        h("span", { class: "reason-name" }, row.reason),
+        h("span", { class: "reason-count" }, fmtNumber(row.count))),
+      h("div", { class: "reason-track" },
+        h("span", { style: { width: `${(row.count / max) * 100}%` } })))))
+      : h("p", { class: "muted small" },
+        "No assets are excluded by scope, lifecycle or policy."));
+}
+
+/* The board pack is generated by the reports service from the latest recorded
+ * snapshot. It is queued rather than streamed so the same retention, audit and
+ * download path as every other report applies. */
+async function exportBoardPack(button) {
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = "Preparing…";
+  try {
+    const queued = await api("reporting/reports/board-pack", { method: "POST" });
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      const report = await api(`reporting/reports/${queued.id}`);
+      if (report.status === "completed") {
+        await download(`reporting/reports/${queued.id}/download`,
+          report.filename || "patchtrack-board-pack.pdf");
+        button.textContent = "Downloaded";
+        setTimeout(() => { button.textContent = original; }, 2500);
+        return;
+      }
+      if (report.status === "failed") {
+        throw new Error(report.error_summary || "Board pack generation failed");
+      }
+    }
+    throw new Error("Board pack is taking longer than expected; find it in Reports");
+  } catch (error) {
+    button.textContent = original;
+    button.title = `Board pack could not be produced: ${error.message}`;
+    console.error("board pack export failed", error);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 const STATUS_KEYS = ["compliant", "non_compliant", "unknown"];
@@ -949,7 +1202,7 @@ const OS_FAMILY_LABELS = {
   other: "Other",
 };
 
-function statusChartCard(title, subtitle, rows, mode = "columns") {
+function statusChartCard(title, subtitle, rows, mode = "columns", onSelect) {
   // A vertical list shows every group. It used to stop at seven, so an
   // eighth business service simply disappeared from the panel with no
   // indication that anything was missing. Long lists scroll instead.
@@ -960,13 +1213,14 @@ function statusChartCard(title, subtitle, rows, mode = "columns") {
     stackedRows(body, {
       rows: rows.map((r) => ({ ...r, unknown: (r.unknown || 0) + (r.stale || 0) })),
       keys: STATUS_KEYS, labels: STATUS_LABELS, colors: STATUS, withPct: true,
-      maxRows: rows.length,
+      maxRows: rows.length, onSelect,
       label: `${title}. ${subtitle || ""}`.trim(),
     });
   } else {
     stackedColumns(body, {
       rows: rows.map((r) => ({ ...r, unknown: (r.unknown || 0) + (r.stale || 0) })),
       keys: STATUS_KEYS, labels: STATUS_LABELS, colors: STATUS, height: 230,
+      onSelect,
       label: `${title}. ${subtitle || ""}`.trim(),
     });
   }
@@ -977,6 +1231,136 @@ function statusChartCard(title, subtitle, rows, mode = "columns") {
 }
 
 /* ------------------------------------------------------------------ dashboard */
+/* Panels are reorderable. The order is a per-browser preference like the
+ * timeframe and refresh rate, so a wall display keeps its arrangement without
+ * changing anyone else's. Only ids in DASH_PANEL_IDS are stored, which keeps a
+ * panel that a later release removes from leaving a stale entry behind. */
+const DASH_ORDER_KEY = "patchtrack.dashorder";
+const DASH_PANEL_IDS = [
+  "kpis", "remediation", "severity", "freshness", "movers", "concentration",
+  "excluded", "by_os", "by_environment", "by_business_group", "distribution",
+  "trend", "top_business", "period_summary", "recent_servers",
+];
+
+function savedDashOrder() {
+  let parsed;
+  try {
+    parsed = JSON.parse(stored(DASH_ORDER_KEY, "[]"));
+  } catch {
+    return [];   // hand-edited or truncated storage falls back to the default
+  }
+  return Array.isArray(parsed) ? parsed.filter((id) => typeof id === "string") : [];
+}
+
+function orderDashPanels(panels) {
+  const saved = savedDashOrder();
+  const rank = (id) => {
+    const index = saved.indexOf(id);
+    // Panels not in the saved order (new in this release, or hidden the last
+    // time the reader arranged them) keep their default position after the
+    // saved ones instead of jumping to the top.
+    return index === -1 ? saved.length + DASH_PANEL_IDS.indexOf(id) : index;
+  };
+  return panels.slice().sort((a, b) => rank(a.id) - rank(b.id));
+}
+
+function rememberDashOrder(ids) {
+  const visible = ids.filter((id) => DASH_PANEL_IDS.includes(id));
+  const rest = savedDashOrder().filter((id) => !visible.includes(id));
+  remember(DASH_ORDER_KEY, JSON.stringify([...visible, ...rest]));
+}
+
+/* A panel is a labelled section so the drag handle and the card read as one
+ * unit to assistive technology. The handle is a button: dragging is the quick
+ * path, but the arrow keys move the panel too. */
+function dashPanel(panel, arranging) {
+  const grip = h("button", {
+    type: "button", class: "dash-grip", tabindex: arranging ? "0" : "-1",
+    title: "Drag to move, or use the arrow keys",
+    "aria-label": `Move ${panel.label}`,
+    "aria-describedby": "dash-arrange-hint",
+  }, "⠿");
+  const node = h("section", {
+    class: `dash-panel ${panel.className || ""}`,
+    "data-panel": panel.id,
+    "aria-label": panel.label,
+  }, grip, panel.node);
+  node.draggable = Boolean(arranging);
+  return node;
+}
+
+function wireDashboardBoard(board, hint) {
+  let dragId = null;
+  const panels = () => [...board.querySelectorAll(".dash-panel")];
+  const persist = () => rememberDashOrder(panels().map((p) => p.dataset.panel));
+  const announce = (text) => { hint.textContent = text; };
+
+  board.addEventListener("dragstart", (event) => {
+    const panel = event.target.closest?.(".dash-panel");
+    if (!board.classList.contains("arranging") || !panel) {
+      event.preventDefault();
+      return;
+    }
+    dragId = panel.dataset.panel;
+    panel.classList.add("dragging");
+    event.dataTransfer.effectAllowed = "move";
+    // Firefox does not start a drag unless some data is set.
+    event.dataTransfer.setData("text/plain", dragId);
+  });
+
+  board.addEventListener("dragend", () => {
+    board.querySelectorAll(".dash-panel").forEach((panel) => {
+      panel.classList.remove("dragging");
+    });
+    if (dragId) persist();
+    dragId = null;
+  });
+
+  board.addEventListener("dragover", (event) => {
+    if (!dragId || !board.classList.contains("arranging")) return;
+    event.preventDefault();
+    const dragged = board.querySelector(`[data-panel="${dragId}"]`);
+    const target = event.target.closest?.(".dash-panel");
+    if (!dragged || !target || target === dragged) return;
+    const rect = target.getBoundingClientRect();
+    const midY = rect.top + rect.height / 2;
+    const sameRow = Math.abs(event.clientY - midY) < rect.height / 4;
+    const after = event.clientY > midY
+      || (sameRow && event.clientX > rect.left + rect.width / 2);
+    board.insertBefore(dragged, after ? target.nextSibling : target);
+  });
+
+  board.addEventListener("drop", (event) => event.preventDefault());
+
+  // Keyboard equivalent: focus a handle and move its panel one place. The
+  // reading order of the grid follows the DOM, so this is also the visual
+  // order.
+  board.addEventListener("keydown", (event) => {
+    const grip = event.target.closest?.(".dash-grip");
+    if (!grip || !board.classList.contains("arranging")) return;
+    const moves = {
+      ArrowLeft: -1, ArrowUp: -1, ArrowRight: 1, ArrowDown: 1,
+      Home: "first", End: "last",
+    };
+    if (!(event.key in moves)) return;
+    event.preventDefault();
+    const panel = grip.closest(".dash-panel");
+    const list = panels();
+    const index = list.indexOf(panel);
+    if (event.key === "Home") board.insertBefore(panel, board.firstChild);
+    else if (event.key === "End") board.append(panel);
+    else if (moves[event.key] < 0 && index > 0) {
+      board.insertBefore(panel, list[index - 1]);
+    } else if (moves[event.key] > 0 && index < list.length - 1) {
+      board.insertBefore(panel, list[index + 1].nextSibling);
+    }
+    persist();
+    grip.focus();
+    announce(`${panel.getAttribute("aria-label")} moved to position ${
+      panels().indexOf(panel) + 1} of ${panels().length}.`);
+  });
+}
+
 async function renderDashboard({ silent = false } = {}) {
   // A timed refresh must not blank a working dashboard while it fetches: the
   // new content replaces the old one only after every request has succeeded.
@@ -1127,13 +1511,64 @@ async function renderDashboard({ silent = false } = {}) {
     .sort((a, b) => (b.non_compliant || 0) - (a.non_compliant || 0))
     .slice(0, 6);
   const topTable = table([
-    { label: "Business service", key: "group" },
+    { label: "Business service", render: (r) => (can("compliance:view")
+      ? h("a", {
+        href: "#", onclick: (e) => {
+          e.preventDefault();
+          drillToServers("non_compliant", { business_group: r.group });
+        },
+      }, r.group)
+      : r.group) },
     { label: "Total", numeric: true, render: (r) => fmtNumber(r.total_servers) },
     { label: "Non-compliant", numeric: true,
-      render: (r) => h("span", { style: { color: "#ff9a9a" } }, fmtNumber(r.non_compliant)) },
+      render: (r) => h("span", { style: { color: "#ff8fae" } }, fmtNumber(r.non_compliant)) },
     { label: "%", numeric: true,
       render: (r) => (r.in_scope ? fmtPct((r.non_compliant / r.in_scope) * 100) : "—") },
   ], topBusiness, { compact: true, export: false });
+
+  let board = null;
+  const arrangeHint = h("span", {
+    id: "dash-arrange-hint", class: "dash-arrange-hint", role: "status",
+    "aria-live": "polite",
+  });
+  const arrangeButton = h("button", {
+    type: "button", class: "btn btn-sm", "aria-pressed": String(state.dashboard.arranging),
+    title: "Move dashboard panels into the order you prefer",
+  }, state.dashboard.arranging ? "Done arranging" : "Arrange panels");
+  const resetButton = h("button", {
+    type: "button", class: "btn btn-sm", title: "Return panels to their default order",
+  }, "Reset layout");
+  resetButton.hidden = !state.dashboard.arranging;
+
+  const setArranging = (on) => {
+    state.dashboard.arranging = on;
+    if (!board) return;
+    board.classList.toggle("arranging", on);
+    arrangeButton.setAttribute("aria-pressed", String(on));
+    arrangeButton.textContent = on ? "Done arranging" : "Arrange panels";
+    resetButton.hidden = !on;
+    board.querySelectorAll(".dash-grip").forEach((grip) => {
+      grip.tabIndex = on ? 0 : -1;
+    });
+    board.querySelectorAll(".dash-panel").forEach((panel) => {
+      panel.draggable = on;
+    });
+    if (on) arrangeHint.textContent =
+      "Arrange mode. Drag a panel by its handle, or focus a handle and use the arrow keys.";
+    else arrangeHint.textContent = "";
+  };
+  arrangeButton.addEventListener("click", () => setArranging(!state.dashboard.arranging));
+  resetButton.addEventListener("click", () => {
+    if (!board) return;
+    remember(DASH_ORDER_KEY, "[]");
+    for (const panel of orderDashPanels(
+      [...board.querySelectorAll(".dash-panel")].map((node) => ({
+        id: node.dataset.panel, node,
+      })))) {
+      board.append(panel.node);
+    }
+    arrangeHint.textContent = "Panels are back in their default order.";
+  });
 
   const controls = h("div", { class: "dashboard-controls" },
     select({
@@ -1173,7 +1608,18 @@ async function renderDashboard({ silent = false } = {}) {
         remember("patchtrack.refresh", value);
         renderDashboard();
       },
-    }));
+    }),
+    !can("reports:generate") ? null : (() => {
+      const button = h("button", {
+        type: "button", class: "btn btn-sm", title:
+          "Generate a PDF board pack from the latest recorded snapshot",
+      }, "Export board pack");
+      button.addEventListener("click", () => exportBoardPack(button));
+      return button;
+    })(),
+    arrangeButton,
+    resetButton,
+    arrangeHint);
 
   const periodTitle = {
     monthly: "Monthly compliance trend",
@@ -1189,6 +1635,75 @@ async function renderDashboard({ silent = false } = {}) {
         recentTable,
         h("a", { class: "card-link", href: "#/servers" }, "View all →"));
 
+  const panels = [
+    { id: "kpis", label: "Key metrics", className: "span-6", node: kpiRow(summary) },
+    ...(periodMode
+      ? [{ id: "severity", label: "Findings by severity", node: severityCard(summary) }]
+      : [
+        { id: "remediation", label: "Remediation deadlines",
+          node: remediationCard(summary.dashboard.remediation) },
+        { id: "severity", label: "Findings by severity", node: severityCard(summary) },
+        { id: "freshness", label: "Data freshness", node: freshnessCard(summary) },
+      ]),
+    ...(!periodMode && summary.dashboard
+      ? [
+        { id: "movers", label: "Biggest movers", node: moversCard(summary.dashboard.movers) },
+        { id: "concentration", label: "Missing-patch concentration",
+          node: concentrationCard(summary.dashboard.concentration) },
+        { id: "excluded", label: "Excluded assets",
+          node: excludedCard(summary.dashboard.excluded) },
+      ]
+      : []),
+    { id: "by_os", label: "Compliance by operating system", node: statusChartCard(
+      "Compliance by operating system",
+      periodMode && !(summary.by_os || []).length
+        ? "Not recorded on this snapshot"
+        : "Server counts by OS family",
+      (summary.by_os || []).map((row) => ({
+        ...row, groupKey: row.group,
+        group: OS_FAMILY_LABELS[row.group] || row.group,
+      })), "columns", periodMode ? undefined : (row) =>
+        drillToServers("non_compliant", { os_family: row.groupKey })) },
+    { id: "by_environment", label: "Compliance by environment", node: statusChartCard(
+      "Compliance by environment", "Server counts by environment",
+      summary.by_environment || [], "columns",
+      periodMode ? undefined : (row) =>
+        drillToServers("non_compliant", { environment: row.group })) },
+    { id: "by_business_group", label: "Compliance by business service",
+      node: statusChartCard(
+        "Compliance by business service", "Server counts by business service",
+        summary.by_business_group || [], "rows",
+        periodMode ? undefined : (row) =>
+          drillToServers("non_compliant", { business_group: row.group })) },
+    { id: "distribution", label: "Patch status distribution", node: card(
+      "Patch status distribution",
+      `${fmtNumber(summary.kpis.in_scope)} servers judged${
+        summary.kpis.excluded ? ` · ${fmtNumber(summary.kpis.excluded)} excluded` : ""}`,
+      h("div", {
+        class: "row",
+        style: { justifyContent: "center", gap: "18px", flexWrap: "wrap" },
+      }, donutBody, donutLegend)) },
+    { id: "trend", label: periodTitle, node: card(periodTitle,
+      `Last ${points} ${noun} · average of daily snapshots · target ${
+        fmtPct(summary.kpis.target_pct, 0)}`,
+      trendBody) },
+    { id: "top_business", label: "Top non-compliance by business service", node: card(
+      "Top non-compliance by business service",
+      periodMode ? `As recorded in ${summary.period.label}`
+        : "Largest gaps by count",
+      topTable) },
+    { id: "period_summary", label: "Period summary", className: "span-3",
+      node: card("Period summary",
+        `Same observations as the chart · change is against the previous ${basis.slice(0, -2)}`,
+        periodTable) },
+    { id: "recent_servers", label: "Recent non-compliant servers",
+      className: "span-3", node: bottomRow },
+  ];
+
+  board = h("div", { class: `dash-board grid${state.dashboard.arranging ? " arranging" : ""}` },
+    ...orderDashPanels(panels).map((panel) => dashPanel(panel, state.dashboard.arranging)));
+  wireDashboardBoard(board, arrangeHint);
+
   mount(view,
     filterBar(renderDashboard, {
       extra: controls,
@@ -1200,42 +1715,7 @@ async function renderDashboard({ silent = false } = {}) {
            "patch_source"]
         : [],
     }),
-    h("div", { class: "stack", style: { marginTop: "14px" } },
-      kpiRow(summary),
-      h("div", { class: "grid grid-3" },
-        statusChartCard("Compliance by operating system",
-          periodMode && !(summary.by_os || []).length
-            ? "Not recorded on this snapshot"
-            : "Server counts by OS family",
-          (summary.by_os || []).map((row) => ({
-            ...row, group: OS_FAMILY_LABELS[row.group] || row.group,
-          }))),
-        statusChartCard("Compliance by environment", "Server counts by environment",
-          summary.by_environment || []),
-        statusChartCard("Compliance by business service", "Server counts by business service",
-          summary.by_business_group || [], "rows")),
-      h("div", { class: "grid grid-3" },
-        card("Patch status distribution",
-          `${fmtNumber(summary.kpis.in_scope)} servers judged${
-            summary.kpis.excluded ? ` · ${fmtNumber(summary.kpis.excluded)} excluded` : ""}`,
-          h("div", {
-            class: "row",
-            style: { justifyContent: "center", gap: "18px", flexWrap: "wrap" },
-          }, donutBody, donutLegend)),
-        card(periodTitle,
-          `Last ${points} ${noun} · average of daily snapshots · target ${
-            fmtPct(summary.kpis.target_pct, 0)}`,
-          trendBody),
-        card("Top non-compliance by business service",
-          periodMode ? `As recorded in ${summary.period.label}`
-            : "Largest gaps by count",
-          topTable)),
-      h("div", { class: "grid grid-2" },
-        card("Period summary",
-          `Same observations as the chart · change is against the previous ${basis.slice(0, -2)}`,
-          periodTable),
-        bottomRow),
-    ));
+    h("div", { class: "stack", style: { marginTop: "14px" } }, board));
   startDashboardRefresh(refreshSeconds);
 }
 
@@ -1812,11 +2292,12 @@ async function editPlacement(asset) {
 }
 
 /* ------------------------------------------------------------------ findings */
-async function renderFindings() {
+async function renderFindings(params) {
   mount(view, spinnerRows(3));
   await loadDimensions();
-  const severity = "";
+  const overdueOnly = params?.get("overdue") === "true";
   const query = new URLSearchParams({ page_size: "100" });
+  if (overdueOnly) query.set("overdue", "true");
   const data = await api(`compliance/findings?${query}`);
   const grid2 = h("div", { class: "grid grid-2" });
   const sevCounts = {};
@@ -1829,16 +2310,30 @@ async function renderFindings() {
   grid2.appendChild(card("Remediation guidance", "How deadlines are derived", h("div", { class: "stack small secondary" },
     h("p", {}, "Remediation windows come from the active compliance policy: critical 7 days, " +
       "important 30 days, moderate 90 days, low 180 days from publication."),
-    h("p", {}, "Overdue items are visible where the source system reports a release date. " +
+    h("p", {}, "Overdue is decided by the due date recorded on each finding when it " +
+      "was ingested, so the list and the dashboard always agree. " +
       "PatchTrack never initiates deployment."))));
 
+  const scope = h("div", { class: "row", style: { gap: "8px", marginBottom: "10px" } },
+    h("a", {
+      class: `btn btn-sm ${overdueOnly ? "" : "btn-primary"}`,
+      href: "#/findings",
+    }, "All current findings"),
+    h("a", {
+      class: `btn btn-sm ${overdueOnly ? "btn-primary" : ""}`,
+      href: "#/findings?overdue=true",
+    }, "Overdue only"));
+
   mount(view,
-    filterBar(renderFindings, { skip: ["patch_source"] }),
+    filterBar(() => renderFindings(params), { skip: ["patch_source"] }),
     h("div", { class: "stack", style: { marginTop: "14px" } },
       grid2,
+      scope,
       listPanel("findings", {
-        title: "Outstanding patch findings",
-        subtitle: `${fmtNumber(data.total)} findings recorded`,
+        title: overdueOnly ? "Overdue patch findings" : "Outstanding patch findings",
+        subtitle: overdueOnly
+          ? `${fmtNumber(data.total)} findings past their remediation due date`
+          : `${fmtNumber(data.total)} findings recorded`,
         columns: [
           { label: "Hostname", render: (r) => h("a", {
             href: "#", onclick: (e) => { e.preventDefault(); openServer(r.asset_id); },
@@ -1849,6 +2344,15 @@ async function renderFindings() {
           { label: "Source", key: "source_system" },
           { label: "Business service", key: "business_group" },
           { label: "Released", render: (r) => fmtDate(r.released_at) },
+          { label: "Due", render: (r) => {
+            if (!r.remediation_due) return h("span", { class: "muted" }, "—");
+            const due = new Date(r.remediation_due);
+            const days = Math.ceil((due - Date.now()) / 86400000);
+            return h("span", {
+              style: { color: days < 0 ? STATUS.non_compliant : undefined },
+              title: days < 0 ? `${-days} days overdue` : `${days} days remaining`,
+            }, fmtDate(r.remediation_due));
+          } },
         ],
         rows: data.items,
         searchPlaceholder: "Hostname, advisory, title…",
@@ -1956,7 +2460,7 @@ function inventoryStatsPanel(stats) {
       sub: excluded
         ? `${fmtNumber(excluded)} excluded of ${fmtNumber(total)}` : "",
       foot: "Every synced asset, in and out of compliance scope",
-      accent: "#3987e5",
+      accent: "#22d3ee",
     }),
     statTile({
       label: "Compliant",
@@ -2495,14 +2999,16 @@ async function renderSchedules() {
 /* ------------------------------------------------------------------ backups */
 async function renderBackups() {
   mount(view, spinnerRows(3));
-  const [data, settings, jobs] = await Promise.all([
+  const [data, settings, jobs, restores] = await Promise.all([
     api("reporting/backups"),
     api("reporting/settings/backup"),
     api("reporting/scheduler/jobs"),
+    api("reporting/restores").catch(() => ({ items: [], active: null })),
   ]);
   const job = jobs.find((entry) => entry.name === "reporting.backup") || null;
   const worker = settings.worker || data.worker || {};
   const active = data.active;
+  const activeRestore = restores.active;
   const completed = data.items.filter((row) => row.status === "completed");
   const latest = completed.slice().sort((a, b) =>
     String(b.finished_at || "").localeCompare(String(a.finished_at || "")))[0] || null;
@@ -2526,11 +3032,19 @@ async function renderBackups() {
       `${settings.pending_purge} archive(s) are beyond the retention count and `
       + "will be removed after the next successful backup."));
   }
+  if (activeRestore) {
+    flash.appendChild(alert("warn",
+      `A restore is ${activeRestore.status}. Requests that write to the `
+      + "database may fail while it runs; the console reconnects when the "
+      + "restored database is in place."));
+  }
 
   const create = h("button", {
     class: "btn btn-primary",
-    disabled: Boolean(active),
-  }, active ? `Backup ${active.status}…` : "Create backup now");
+    disabled: Boolean(active || activeRestore),
+    title: activeRestore ? "Wait for the restore to finish" : "",
+  }, active ? `Backup ${active.status}…`
+    : activeRestore ? "Restore in progress…" : "Create backup now");
   create.addEventListener("click", async () => {
     create.disabled = true;
     flash.replaceChildren();
@@ -2563,18 +3077,18 @@ async function renderBackups() {
     statTile({
       label: "Archives kept", value: String(settings.completed),
       sub: `Retention: ${settings.retention} completed archive(s)`,
-      accent: "#5794f2",
+      accent: "#22d3ee",
     }),
     statTile({
       label: "Archive storage", value: fmtBytes(totalSize),
       sub: "Compressed archives on the backups volume",
-      accent: "#73bf69",
+      accent: "#22e6a6",
     }),
     statTile({
       label: "Last backup",
       value: latest ? fmtRelative(latest.finished_at) : "Never",
       sub: latest ? fmtDate(latest.finished_at, true) : "No completed archive yet",
-      accent: "#b877d9",
+      accent: "#8b5cff",
     }),
     statTile({
       label: "Backup worker",
@@ -2582,7 +3096,7 @@ async function renderBackups() {
       sub: worker.last_seen_at
         ? `Last seen ${fmtRelative(worker.last_seen_at)}`
         : "No heartbeat recorded",
-      accent: worker.available ? "#73bf69" : "#d03b3b",
+      accent: worker.available ? "#22e6a6" : "#ff3b6b",
     }));
 
   const retentionInput = h("input", {
@@ -2660,6 +3174,107 @@ async function renderBackups() {
   const scheduleCard = card("Scheduled backups",
     "The same queue as the on-demand button", scheduleBody);
 
+  const openRestore = (row) => {
+    const fieldId = `restore-confirm-${String(row.id).slice(0, 8)}`;
+    const input = h("input", {
+      id: fieldId, type: "text", autocomplete: "off", spellcheck: "false",
+      placeholder: "RESTORE",
+    });
+    const note = h("div");
+    const confirm = h("button", {
+      class: "btn btn-danger", disabled: true,
+    }, "Restore this archive");
+    input.addEventListener("input", () => {
+      confirm.disabled = input.value !== "RESTORE";
+    });
+    confirm.addEventListener("click", async () => {
+      confirm.disabled = true;
+      confirm.textContent = "Queueing…";
+      try {
+        await api("reporting/restores", {
+          method: "POST",
+          body: { backup_id: row.id, confirm: input.value },
+        });
+        close();
+        await renderBackups();
+      } catch (error) {
+        note.replaceChildren(alert("error", error.message));
+        confirm.disabled = input.value !== "RESTORE";
+        confirm.textContent = "Restore this archive";
+      }
+    });
+    const close = modal("Restore from archive", h("div", { class: "stack" },
+      alert("warn",
+        "Restoring replaces the live database and the report volume with this "
+        + "archive. Data written since the archive was taken is lost. The "
+        + "worker first keeps the current database under a pre-restore name, "
+        + "but it does not take a new archive for you — download one now if "
+        + "the current state matters."),
+      h("dl", { class: "kv" },
+        h("dt", {}, "Archive"), h("dd", { class: "mono small" }, row.filename),
+        h("dt", {}, "Created"), h("dd", {}, fmtDate(row.finished_at, true)),
+        h("dt", {}, "Release"), h("dd", {}, `${row.app_version} · schema `
+          + `${row.schema_version}`),
+        h("dt", {}, "Size"), h("dd", {}, fmtBytes(row.size_bytes))),
+      h("div", { class: "field" },
+        h("label", { for: fieldId }, "Type RESTORE to confirm"), input),
+      note), [confirm]);
+  };
+
+  const openUploadRestore = () => {
+    const fileName = "restore-upload-file";
+    const fieldId = "restore-upload-confirm";
+    const fileInput = h("input", {
+      id: fileName, type: "file", accept: ".tar.gz,application/gzip",
+    });
+    const input = h("input", {
+      id: fieldId, type: "text", autocomplete: "off", spellcheck: "false",
+      placeholder: "RESTORE",
+    });
+    const note = h("div");
+    const submit = h("button", {
+      class: "btn btn-danger", disabled: true,
+    }, "Upload and restore");
+    const sync = () => {
+      submit.disabled = !fileInput.files?.length || input.value !== "RESTORE";
+    };
+    fileInput.addEventListener("change", sync);
+    input.addEventListener("input", sync);
+    submit.addEventListener("click", async () => {
+      submit.disabled = true;
+      submit.textContent = "Uploading…";
+      const form = new FormData();
+      form.append("archive", fileInput.files[0]);
+      form.append("confirm", input.value);
+      try {
+        await api("reporting/restores/upload", { method: "POST", body: form });
+        close();
+        await renderBackups();
+      } catch (error) {
+        note.replaceChildren(alert("error", error.message));
+        submit.textContent = "Upload and restore";
+        sync();
+      }
+    });
+    const close = modal("Restore from a downloaded archive",
+      h("div", { class: "stack" },
+        alert("warn",
+          "The uploaded archive replaces the live database and report volume, "
+          + "exactly like restoring an archive from the list. Data written "
+          + "since it was taken is lost, and the previous database is kept "
+          + "under a pre-restore name."),
+        h("div", { class: "field" },
+          h("label", { for: fileName }, "Archive file"),
+          fileInput,
+          h("div", { class: "muted small" },
+            "Use the .tar.gz from Download on this screen. Its release and "
+            + "schema are checked before anything is replaced.")),
+        h("div", { class: "field" },
+          h("label", { for: fieldId }, "Type RESTORE to confirm"), input),
+        note),
+      [submit]);
+  };
+
   const archiveTable = table([
     { label: "Requested", render: (r) => h("div", {},
       h("div", {}, fmtDate(r.requested_at, true)),
@@ -2686,12 +3301,19 @@ async function renderBackups() {
         `${r.sha256.slice(0, 12)}…`)
       : "—") },
     { label: "", export: false, render: (r) => (r.download_available
-      ? h("button", {
-        class: "btn btn-sm",
-        onclick: () => download(
-          `reporting/backups/${r.id}/download`, r.filename,
-        ).catch((error) => window.alert(error.message)),
-      }, "Download")
+      ? h("div", { class: "row", style: { flexWrap: "nowrap", gap: "6px" } },
+        h("button", {
+          class: "btn btn-sm",
+          onclick: () => download(
+            `reporting/backups/${r.id}/download`, r.filename,
+          ).catch((error) => window.alert(error.message)),
+        }, "Download"),
+        h("button", {
+          class: "btn btn-sm btn-danger",
+          disabled: Boolean(activeRestore),
+          title: activeRestore ? "A restore is already queued or running" : "",
+          onclick: () => openRestore(r),
+        }, "Restore"))
       : h("span", { class: "muted" },
         r.status === "completed" ? "file unavailable" : "—")) },
   ], data.items, {
@@ -2702,9 +3324,46 @@ async function renderBackups() {
   const archiveCard = card("Archives",
     "Newest first; downloads are authenticated and audited", archiveTable);
 
+  const restoreTable = table([
+    { label: "Requested", render: (r) => h("div", {},
+      h("div", {}, fmtDate(r.requested_at, true)),
+      h("div", { class: "muted small" }, r.requested_by || "unknown")) },
+    { label: "Archive", render: (r) => h("div", {},
+      h("span", { class: "mono small" }, r.display_name || r.filename || "—"),
+      r.source === "upload"
+        ? h("div", { class: "muted small" }, "uploaded file") : null) },
+    { label: "Status", render: (r) => h("div", {},
+      r.status === "queued" ? pill("pending", "queued")
+        : r.status === "running" ? pill("partial", "running")
+          : pill(r.status, r.status),
+      r.message
+        ? h("div", { class: "muted small", title: r.message }, r.message)
+        : null) },
+  ], restores.items || [], {
+    compact: true,
+    export: false,
+    empty: "No restores have been requested.",
+  });
+  const restoreHistoryCard = card("Restore history",
+    "A restore replaces the live database and report volume",
+    restoreTable);
+
   const restoreCard = card("Restore and migration",
     "Archives are portable only to the same PatchTrack release",
     h("div", { class: "stack" },
+      h("div", { class: "row" },
+        h("button", {
+          class: "btn",
+          disabled: Boolean(activeRestore),
+          title: activeRestore ? "A restore is already queued or running" : "",
+          onclick: openUploadRestore,
+        }, "Restore from a downloaded archive")),
+      h("p", { class: "small secondary" },
+        "Use Restore on a completed archive to run the swap from this screen. "
+        + "An archive downloaded earlier can be uploaded here instead. The "
+        + "worker refuses an archive made by another release or with a newer "
+        + "schema, keeps the previous database under a pre-restore name, and "
+        + "refreshes the services' connections."),
       h("p", { class: "small secondary" },
         "Each archive is one .tar.gz containing database.dump (pg_dump custom "
         + "format), reports.tar.gz, manifest.json, SHA256SUMS and RESTORE.txt. "
@@ -2726,10 +3385,13 @@ async function renderBackups() {
     createCard,
     h("div", { class: "grid grid-2-1" }, retentionCard, scheduleCard),
     archiveCard,
+    restoreHistoryCard,
     restoreCard));
 
-  const busy = active
-    || data.items.some((row) => row.status === "queued" || row.status === "running");
+  const busy = active || activeRestore
+    || data.items.some((row) => row.status === "queued" || row.status === "running")
+    || (restores.items || []).some(
+      (row) => row.status === "queued" || row.status === "running");
   if (busy) scheduleBackupRefresh();
 }
 
@@ -2745,7 +3407,14 @@ async function renderIntegrations() {
     const body = h("div", { class: "stack" },
       h("dl", { class: "kv" },
         h("dt", {}, "Status"), h("dd", {}, pill(integration.health, integration.health.replaceAll("_", " "))),
-        h("dt", {}, "Endpoint"), h("dd", { class: "mono small" }, integration.endpoint || "not configured"),
+        integration.key === "solaris"
+          ? [
+            h("dt", {}, "Hosts"), h("dd", {},
+              `${fmtNumber(integration.target_count)} enabled · ` +
+              `${fmtNumber(integration.target_total)} configured` +
+              (integration.target_failing ? ` · ${fmtNumber(integration.target_failing)} failing` : "")),
+          ]
+          : [h("dt", {}, "Endpoint"), h("dd", { class: "mono small" }, integration.endpoint || "not configured")],
         h("dt", {}, "Authentication"), h("dd", {}, `${integration.auth_method} · ${integration.secret_configured ? "secret configured" : "no secret"}`),
         h("dt", {}, "Last attempt"), h("dd", {}, last.started_at ? fmtDate(last.started_at, true) : "never"),
         h("dt", {}, "Last success"), h("dd", {}, fmtDate(integration.last_success_at, true)),
@@ -2774,6 +3443,10 @@ async function renderIntegrations() {
           class: "btn btn-sm",
           onclick: () => editIntegration(integration),
         }, "Configure") : null,
+        manage && integration.key === "solaris" ? h("button", {
+          class: "btn btn-sm",
+          onclick: () => manageSolarisTargets(),
+        }, "Manage hosts") : null,
         manage ? h("button", {
           class: "btn btn-sm",
           onclick: async (event) => {
@@ -2839,7 +3512,97 @@ async function renderIntegrations() {
     })));
 }
 
+function editSolarisIntegration(integration) {
+  const extra = integration.extra && typeof integration.extra === "object"
+    ? { ...integration.extra } : {};
+  const value = (id) => document.getElementById(id).value.trim();
+  const form = h("div", { class: "stack" },
+    alert("info",
+      "Solaris hosts are configured individually. Add or test each server under " +
+      "Manage hosts; this screen controls the schedule and the fallback inbox."),
+    h("div", { class: "field" }, h("label", { for: "sol-int-name" }, "Display name"),
+      h("input", { id: "sol-int-name", type: "text", value: integration.display_name || "" })),
+    h("div", { class: "field" }, h("label", { for: "sol-int-interval" }, "Sync interval (minutes)"),
+      h("input", { id: "sol-int-interval", type: "number", min: "5", max: "10080",
+        value: integration.sync_interval_minutes })),
+    h("div", { class: "field" }, h("label", { for: "sol-int-command" }, "Default collector command"),
+      h("input", { id: "sol-int-command", type: "text",
+        value: extra.collector_command || "",
+        placeholder: "/opt/patchtrack/collect-solaris --format=json" })),
+    h("div", { class: "field" }, h("label", { for: "sol-int-workers" }, "Concurrent SSH hosts"),
+      h("input", { id: "sol-int-workers", type: "number", min: "1", max: "8",
+        value: Number(extra.workers) || 4 })),
+    h("div", { class: "field" }, h("label", { for: "sol-int-inbox" }, "Fallback inbox"),
+      h("input", { id: "sol-int-inbox", type: "text",
+        value: extra.inbox || "/var/lib/patchtrack/solaris-inbox",
+        placeholder: "/var/lib/patchtrack/solaris-inbox" })),
+    h("p", { class: "small muted" },
+      "The inbox is read only while no SSH targets are configured."),
+    h("div", { class: "row" },
+      h("label", { class: "row", style: { gap: "6px" } },
+        h("input", { id: "sol-int-enabled", type: "checkbox", checked: integration.enabled }),
+        "Enabled")));
+
+  const payload = () => ({
+    display_name: value("sol-int-name"),
+    enabled: document.getElementById("sol-int-enabled").checked,
+    sync_interval_minutes: Number(value("sol-int-interval")),
+    extra: {
+      ...extra,
+      collector_command: value("sol-int-command"),
+      workers: Number(value("sol-int-workers")),
+      inbox: value("sol-int-inbox") || "/var/lib/patchtrack/solaris-inbox",
+    },
+  });
+
+  modal("Configure solaris", form, [
+    h("button", {
+      class: "btn",
+      onclick: () => manageSolarisTargets(),
+    }, "Manage hosts"),
+    h("button", {
+      class: "btn",
+      onclick: async (event) => {
+        const button = event.currentTarget;
+        button.disabled = true;
+        button.textContent = "Testing…";
+        try {
+          const result = await api(
+            "inventory/integrations/solaris/test",
+            { method: "POST", body: payload() },
+          );
+          form.prepend(alert(result.status === "success" ? "ok" : "error",
+            `${result.detail} (${result.duration_ms} ms)`));
+        } catch (error) {
+          form.prepend(alert("error", error.message));
+        } finally {
+          button.disabled = false;
+          button.textContent = "Test configuration";
+        }
+      },
+    }, "Test configuration"),
+    h("button", {
+      class: "btn btn-primary",
+      onclick: async () => {
+        try {
+          await api("inventory/integrations/solaris", {
+            method: "PATCH", body: payload(),
+          });
+          document.getElementById("modal-root").innerHTML = "";
+          renderIntegrations();
+        } catch (error) {
+          form.prepend(alert("error", error.message));
+        }
+      },
+    }, "Save configuration"),
+  ]);
+}
+
 function editIntegration(integration) {
+  if (integration.key === "solaris") {
+    editSolarisIntegration(integration);
+    return;
+  }
   const form = h("div", { class: "stack" },
     h("div", { class: "field" }, h("label", {}, "Display name"),
       h("input", { id: "int-name", type: "text", value: integration.display_name || "" })),
@@ -2848,7 +3611,7 @@ function editIntegration(integration) {
         placeholder: "https://assetexplorer.example.com" })),
     h("div", { class: "field" }, h("label", {}, "Authentication method"),
       h("select", { id: "int-auth" },
-        ...["bearer", "apikey", "basic", "none"].map((method) =>
+        ...["integration_key", "bearer", "apikey", "basic", "none"].map((method) =>
           h("option", { value: method, selected: integration.auth_method === method }, method)))),
     h("div", { class: "field" }, h("label", {}, "Credential reference (write-only)"),
       h("input", { id: "int-secret", type: "password", autocomplete: "new-password",
@@ -2914,6 +3677,228 @@ function editIntegration(integration) {
         }
       },
     }, "Save configuration"),
+  ]);
+}
+
+async function manageSolarisTargets() {
+  let targets = [];
+  let baselines = [];
+  try {
+    [targets, baselines] = await Promise.all([
+      api("inventory/solaris/targets"),
+      api("inventory/solaris/baselines").catch(() => []),
+    ]);
+  } catch (error) {
+    modal("Solaris hosts", alert("error", error.message), []);
+    return;
+  }
+  const manage = can("integrations:manage");
+  const testResult = h("div");
+  const hostTable = table([
+    { label: "Host", render: (t) => h("span", { class: "mono small" }, t.name) },
+    { label: "Address", render: (t) => `${t.hostname}:${t.port}` },
+    { label: "Solaris", render: (t) => `${t.os_major}${t.zone && t.zone !== "global" ? ` · ${t.zone}` : ""}` },
+    { label: "Baseline", render: (t) => t.baseline_name || (t.os_major === 10
+      ? h("span", { class: "muted" }, "none — Unknown") : "—") },
+    { label: "Last success", render: (t) => fmtDate(t.last_success_at, true) },
+    { label: "State", render: (t) => (t.enabled
+      ? (t.last_error ? pill("failed", "error") : pill("success", "enabled"))
+      : pill("excluded", "disabled")) },
+    { label: "", export: false, render: (t) => h("div", { class: "row" },
+      manage ? h("button", { class: "btn btn-sm", onclick: () => solarisTargetForm(t, baselines) }, "Edit") : null,
+      manage ? h("button", {
+        class: "btn btn-sm",
+        onclick: async (event) => {
+          const button = event.currentTarget;
+          button.disabled = true;
+          button.textContent = "Testing…";
+          try {
+            const result = await api(`inventory/solaris/targets/${t.id}/test`, { method: "POST" });
+            testResult.replaceChildren(alert(
+              result.status === "success" ? "ok" : "error",
+              `${t.name}: ${result.detail} (${result.duration_ms} ms)`));
+          } catch (error) {
+            testResult.replaceChildren(alert("error", error.message));
+          } finally {
+            button.textContent = "Test";
+            button.disabled = false;
+          }
+        },
+      }, "Test") : null,
+      manage ? h("button", {
+        class: "btn btn-sm btn-danger",
+        onclick: async () => {
+          if (!window.confirm(`Remove Solaris host “${t.name}”? Its collected assessments are kept.`)) return;
+          try {
+            await api(`inventory/solaris/targets/${t.id}`, { method: "DELETE" });
+            manageSolarisTargets();
+          } catch (error) { alert("error", error.message); }
+        },
+      }, "Remove") : null) },
+  ], targets, {
+    compact: true,
+    export: false,
+    empty: "No Solaris hosts yet. Add one to start collecting directly over SSH.",
+  });
+
+  const baselineRows = baselines.length ? table([
+    { label: "Baseline", key: "name" },
+    { label: "Solaris", render: (b) => String(b.os_major) },
+    { label: "Patches", render: (b) => fmtNumber((b.entries || []).length) },
+    { label: "Source", key: "source" },
+    { label: "Updated", render: (b) => fmtDate(b.updated_at, true) },
+  ], baselines, { compact: true, export: false }) : null;
+
+  modal("Solaris hosts", h("div", { class: "stack" },
+    h("p", { class: "small muted" },
+      "PatchTrack connects to each host with a pinned SSH host key and key-only " +
+      "authentication. Solaris 11 hosts report pending SRUs directly; Solaris 10 " +
+      "hosts are diffed against a baseline — without one they stay Unknown."),
+    hostTable,
+    testResult,
+    baselineRows ? h("div", { class: "stack" },
+      h("h3", {}, "Solaris 10 baselines"),
+      baselineRows) : null,
+  ), manage ? [
+    h("button", { class: "btn", onclick: () => solarisBaselineForm() }, "Add baseline"),
+    h("button", { class: "btn btn-primary", onclick: () => solarisTargetForm(null, baselines) }, "Add host"),
+  ] : []);
+}
+
+function solarisTargetForm(target, baselines) {
+  const field = (id, label, attrs = {}) => h("div", { class: "field" },
+    h("label", { for: id }, label),
+    h("input", { id, ...attrs }));
+  const value = (id) => document.getElementById(id).value.trim();
+  const checked = (id) => document.getElementById(id).checked;
+  const baselineOptions = [
+    h("option", { value: "" }, "No baseline"),
+    ...baselines.map((b) => h("option", {
+      value: b.id,
+      selected: target && target.baseline_id === b.id,
+    }, `${b.name} (Solaris ${b.os_major})`)),
+  ];
+  const form = h("div", { class: "stack" },
+    field("sol-name", "Name", { type: "text", value: target?.name || "", placeholder: "solaris-db01" }),
+    field("sol-host", "Hostname or address", { type: "text", value: target?.hostname || "", placeholder: "solaris-db01.example.com" }),
+    field("sol-port", "Port", { type: "number", min: "1", max: "65535", value: target?.port || 22 }),
+    field("sol-user", "Username", { type: "text", value: target?.username || "patchtrack" }),
+    field("sol-secret", "Private key reference", { type: "text", value: target?.secret_ref || "",
+      placeholder: "file:/etc/patchtrack/secrets/solaris-db01.key" }),
+    field("sol-hostkey", "Pinned host key", { type: "text", value: target?.host_key || "",
+      placeholder: "SHA256:… (empty on first test gives the actual key)" }),
+    h("div", { class: "field" }, h("label", { for: "sol-os" }, "Solaris major version"),
+      h("select", { id: "sol-os" },
+        h("option", { value: "11", selected: !target || Number(target.os_major) === 11 }, "11 or later"),
+        h("option", { value: "10", selected: target && Number(target.os_major) === 10 }, "10"))),
+    field("sol-zone", "Zone", { type: "text", value: target?.zone || "global" }),
+    h("div", { class: "field" }, h("label", { for: "sol-baseline" }, "Patch baseline"),
+      h("select", { id: "sol-baseline" }, ...baselineOptions)),
+    field("sol-command", "Collector command (optional)", { type: "text",
+      value: target?.collector_command || "",
+      placeholder: "/opt/patchtrack/collect-solaris --format=json" }),
+    h("label", { class: "row", style: { gap: "6px" } },
+      h("input", { id: "sol-enabled", type: "checkbox", checked: target ? target.enabled : true }),
+      "Enabled"));
+
+  const payload = () => ({
+    name: value("sol-name"),
+    hostname: value("sol-host"),
+    port: Number(value("sol-port")),
+    username: value("sol-user"),
+    secret_ref: value("sol-secret"),
+    host_key: value("sol-hostkey"),
+    os_major: Number(value("sol-os")),
+    zone: value("sol-zone") || "global",
+    baseline_id: value("sol-baseline") || null,
+    collector_command: value("sol-command"),
+    enabled: checked("sol-enabled"),
+  });
+
+  modal(target ? `Edit ${target.name}` : "Add Solaris host", form, [
+    target ? h("button", {
+      class: "btn",
+      onclick: async (event) => {
+        const button = event.currentTarget;
+        button.disabled = true;
+        button.textContent = "Testing…";
+        try {
+          const result = await api(`inventory/solaris/targets/${target.id}/test`, { method: "POST" });
+          form.prepend(alert(result.status === "success" ? "ok" : "error",
+            `${result.detail} (${result.duration_ms} ms)`));
+        } catch (error) {
+          form.prepend(alert("error", error.message));
+        } finally {
+          button.disabled = false;
+          button.textContent = "Test connection";
+        }
+      },
+    }, "Test connection") : null,
+    h("button", {
+      class: "btn btn-primary",
+      onclick: async () => {
+        try {
+          if (target) await api(`inventory/solaris/targets/${target.id}`, { method: "PATCH", body: payload() });
+          else await api("inventory/solaris/targets", { method: "POST", body: payload() });
+          document.getElementById("modal-root").innerHTML = "";
+          manageSolarisTargets();
+          renderIntegrations();
+        } catch (error) {
+          form.prepend(alert("error", error.message));
+        }
+      },
+    }, target ? "Save host" : "Add host"),
+  ]);
+}
+
+function solarisBaselineForm() {
+  const form = h("div", { class: "stack" },
+    h("div", { class: "field" }, h("label", { for: "bl-name" }, "Baseline name"),
+      h("input", { id: "bl-name", type: "text", placeholder: "solaris10-2026-q4" })),
+    h("div", { class: "field" }, h("label", { for: "bl-os" }, "Solaris major version"),
+      h("select", { id: "bl-os" },
+        h("option", { value: "10" }, "10"),
+        h("option", { value: "11" }, "11 or later"))),
+    h("div", { class: "field" }, h("label", { for: "bl-desc" }, "Description"),
+      h("input", { id: "bl-desc", type: "text", placeholder: "What this baseline represents" })),
+    h("div", { class: "field" }, h("label", { for: "bl-entries" }, "Patch entries (JSON)"),
+      h("textarea", { id: "bl-entries", rows: "12", class: "mono small",
+        placeholder: '[{"patch_id": "147147-26", "title": "Kernel", "severity": "critical"}]' })),
+    h("p", { class: "small muted" },
+      "Each entry needs a patch_id; the revision may be part of the id (147147-26). " +
+      "List patches obsoleted by an entry in an optional obsoletes array."));
+
+  modal("Add Solaris 10 baseline", form, [
+    h("button", {
+      class: "btn btn-primary",
+      onclick: async () => {
+        let entries;
+        try {
+          entries = JSON.parse(document.getElementById("bl-entries").value || "[]");
+          if (!Array.isArray(entries) && Array.isArray(entries?.entries)) entries = entries.entries;
+          if (!Array.isArray(entries)) throw new Error("Entries must be a JSON array");
+        } catch (error) {
+          form.prepend(alert("error", `Entries: ${error.message}`));
+          return;
+        }
+        try {
+          await api("inventory/solaris/baselines", {
+            method: "POST",
+            body: {
+              name: document.getElementById("bl-name").value.trim(),
+              os_major: Number(document.getElementById("bl-os").value),
+              description: document.getElementById("bl-desc").value.trim(),
+              source: "manual",
+              entries,
+            },
+          });
+          document.getElementById("modal-root").innerHTML = "";
+          manageSolarisTargets();
+        } catch (error) {
+          form.prepend(alert("error", error.message));
+        }
+      },
+    }, "Save baseline"),
   ]);
 }
 
@@ -3072,14 +4057,14 @@ async function renderUsers() {
 
   const createForm = h("div", { class: "row", style: { alignItems: "flex-end" } },
     h("div", { class: "field" }, h("label", {}, "Username"),
-      h("input", { id: "user-name", type: "text" })),
+      h("input", { id: "new-user-name", type: "text" })),
     h("div", { class: "field" }, h("label", {}, "Display name"),
-      h("input", { id: "user-display", type: "text" })),
+      h("input", { id: "new-user-display", type: "text" })),
     h("div", { class: "field" }, h("label", {}, "Role"),
-      h("select", { id: "user-role" },
+      h("select", { id: "new-user-role" },
         ...roleNames.map((role) => h("option", { value: role }, role.replaceAll("_", " "))))),
     h("div", { class: "field" }, h("label", {}, "Temporary password"),
-      h("input", { id: "user-pw", type: "password", autocomplete: "new-password" })),
+      h("input", { id: "new-user-pw", type: "password", autocomplete: "new-password" })),
     h("button", {
       class: "btn btn-primary",
       onclick: async () => {
@@ -3087,10 +4072,10 @@ async function renderUsers() {
           await api("identity/users", {
             method: "POST",
             body: {
-              username: document.getElementById("user-name").value,
-              display_name: document.getElementById("user-display").value,
-              role: document.getElementById("user-role").value,
-              password: document.getElementById("user-pw").value,
+              username: document.getElementById("new-user-name").value,
+              display_name: document.getElementById("new-user-display").value,
+              role: document.getElementById("new-user-role").value,
+              password: document.getElementById("new-user-pw").value,
             },
           });
           renderUsers();

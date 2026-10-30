@@ -85,6 +85,15 @@ class Settings(BaseSettings):
     # initial default; the live value is in shared.app_settings and is edited
     # in the console. The worker applies it after each successful archive.
     backup_dir: Path = Path("/var/lib/patchtrack/backups")
+    # An archive downloaded earlier can be uploaded for an in-console restore.
+    # It is staged here, not on the backups volume, so retention and the
+    # archive listing never see it. The backup worker reads the same volume.
+    restore_upload_dir: Path = Path("/var/lib/patchtrack/restore-uploads")
+    restore_upload_max_bytes: int = Field(
+        4 * 1024 * 1024 * 1024,
+        ge=1024 * 1024,
+        description="Largest accepted restore upload.",
+    )
     backup_interval: int = Field(86400, ge=60)
     backup_retention: int = Field(7, ge=1, le=90)
 

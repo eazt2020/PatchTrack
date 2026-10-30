@@ -10,6 +10,8 @@ version as the server.
 from __future__ import annotations
 
 import json
+import re
+import tarfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -199,3 +201,153 @@ def queue_scheduled_backup() -> dict[str, Any]:
         "backup_id": str(active["id"]) if active else None,
         "detail": "A backup is already queued or running.",
     }
+
+
+# ---------------------------------------------------------------- restore
+RESTORE_CONFIRMATION = "RESTORE"
+
+
+def schema_number(value: Any) -> int | None:
+    """The numeric prefix of a migration name, as the worker reads it.
+
+    Migrations are named ``021_restore_runs``; comparing the full names would
+    rank ``10_...`` above ``9_...``.
+    """
+    match = re.match(r"\s*(\d+)", str(value or ""))
+    return int(match.group(1)) if match else None
+
+
+def list_restores(limit: int = 50) -> list[dict[str, Any]]:
+    return fetch_all(
+        "SELECT id, backup_id, source, filename, display_name, status, "
+        "       requested_by, requested_at, started_at, finished_at, message "
+        "FROM shared.restore_runs ORDER BY requested_at DESC LIMIT :limit",
+        limit=limit,
+    )
+
+
+def active_restore() -> dict[str, Any] | None:
+    return fetch_one(
+        "SELECT id, backup_id, source, filename, display_name, status, "
+        "       requested_by, requested_at "
+        "FROM shared.restore_runs "
+        "WHERE status IN ('queued', 'running') ORDER BY requested_at LIMIT 1"
+    )
+
+
+def current_schema_version() -> str:
+    row = fetch_one(
+        "SELECT COALESCE(max(version), 'unknown') AS version "
+        "FROM shared.schema_migrations"
+    ) or {}
+    return str(row.get("version") or "unknown")
+
+
+def enqueue_restore(
+    backup_id: Any, requested_by: str
+) -> tuple[dict[str, Any] | None, str]:
+    """Queue a restore of one completed archive, or explain why it cannot run.
+
+    The worker performs the swap; this only validates that the archive exists,
+    belongs to this release, and is not newer than the running schema. A
+    snapshot made before a schema migration can still be restored, because the
+    next stack start applies the missing migrations.
+    """
+    backup = fetch_one(
+        "SELECT id, status, filename, app_version, schema_version "
+        "FROM shared.backup_runs WHERE id = :id",
+        id=backup_id,
+    )
+    if backup is None:
+        return None, "No such backup."
+    if backup["status"] != "completed":
+        return None, "Only a completed archive can be restored."
+    path = archive_path(backup.get("filename"))
+    if path is None or not path.is_file():
+        return None, "The archive file is missing from the backups volume."
+
+    running_version = get_settings().version or ""
+    if not running_version:
+        return None, "The running release version is unknown; refusing to restore."
+    if str(backup.get("app_version") or "") != running_version:
+        return (
+            None,
+            "The archive was made by PatchTrack "
+            f"{backup.get('app_version') or 'unknown'}, but this installation "
+            f"runs {running_version}. Install the matching release first.",
+        )
+
+    archived = schema_number(backup.get("schema_version"))
+    current = schema_number(current_schema_version())
+    if archived is None or current is None:
+        return None, "The archive or the database has no schema version recorded."
+    if archived > current:
+        return (
+            None,
+            "The archive is newer than this installation's database schema. "
+            "Upgrade PatchTrack before restoring it.",
+        )
+
+    row = fetch_one(
+        "INSERT INTO shared.restore_runs (backup_id, filename, requested_by) "
+        "VALUES (:backup_id, :filename, :by) "
+        "ON CONFLICT DO NOTHING "
+        "RETURNING id, backup_id, filename, status, requested_by, requested_at",
+        backup_id=backup_id,
+        filename=backup.get("filename") or "",
+        by=requested_by,
+    )
+    if row is None:
+        return None, "A restore is already queued or running."
+    return row, ""
+
+
+def enqueue_upload_restore(
+    filename: str,
+    display_name: str,
+    sha256: str,
+    requested_by: str,
+) -> tuple[dict[str, Any] | None, str]:
+    """Queue a restore from a file an operator uploaded.
+
+    The caller has already written the file into ``restore_upload_dir`` and
+    verified its manifest. ``filename`` is the generated name on disk;
+    ``display_name`` is what the operator chose, shown in the console.
+    """
+    if active_restore() is not None:
+        return None, "A restore is already queued or running."
+    row = fetch_one(
+        "INSERT INTO shared.restore_runs "
+        "    (backup_id, source, filename, display_name, sha256, requested_by) "
+        "VALUES (NULL, 'upload', :filename, :display_name, :sha256, :by) "
+        "ON CONFLICT DO NOTHING "
+        "RETURNING id, source, filename, display_name, status, requested_by, "
+        "          requested_at",
+        filename=filename,
+        display_name=display_name,
+        sha256=sha256,
+        by=requested_by,
+    )
+    if row is None:
+        return None, "A restore is already queued or running."
+    return row, ""
+
+
+def inspect_archive(path: Path) -> dict[str, Any] | None:
+    """The manifest of an uploaded archive, or ``None`` if it is unreadable.
+
+    Only ``manifest.json`` is read, and only up to a small bound, so a hostile
+    tar cannot make this allocate an unbounded amount of memory.
+    """
+    try:
+        with tarfile.open(path, "r:gz") as archive:
+            member = archive.getmember("manifest.json")
+            if member.size > 64 * 1024:
+                return None
+            stream = archive.extractfile(member)
+            if stream is None:
+                return None
+            manifest = json.loads(stream.read(member.size))
+    except (tarfile.TarError, KeyError, OSError, ValueError, EOFError):
+        return None
+    return manifest if isinstance(manifest, dict) else None
