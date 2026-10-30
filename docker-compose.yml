@@ -14,7 +14,7 @@
 name: patchtrack
 
 x-service-defaults: &service-defaults
-  image: patchtrack:${PATCHTRACK_VERSION:-3.0.3}
+  image: patchtrack:${PATCHTRACK_VERSION:-3.0.4}
   build:
     context: .
     dockerfile: deploy/container/Dockerfile
@@ -166,7 +166,7 @@ services:
     environment:
       PATCHTRACK_BACKUP_DIR: /var/lib/patchtrack/backups
       PATCHTRACK_REPORT_DIR: /var/lib/patchtrack/reports
-      PATCHTRACK_VERSION: ${PATCHTRACK_VERSION:-3.0.3}
+      PATCHTRACK_VERSION: ${PATCHTRACK_VERSION:-3.0.4}
       # This container needs the database URL and nothing else from .env.
       POSTGRES_PASSWORD: ""
       PATCHTRACK_JWT_SECRET: ""

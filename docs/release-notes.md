@@ -1,5 +1,43 @@
 # Release notes
 
+## 3.0.4 — 2026-10-30
+
+Console and deployment release. No database migration is required.
+
+### Deployment
+
+- **Grafana removed.** The optional dashboard service, its provisioning,
+  dashboards, read-only database role and `PATCHTRACK_GF_*` / `GF_*` settings
+  are gone. The built-in console is the only dashboard. Existing deployments
+  that set those variables can drop them; they are ignored.
+- **Services start again after the dependency upgrade.** Starlette 1.10 removed
+  `add_event_handler`, which the in-app scheduler used; every service failed at
+  start-up. The scheduler now composes into the application lifespan and shuts
+  down cleanly.
+
+### Console
+
+- **Mobile navigation.** Below 1000px the sidebar becomes an off-canvas drawer
+  with a hamburger button, backdrop, Escape handling and `aria-expanded`.
+  Previously the sidebar was hidden outright, leaving no way to change area.
+- **No horizontal page scroll on phones.** The top bar wraps, TV mode is hidden
+  below 560px, and tables and wide charts scroll inside their own panes.
+- **Two-up KPI rows.** The dashboard and inventory tiles stay two per row on a
+  phone instead of stacking five deep; filters collapse behind a "Filters"
+  disclosure below 700px.
+- **Visible sign-in field fixed.** The login page no longer displays the hidden
+  "Full name" field.
+- **Table readability.** Asset IDs no longer break mid-token, operating systems
+  read `RHEL 9.4` / `Windows Server 2022` / `SLES` / `Solaris` (full value in
+  the tooltip), wide tables show a "Scroll →" hint and are keyboard-scrollable,
+  and headers carry column scope.
+- **Dialogs and announcements.** Modals trap Tab, focus their first input,
+  restore focus on close and swallow Escape; the forced password dialog cannot
+  be dismissed. Error alerts now use `role="alert"`, charts carry accessible
+  names, and a skip link and visible focus outlines aid keyboard use.
+- **Contrast.** Small critical text uses a lighter red (8.5:1) instead of the
+  3.6:1 fill colour.
+
 ## 3.0.3 — 2026-10-30
 
 Corrective release. It supersedes 3.0.0, 3.0.1 and 3.0.2, which are withdrawn:

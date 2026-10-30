@@ -336,7 +336,19 @@ function filterBar(onChange, options = {}) {
       },
     }, "Clear filters"));
   }
-  return bar;
+  // On a phone the five selects filled the first screen before any data.
+  // The disclosure is hidden on wider screens, where the bar stays visible.
+  const activeCount = Object.values(state.filters).filter(Boolean).length;
+  const toggle = h("button", {
+    type: "button", class: "btn btn-sm filter-toggle",
+    "aria-expanded": "false",
+    onclick: () => {
+      const open = shell.classList.toggle("open");
+      toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    },
+  }, activeCount ? `Filters (${activeCount})` : "Filters");
+  const shell = h("div", { class: "filter-shell" }, toggle, bar);
+  return shell;
 }
 
 function filterQuery() {
@@ -946,11 +958,13 @@ function statusChartCard(title, subtitle, rows, mode = "columns") {
       rows: rows.map((r) => ({ ...r, unknown: (r.unknown || 0) + (r.stale || 0) })),
       keys: STATUS_KEYS, labels: STATUS_LABELS, colors: STATUS, withPct: true,
       maxRows: rows.length,
+      label: `${title}. ${subtitle || ""}`.trim(),
     });
   } else {
     stackedColumns(body, {
       rows: rows.map((r) => ({ ...r, unknown: (r.unknown || 0) + (r.stale || 0) })),
       keys: STATUS_KEYS, labels: STATUS_LABELS, colors: STATUS, height: 230,
+      label: `${title}. ${subtitle || ""}`.trim(),
     });
   }
   legend(legendBox, STATUS_KEYS.map((key) => ({

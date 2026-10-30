@@ -1,5 +1,7 @@
 /* DOM helpers — kept deliberately small, no framework. */
 
+import { flushCharts } from "/static/charts.js";
+
 export function h(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(attrs || {})) {
@@ -34,6 +36,8 @@ export function mount(node, ...children) {
     if (child === null || child === undefined) continue;
     node.appendChild(child instanceof Node ? child : document.createTextNode(String(child)));
   }
+  // Charts built while detached can now measure their pane and draw.
+  flushCharts();
   return node;
 }
 
@@ -166,9 +170,15 @@ export function card(title, subtitle, body, extra) {
 }
 
 export function alert(kind, text) {
-  return h("div", { class: `alert ${kind}` },
-    h("span", { class: "ico" }, kind === "error" ? "✕" : kind === "warn" ? "!" : "✓"),
-    h("div", {}, text));
+  // Errors and warnings interrupt; confirmations are announced politely.
+  return h("div", {
+    class: `alert ${kind}`,
+    role: kind === "info" ? "status" : "alert",
+    "aria-live": kind === "info" ? "polite" : "assertive",
+  },
+  h("span", { class: "ico", "aria-hidden": "true" },
+    kind === "error" ? "✕" : kind === "warn" ? "!" : "✓"),
+  h("div", {}, text));
 }
 
 export function spinnerRows(rows = 4) {

@@ -167,14 +167,49 @@ function emptyState(container, message) {
   container.appendChild(node);
 }
 
-function frame(container, height) {
+/* Render at the pane's own width. A fixed 640-unit viewBox scaled 11px labels
+   down to about 6px on a phone (and to 7px in a desktop card); matching the
+   container keeps text at its real size. */
+/* Views are built detached and mounted in one step. A chart cannot measure its
+   pane until then, so it queues its draw and mount() flushes the queue. */
+const pendingDraws = new Set();
+let flushScheduled = false;
+
+function queueChartDraw(container, draw) {
+  pendingDraws.add({ container, draw });
+  if (!flushScheduled) {
+    flushScheduled = true;
+    requestAnimationFrame(() => {
+      flushScheduled = false;
+      flushCharts();
+    });
+  }
+}
+
+/* An unrelated mount (a spinner, another route) must not discard a chart that
+   has not reached the document yet: keep unconnected containers queued. */
+export function flushCharts() {
+  for (const entry of [...pendingDraws]) {
+    if (!entry.container.isConnected) continue;
+    pendingDraws.delete(entry);
+    entry.draw();
+  }
+}
+
+function widthFor(container) {
+  const measured = Math.round(container.getBoundingClientRect().width);
+  return Math.max(300, Math.min(720, measured || 640));
+}
+
+function frame(container, height, label, width = 640) {
   container.innerHTML = "";
   const svg = el("svg", {
     class: "chart",
-    viewBox: `0 0 640 ${height}`,
+    viewBox: `0 0 ${width} ${height}`,
     preserveAspectRatio: "none",
     role: "img",
   });
+  if (label) svg.setAttribute("aria-label", label);
   svg.style.height = `${height}px`;
   container.appendChild(svg);
   return svg;
@@ -182,21 +217,30 @@ function frame(container, height) {
 
 /* ------------------------------------------------------------------ stacked columns */
 export function stackedColumns(container, options) {
+  // Views are built detached and mounted in one step. A detached element has
+  // no width to measure, so wait one frame for the mount before drawing.
+  if (!container.isConnected) {
+    queueChartDraw(container, () => {
+      if (container.isConnected) stackedColumns(container, options);
+    });
+    return;
+  }
   const {
     rows, keys, labels, colors, height = 220,
     valueLabel = "servers", showTotals = true,
+    label = "Server counts by group, split by compliance state",
   } = options;
   if (!rows || rows.length === 0) {
     emptyState(container, "No servers match the current filters.");
     return;
   }
-  const width = 640;
+  const width = widthFor(container);
   const pad = { top: 22, right: 12, bottom: 34, left: 44 };
   const plotW = width - pad.left - pad.right;
   const plotH = height - pad.top - pad.bottom;
   const totals = rows.map((r) => keys.reduce((sum, k) => sum + (r[k] || 0), 0));
   const max = niceMax(Math.max(...totals));
-  const svg = frame(container, height);
+  const svg = frame(container, height, label, width);
 
   for (let i = 0; i <= 4; i += 1) {
     const value = (max / 4) * i;
@@ -267,8 +311,15 @@ export function stackedColumns(container, options) {
 
 /* ------------------------------------------------------------------ stacked rows */
 export function stackedRows(container, options) {
+  if (!container.isConnected) {
+    queueChartDraw(container, () => {
+      if (container.isConnected) stackedRows(container, options);
+    });
+    return;
+  }
   const {
     rows, keys, labels, colors, maxRows = 7, withPct = false,
+    label = "Server counts by group, split by compliance state",
   } = options;
   if (!rows || rows.length === 0) {
     emptyState(container, "No servers match the current filters.");
@@ -277,23 +328,24 @@ export function stackedRows(container, options) {
   const shown = rows.slice(0, maxRows);
   const rowH = 30;
   const height = shown.length * rowH + 8;
-  const width = 640;
+  const width = widthFor(container);
+  // The group labels need room; on a narrow pane trade plot width for them.
   const pad = { left: 148, right: withPct ? 66 : 46 };
   const plotW = width - pad.left - pad.right;
   const max = Math.max(
     1, ...shown.map((r) => keys.reduce((s, k) => s + (r[k] || 0), 0))
   );
-  const svg = frame(container, height);
+  const svg = frame(container, height, label, width);
 
   shown.forEach((row, index) => {
     const y = index * rowH + 6;
     const total = keys.reduce((s, k) => s + (row[k] || 0), 0);
-    const label = String(row.group).length > 22
+    const groupLabel = String(row.group).length > 22
       ? `${String(row.group).slice(0, 21)}…` : row.group;
     svg.appendChild(el("text", {
       x: pad.left - 10, y: y + 15, "text-anchor": "end", class: "axis-label",
       style: "fill:#b3bdc8",
-    }, label));
+    }, groupLabel));
 
     const fullW = (total / max) * plotW;
     svg.appendChild(el("rect", {
@@ -337,6 +389,8 @@ export function donut(container, options) {
   container.innerHTML = "";
   const size = 230;
   const svg = el("svg", { viewBox: `0 0 ${size} ${size}`, class: "chart", role: "img" });
+  svg.setAttribute("aria-label",
+    `Compliance breakdown: ${rows.map((r) => `${r.label} ${r.value}`).join(", ")}`);
   svg.style.height = `${size}px`;
   svg.style.width = `${size}px`;
   const cx = size / 2;
@@ -380,20 +434,31 @@ export function donut(container, options) {
 
 /* ------------------------------------------------------------------ line + target */
 export function trendLine(container, options) {
+  if (!container.isConnected) {
+    queueChartDraw(container, () => {
+      if (container.isConnected) trendLine(container, options);
+    });
+    return;
+  }
   const { points, target, height = 220, unit = "%", empty } = options;
   if (!points || points.length < 2) {
     emptyState(container, empty
       || "Not enough daily snapshots yet. The trend is built from one snapshot per day.");
     return;
   }
-  const width = 640;
+  const width = widthFor(container);
   const pad = { top: 18, right: 54, bottom: 30, left: 40 };
   const plotW = width - pad.left - pad.right;
   const plotH = height - pad.top - pad.bottom;
   const values = points.map((p) => Number(p.value));
   const maxY = 100;
   const minY = Math.max(0, Math.min(...values, target ?? 100) - 10);
-  const svg = frame(container, height);
+  const firstPoint = points[0];
+  const lastPoint = points[points.length - 1];
+  const svg = frame(container, height,
+    `Compliance trend from ${firstPoint.label} at ${Number(firstPoint.value).toFixed(1)}${unit} `
+    + `to ${lastPoint.label} at ${Number(lastPoint.value).toFixed(1)}${unit}`
+    + (target !== null && target !== undefined ? `, target ${target}${unit}` : ""), width);
   const x = (i) => pad.left + (i / (points.length - 1)) * plotW;
   const y = (v) => pad.top + plotH - ((v - minY) / (maxY - minY)) * plotH;
 
@@ -437,7 +502,7 @@ export function trendLine(container, options) {
       target ? tipRow("Target", `${target}${unit}`, "#ec835a") : null,
     ]));
     svg.appendChild(dot);
-    const stride = Math.ceil(points.length / 7);
+    const stride = Math.ceil(points.length / (width < 480 ? 5 : 7));
     if (i % stride === 0 || i === points.length - 1) {
       svg.appendChild(el("text", {
         x: x(i), y: height - 10, "text-anchor": "middle", class: "axis-label",
@@ -455,17 +520,25 @@ export function trendLine(container, options) {
 
 /* ------------------------------------------------------------------ columns + target */
 export function targetColumns(container, options) {
+  if (!container.isConnected) {
+    queueChartDraw(container, () => {
+      if (container.isConnected) targetColumns(container, options);
+    });
+    return;
+  }
   const { points, target, height = 220, unit = "%", empty } = options;
   if (!points || points.length === 0) {
     emptyState(container, empty || "No quarterly snapshots captured yet.");
     return;
   }
-  const width = 640;
+  const width = widthFor(container);
   const pad = { top: 20, right: 54, bottom: 34, left: 40 };
   const plotW = width - pad.left - pad.right;
   const plotH = height - pad.top - pad.bottom;
   const maxY = 100;
-  const svg = frame(container, height);
+  const svg = frame(container, height,
+    `Compliance by period: ${points.map((p) => `${p.label} ${Number(p.value).toFixed(1)}${unit}`).join(", ")}`
+    + (target !== null && target !== undefined ? `, target ${target}${unit}` : ""), width);
   const band = plotW / points.length;
   const barW = Math.min(46, band * 0.5);
 
@@ -502,10 +575,14 @@ export function targetColumns(container, options) {
       x: cx, y: y - 7, "text-anchor": "middle", class: "axis-tick",
       style: "fill:#f0f3f6;font-weight:600",
     }, `${value.toFixed(1)}${unit}`));
-    svg.appendChild(el("text", {
-      x: cx, y: height - 16, "text-anchor": "middle", class: "axis-label",
-    }, point.label));
-    if (point.sub) {
+    // Narrow panes cannot fit every period label without overlap.
+    const labelled = band >= 46 || i % 2 === 0 || i === points.length - 1;
+    if (labelled) {
+      svg.appendChild(el("text", {
+        x: cx, y: height - 16, "text-anchor": "middle", class: "axis-label",
+      }, point.label));
+    }
+    if (point.sub && labelled) {
       svg.appendChild(el("text", {
         x: cx, y: height - 3, "text-anchor": "middle", class: "axis-label",
         style: "font-size:9.5px",
@@ -528,18 +605,26 @@ export function targetColumns(container, options) {
 
 /* ------------------------------------------------------------------ severity bars */
 export function severityBars(container, rows) {
+  if (!container.isConnected) {
+    queueChartDraw(container, () => {
+      if (container.isConnected) severityBars(container, rows);
+    });
+    return;
+  }
   const data = rows.filter((r) => r.count > 0);
   if (data.length === 0) {
     emptyState(container, "No outstanding patch findings recorded.");
     return;
   }
   const height = data.length * 32 + 6;
-  const width = 640;
+  const width = widthFor(container);
   const pad = { left: 84, right: 52 };
   const plotW = width - pad.left - pad.right;
   const max = Math.max(...data.map((r) => r.count));
   container.innerHTML = "";
   const svg = el("svg", { viewBox: `0 0 ${width} ${height}`, class: "chart", role: "img" });
+  svg.setAttribute("aria-label",
+    `Outstanding findings by severity: ${data.map((r) => `${r.severity} ${r.count}`).join(", ")}`);
   svg.style.height = `${height}px`;
   data.forEach((row, i) => {
     const y = i * 32 + 4;

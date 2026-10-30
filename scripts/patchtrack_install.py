@@ -49,7 +49,7 @@ from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Sequence, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_VERSION = "3.0.3"
+DEFAULT_VERSION = "3.0.4"
 DEFAULT_INSTALL_DIR = Path("/opt/patchtrack")
 DEFAULT_CONFIG_DIR = Path("/etc/patchtrack")
 DEFAULT_SERVICE_USER = "patchtrack"
