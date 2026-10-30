@@ -17,7 +17,7 @@ not edit it.
 | `PATCHTRACK_APP_TIMEZONE` | — | **Removed.** The deployment timezone is a database setting, changed in **Settings → Platform**, so every service picks it up without a restart. See [Time zone](#time-zone) below. |
 | `PATCHTRACK_LOG_LEVEL` | `INFO` | Uvicorn log level |
 | `PATCHTRACK_MAX_REQUEST_BYTES` | `67108864` (64 MiB) | Largest accepted request body. Justification evidence is submitted base64-encoded, so keep this comfortably above the combined attachment size. A larger body is refused with `413` before parsing. |
-| `PATCHTRACK_VERSION` | `3.0.4` | Image tag used by compose |
+| `PATCHTRACK_VERSION` | `3.0.5` | Image tag used by compose |
 
 ### Time zone
 

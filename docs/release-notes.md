@@ -1,5 +1,15 @@
 # Release notes
 
+## 3.0.5 — 2026-10-30
+
+Console-only release; no database migration is required.
+
+- **KPI percentages line up.** The Compliant tile on the executive dashboard and
+  Server inventory now right-aligns its share like the neighbouring tiles, in
+  bold green.
+- **Unknown share stands out.** The "Unknown / no data" percentage uses the same
+  amber as its meter bar, in bold, instead of neutral grey.
+
 ## 3.0.4 — 2026-10-30
 
 Console and deployment release. No database migration is required.
