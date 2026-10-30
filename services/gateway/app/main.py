@@ -36,7 +36,6 @@ from starlette.concurrency import run_in_threadpool
 from patchtrack_common import tls as tls_settings
 from patchtrack_common.audit import record_audit
 from patchtrack_common.config import get_settings, release_version
-from patchtrack_common.metrics import install as install_metrics
 from patchtrack_common.request_guards import install as install_request_guards
 from patchtrack_common.net import client_ip
 from patchtrack_common.security import decode_token
@@ -49,14 +48,14 @@ STATIC_DIR = BASE_DIR.parent / "static"
 
 app = FastAPI(title="PatchTrack Gateway", version=release_version(), docs_url=None,
               redoc_url=None, openapi_url=None)
-install_metrics(app, APP)
+# No /metrics here: the gateway's port is published to operators, and the
+# scraper can reach every backend on the internal network. Publishing request
+# counters through the public listener would expose them to anyone.
 install_request_guards(app)
 
 COOKIE = "patchtrack_session"
 CSRF_HEADER = "x-patchtrack-csrf"
 CSRF_COOKIE = "patchtrack_csrf"
-PUBLIC_PATHS = {"/login", "/api/session/login", "/api/session/bootstrap",
-                "/healthz", "/readyz", "/api/session/status"}
 SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",

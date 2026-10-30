@@ -7,6 +7,8 @@ silently gain a capability it was not granted.
 
 from __future__ import annotations
 
+import base64
+import json
 import time
 
 import jwt
@@ -137,9 +139,18 @@ def test_expired_token_is_rejected():
     assert "expired" in excinfo.value.detail.lower()
 
 
+def _base64url(value: dict) -> str:
+    raw = json.dumps(value, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
 def test_unsigned_token_is_rejected():
-    unsigned = jwt.encode({"sub": "u1", "role": "administrator"},
-                          key="", algorithm="HS256")
+    # Hand-built "algorithm: HS256, no signature" token. Newer PyJWT refuses
+    # to *encode* with an empty HMAC key, so the test constructs it directly
+    # rather than relying on the encoder.
+    header = _base64url({"alg": "HS256", "typ": "JWT"})
+    payload = _base64url({"sub": "u1", "role": "administrator"})
+    unsigned = f"{header}.{payload}."
     with pytest.raises(HTTPException) as excinfo:
         decode_token(unsigned)
     assert excinfo.value.status_code == 401

@@ -17,7 +17,7 @@ from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
@@ -37,7 +37,7 @@ from patchtrack_common.secrets import (
     resolve as resolve_secret,
     validate_reference,
 )
-from patchtrack_common.security import Principal, PrincipalDep, require_permission
+from patchtrack_common.security import Principal, require_permission
 
 from .connectors.assetexplorer import AssetExplorerClient, AssetExplorerError
 from .connectors.satellite import SatelliteClient, SatelliteError
@@ -234,17 +234,24 @@ def get_asset(
         """,
         id=asset_id,
     )
-    findings = fetch_all(
-        """
-        SELECT source_system, advisory_id, title, severity, category,
-               released_at, remediation_due, source_reference
-        FROM compliance.findings WHERE asset_id = :id
-        ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'important' THEN 1
-                 WHEN 'moderate' THEN 2 WHEN 'low' THEN 3 ELSE 4 END,
-                 released_at DESC NULLS LAST
-        LIMIT 500
-        """,
-        id=asset_id,
+    # The asset page is available to every role holding inventory:detail, but
+    # the findings themselves are gated by findings:view on the dedicated
+    # /findings route. Honour the same gate here rather than widening it.
+    findings = (
+        fetch_all(
+            """
+            SELECT source_system, advisory_id, title, severity, category,
+                   released_at, remediation_due, source_reference
+            FROM compliance.findings WHERE asset_id = :id
+            ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'important' THEN 1
+                     WHEN 'moderate' THEN 2 WHEN 'low' THEN 3 ELSE 4 END,
+                     released_at DESC NULLS LAST
+            LIMIT 500
+            """,
+            id=asset_id,
+        )
+        if principal.can("findings:view")
+        else []
     )
     links = fetch_all(
         "SELECT source_system, source_ref, confidence, method, linked_at "
@@ -582,6 +589,14 @@ def exclude_asset(
     principal: Annotated[Principal, Depends(require_permission("policies:manage"))],
     reason: str = Query(min_length=5, max_length=500),
 ) -> dict[str, str]:
+    # Validate after trimming for the same reason as PlacementOverride: the
+    # query length check counts whitespace.
+    reason = reason.strip()
+    if len(reason) < 5:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="reason must be at least 5 non-space characters",
+        )
     updated = execute(
         "UPDATE inventory.assets SET in_scope = false, exclusion_reason = :r "
         "WHERE id = :id",
@@ -629,6 +644,16 @@ class PlacementOverride(BaseModel):
     business_group: str | None = Field(default=None, max_length=128)
     reason: str = Field(min_length=3, max_length=500)
 
+    @field_validator("reason")
+    @classmethod
+    def _trim_reason(cls, value: str) -> str:
+        # Length is checked before trimming, so whitespace alone would pass
+        # min_length and then be stored as an empty justification.
+        value = value.strip()
+        if len(value) < 3:
+            raise ValueError("reason must be at least 3 non-space characters")
+        return value
+
 
 def _placement_query(asset_id: UUID) -> dict[str, Any] | None:
     return fetch_one(
@@ -667,7 +692,7 @@ def set_asset_override(
 
     environment = _clean_placement(payload.environment)
     business_group = _clean_placement(payload.business_group)
-    reason = payload.reason.strip()
+    reason = payload.reason
 
     if environment is None and business_group is None:
         execute("DELETE FROM inventory.asset_overrides WHERE asset_id = :id",
@@ -926,7 +951,7 @@ def _option_value(value: str) -> str:
     value = value.strip()
     if not value:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="A value is required",
         )
     return value

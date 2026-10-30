@@ -7,8 +7,8 @@ pytest tests.
 
 | Layer | Location | Needs | Count |
 |-------|----------|-------|-------|
-| Unit tests | `tests/unit/` | Nothing but Python | 472 |
-| Database integration tests | `tests/integration/` | PostgreSQL | 141 |
+| Unit tests | `tests/unit/` | Nothing but Python | 481 |
+| Database integration tests | `tests/integration/` | PostgreSQL | 145 |
 | Browser smoke test | `tests/ui/smoke.py` | Playwright + Chromium + a running stack | 1 script, 14 routes |
 | Dashboard verification | manual procedure (§7) | Grafana + PostgreSQL | 15 panels |
 | Deployment verification | manual procedure (§8) | Docker + RHEL/Rocky 9 | full stack |
@@ -16,9 +16,9 @@ pytest tests.
 Run:
 
 ```bash
-/opt/patchtrack-venv/bin/python -m pytest                       # 472 pass, 141 skip without a DB
+/opt/patchtrack-venv/bin/python -m pytest                       # 481 pass, 145 skip without a DB
 PATCHTRACK_TEST_DATABASE_URL='postgresql+psycopg://patchtrack@/patchtrack_test?host=/tmp' \
-  /opt/patchtrack-venv/bin/python -m pytest                     # 613 pass
+  /opt/patchtrack-venv/bin/python -m pytest                     # 626 pass
 ```
 
 `pytest.ini` sets `testpaths = tests`, `--strict-markers` and fails on an

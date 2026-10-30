@@ -15,16 +15,18 @@ Design rules enforced here:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from sqlalchemy import text
 
-from patchtrack_common.db import connection, fetch_one
+from patchtrack_common.db import connection, get_engine
 from patchtrack_common.secrets import SecretError, resolve as resolve_secret
 
 from .connectors.assetexplorer import AssetExplorerClient, AssetExplorerError
@@ -36,6 +38,37 @@ from .connectors.solaris import SolarisIngestError, load_inbox
 log = logging.getLogger(__name__)
 
 PATCH_SOURCE_KEYS = ("satellite", "sccm", "solaris")
+
+
+class SyncAlreadyRunning(RuntimeError):
+    """Another run of the same integration holds the collection lock."""
+
+
+@contextmanager
+def _exclusive(integration_key: str) -> Iterator[None]:
+    """Serialise collections of one integration across threads and processes.
+
+    A PostgreSQL session-level advisory lock is held on a dedicated
+    connection for the whole run. A crashed run releases it when the
+    connection closes, so no stale ``running`` row can block collection.
+    """
+    lock_id = int.from_bytes(
+        hashlib.sha256(integration_key.encode()).digest()[:8],
+        "big", signed=True,
+    )
+    with get_engine().connect() as conn:
+        acquired = conn.execute(
+            text("SELECT pg_try_advisory_lock(:k)"), {"k": lock_id}
+        ).scalar()
+        if not acquired:
+            raise SyncAlreadyRunning(
+                f"{integration_key} collection is already running"
+            )
+        try:
+            yield
+        finally:
+            conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": lock_id})
+            conn.commit()
 
 
 # --------------------------------------------------------------------------- helpers
@@ -251,6 +284,17 @@ def _maybe_conflict(
 
 # --------------------------------------------------------------------------- sync
 def run_assetexplorer_sync(
+    *, trigger: str = "schedule", requested_by: str = "schedule",
+    secret: str = "", client: AssetExplorerClient | None = None,
+) -> dict[str, Any]:
+    with _exclusive("assetexplorer"):
+        return _run_assetexplorer_sync(
+            trigger=trigger, requested_by=requested_by,
+            secret=secret, client=client,
+        )
+
+
+def _run_assetexplorer_sync(
     *, trigger: str = "schedule", requested_by: str = "schedule",
     secret: str = "", client: AssetExplorerClient | None = None,
 ) -> dict[str, Any]:
@@ -482,6 +526,18 @@ def run_patch_sync(
 ) -> dict[str, Any]:
     if source_key not in PATCH_SOURCE_KEYS:
         raise ValueError(f"unknown patch source {source_key}")
+    with _exclusive(source_key):
+        return _run_patch_sync(
+            source_key, trigger=trigger, requested_by=requested_by,
+        )
+
+
+def _run_patch_sync(
+    source_key: str,
+    *,
+    trigger: str = "schedule",
+    requested_by: str = "schedule",
+) -> dict[str, Any]:
     with connection() as conn:
         settings = _settings_row(conn, source_key)
         if settings is None:

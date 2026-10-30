@@ -258,6 +258,13 @@ yourself. Nothing else in the deployment differs.
 ```bash
 sudo useradd --system --home-dir /opt/patchtrack --shell /sbin/nologin patchtrack
 
+# The manual procedure runs Compose as this account, which therefore needs
+# access to the Docker socket. (The generated systemd unit runs as root and
+# does not need this.) With Podman, grant access to the rootless socket
+# instead. Verify with the command that follows.
+sudo usermod -aG docker patchtrack
+sudo -u patchtrack docker info >/dev/null && echo "docker access ok"
+
 sudo install -d -m 0750 -o patchtrack -g patchtrack \
   /opt/patchtrack \
   /etc/patchtrack \
@@ -586,6 +593,7 @@ virtualenv:
 sudo dnf install -y python3.12 python3.12-pip postgresql13-server
 python3.12 -m venv /opt/patchtrack-venv
 /opt/patchtrack-venv/bin/pip install -r /opt/patchtrack/deploy/container/requirements.txt
+PYTHONPATH=/opt/patchtrack/services/common:/opt/patchtrack/services \
 PATCHTRACK_DATABASE_URL=… /opt/patchtrack-venv/bin/python -m patchtrack_common.migrate
 ```
 

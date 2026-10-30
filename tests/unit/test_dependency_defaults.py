@@ -62,8 +62,10 @@ def test_prometheus_scrapes_every_service():
     targets = set(config["scrape_configs"][0]["static_configs"][0]["targets"])
     assert targets == {
         "identity:8001", "inventory:8002", "compliance:8003",
-        "reporting:8004", "gateway:8005",
+        "reporting:8004",
     }
+    # The gateway's listener is published, so it must not serve /metrics.
+    assert "gateway:8005" not in targets
 
 
 def test_alert_rules_are_valid_and_cover_availability():
@@ -73,6 +75,35 @@ def test_alert_rules_are_valid_and_cover_availability():
     alerts = {rule["alert"] for group in rules["groups"] for rule in group["rules"]}
     assert "PatchTrackServiceDown" in alerts
     assert "PatchTrackHighErrorRate" in alerts
+
+
+def _direct_pins(text: str) -> dict[str, str]:
+    pins: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.split("#")[0].strip().rstrip("\\").strip()
+        match = re.match(r"^([A-Za-z0-9_.-]+)(?:\[[^\]]*\])?==([^;\s]+)", line)
+        if match:
+            pins[match.group(1).lower().replace("_", "-")] = match.group(2)
+    return pins
+
+
+def test_the_hashed_lock_matches_the_direct_pins():
+    """The image installs the lock; a stale lock would ship old packages."""
+    requirements = (ROOT / "deploy" / "container" / "requirements.txt").read_text()
+    lock = (ROOT / "deploy" / "container" / "requirements.lock.txt").read_text()
+    direct = _direct_pins(requirements)
+    locked = _direct_pins(lock)
+    assert direct, "requirements.txt has no pins"
+    for name, version in direct.items():
+        assert locked.get(name) == version, (
+            f"{name}=={version} in requirements.txt but "
+            f"{locked.get(name)!r} in requirements.lock.txt; regenerate the lock"
+        )
+
+
+def test_the_image_installs_the_hashed_lock():
+    assert "--require-hashes" in DOCKERFILE
+    assert "requirements.lock.txt" in DOCKERFILE
 
 
 def test_prometheus_image_is_pinned_and_not_latest():

@@ -24,14 +24,13 @@ from patchtrack_common.scheduler import (
 )
 from patchtrack_common.audit import record_audit
 from patchtrack_common.config import get_settings, release_version
-from patchtrack_common.db import connection, execute, fetch_all, fetch_one
+from patchtrack_common.db import connection, fetch_all, fetch_one
 from patchtrack_common.net import client_ip
-from patchtrack_common.security import Principal, PrincipalDep, require_permission
+from patchtrack_common.security import Principal, require_permission
 
 from .engine import (
     DIMENSIONS,
     aggregate,
-    evaluate_asset,
     group_breakdown,
     parse_period_key,
     period_bounds,
@@ -45,7 +44,6 @@ from .evaluator import (
     ensure_daily_snapshot,
     evaluate_all,
     load_assets,
-    policy_version_for,
     refresh_compliance,
 )
 
@@ -691,9 +689,14 @@ def findings(
         clauses.append("f.released_at IS NOT NULL AND f.released_at + "
                        "interval '30 days' < now()")
     where = " AND ".join(clauses)
+    # Count the same rows the page query can return: findings are only listed
+    # while their assessment is the asset's latest, so the count must apply
+    # that join too or stale assessments inflate the total.
     total = fetch_one(
         f"SELECT count(*) AS n FROM compliance.findings f "
-        f"JOIN inventory.asset_effective a ON a.id = f.asset_id WHERE {where}", **params
+        f"JOIN inventory.asset_effective a ON a.id = f.asset_id "
+        f"JOIN compliance.asset_latest_assessment la "
+        f"  ON la.assessment_id = f.assessment_id WHERE {where}", **params
     )
     rows = fetch_all(
         f"""
@@ -905,7 +908,9 @@ def get_active_policy(
 # --------------------------------------------------------------------------- snapshots
 @app.post("/evaluate")
 def evaluate_now(
-    principal: Annotated[Principal, Depends(require_permission("compliance:view"))],
+    # Persists new compliance states for every asset, so it is a collection
+    # operation, not a view. The daily job uses the same permission.
+    principal: Annotated[Principal, Depends(require_permission("sync:run"))],
 ) -> dict[str, Any]:
     return refresh_compliance()
 

@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 import secrets
 from datetime import timedelta
 from typing import Annotated, Any
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError

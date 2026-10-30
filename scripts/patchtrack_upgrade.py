@@ -590,7 +590,7 @@ class Upgrade:
             proxy_url=self.ctx.cfg.proxy_url,
             no_proxy=self.ctx.cfg.no_proxy,
         )
-        base.copy_application(staging_cfg)
+        base.copy_application(staging_cfg, self.ctx.source)
         user = self.ctx.manifest.service_user or "patchtrack"
         group = self.ctx.manifest.service_group or user
         base.run_command(
@@ -621,9 +621,18 @@ class Upgrade:
         base.info(f"PATCHTRACK_VERSION={self.ctx.new_version}")
 
     def build_image(self) -> None:
-        base.step("Building the new image")
-        self._compose("build")
+        base.step("Preparing the new image")
         image = f"patchtrack:{self.ctx.new_version}"
+        # An air-gapped host has no registry or PyPI access, so it upgrades
+        # from the image its operator loaded from the verified bundle. Only
+        # build when that image is genuinely absent.
+        if (
+            self.ctx.manifest.installation_mode == "airgap"
+            and base.image_exists(self.ctx.manifest.runtime, image)
+        ):
+            base.info(f"using preloaded image {image}; not rebuilding")
+            return
+        self._compose("build")
         if not base.image_exists(self.ctx.manifest.runtime, image):
             raise UpgradeError(f"image {image} was not created")
         base.info(f"image {image} is ready")
@@ -697,7 +706,10 @@ class Upgrade:
                 check=False, capture=True,
             )
         else:
-            result = self._compose("up", "-d", check=False, capture=True)
+            args = ["up", "-d"]
+            if self.ctx.manifest.installation_mode == "airgap":
+                args += ["--pull", "never"]
+            result = self._compose(*args, check=False, capture=True)
         if result.returncode != 0:
             raise UpgradeError(
                 "could not start the services: "

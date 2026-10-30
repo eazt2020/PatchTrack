@@ -357,7 +357,7 @@ rather than rejecting the request.
 | `PATCHTRACK_GF_DB_HOST/PORT/NAME` | Point at `postgres:5432` |
 | `PATCHTRACK_GF_DB_USER` | `patchtrack_grafana` |
 | `PATCHTRACK_GF_DB_PASSWORD` | The password set when creating the role |
-| `PATCHTRACK_GF_DB_SSLMODE` | `verify-full` in production |
+| `PATCHTRACK_GF_DB_SSLMODE` | `prefer` for the bundled database; `verify-full` in production with a TLS-enabled one |
 
 The datasource YAML reads these with `${…}` interpolation at container start.
 Do not edit the provisioned YAML in a running instance; provisioning overwrites

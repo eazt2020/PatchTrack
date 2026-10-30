@@ -31,7 +31,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 # The uninstaller reuses the installer's command, check and path helpers so
 # both tools agree on protected paths and runtime detection.
@@ -939,7 +939,7 @@ def summary(manifest: Manifest, options: Options, state: RuntimeState,
           f"{len(state.volumes)} volume(s)")
     if state.volumes:
         print(f"      {', '.join(state.volumes)}")
-    print(f"    Operator files        : "
+    print("    Operator files        : "
           + (f"{len(leftovers)} preserved" if leftovers else "none"))
     print("    There is no rollback: verify the summary before continuing.")
 
@@ -1053,7 +1053,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 2
 
     uninstaller = Uninstaller(manifest, options, state)
-    success = uninstaller.run()
+    uninstaller.run()
 
     print()
     print(base.colour("Post-uninstallation checks", "1;1"))

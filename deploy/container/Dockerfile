@@ -31,8 +31,13 @@ LABEL org.opencontainers.image.title="PatchTrack" \
 
 WORKDIR /opt/patchtrack
 
+# Install from the hashed lock so transitive wheels cannot drift between
+# builds. requirements.txt remains the readable list of direct pins; regenerate
+# the lock with pip-compile after changing that list (CI checks they agree).
 COPY deploy/container/requirements.txt /opt/patchtrack/requirements.txt
-RUN pip install --no-cache-dir -r /opt/patchtrack/requirements.txt
+COPY deploy/container/requirements.lock.txt /opt/patchtrack/requirements.lock.txt
+RUN pip install --no-cache-dir --require-hashes \
+        -r /opt/patchtrack/requirements.lock.txt
 
 COPY LICENSE /opt/patchtrack/LICENSE
 COPY services/common /opt/patchtrack/common

@@ -115,7 +115,10 @@ See [roles.md](roles.md) for the human-facing description.
   image does not enable server TLS by default. An external PostgreSQL service
   must use `sslmode=require` or better, with `verify-full` as the documented
   production setting. `disable` is never a supported value.
-- Grafana to PostgreSQL uses `PATCHTRACK_GF_DB_SSLMODE` (default `verify-full`).
+- Grafana to PostgreSQL uses `PATCHTRACK_GF_DB_SSLMODE`. It defaults to
+  `prefer`, like the application, because the bundled image offers no TLS; an
+  external database must use `require` or better, with `verify-full` as the
+  production setting.
 
 ### Integration TLS
 

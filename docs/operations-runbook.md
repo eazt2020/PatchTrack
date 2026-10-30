@@ -381,8 +381,9 @@ killed rather than stopped.
 | Backup job exit code | Non-zero → alert, and treat as no backup |
 | `reporting.reports` stuck in `generating` | > 1 hour → investigate |
 
-Every service exposes these signals at `/metrics` in the Prometheus text
-format (see `deploy/monitoring/README.md`):
+Every backend service exposes these signals at `/metrics` in the Prometheus
+text format (see `deploy/monitoring/README.md`). The gateway deliberately does
+not: its listener is published to operators.
 
 | Metric | Use |
 |--------|-----|

@@ -188,7 +188,7 @@ def test_duplicate_claim_is_a_skip(monkeypatch):
 
 
 def test_an_infrastructure_failure_is_not_swallowed(monkeypatch):
-    from sqlalchemy.exc import IntegrityError, OperationalError
+    from sqlalchemy.exc import OperationalError
 
     from reporting.app import scheduler
 

@@ -267,7 +267,6 @@ def _reason_labels(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def build_context(report: dict[str, Any]) -> ReportContext:
-    settings = get_settings()
     snapshot = _load_snapshot_for(report)
     groups = _snapshot_groups(str(snapshot["id"]))
     period_label = _period_label(snapshot)

@@ -895,7 +895,7 @@ def render_report(context: ReportContext) -> bytes:
         )
     else:
         story.append(
-            Paragraph(f"<b>Target met</b> for the recorded period.",
+            Paragraph("<b>Target met</b> for the recorded period.",
                       styles["body"])
         )
 

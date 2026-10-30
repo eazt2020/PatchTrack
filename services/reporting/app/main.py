@@ -4,7 +4,7 @@ schedules and the background job tick."""
 from __future__ import annotations
 
 import logging
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
 from uuid import UUID
@@ -28,7 +28,7 @@ from patchtrack_common.audit import record_audit
 from patchtrack_common.config import get_settings, release_version
 from patchtrack_common.db import connection, fetch_all, fetch_one
 from patchtrack_common.net import client_ip
-from patchtrack_common.security import Principal, PrincipalDep, require_permission
+from patchtrack_common.security import Principal, require_permission
 
 from .backups import (
     BACKUP_RETENTION_KEY,
@@ -64,7 +64,6 @@ from .service import (
     REPORT_RETENTION_MAX,
     REPORT_RETENTION_MIN,
     REPORT_TITLES,
-    ReportError,
     deliver_report,
     generate_report,
     purge_expired,

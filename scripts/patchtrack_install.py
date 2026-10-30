@@ -451,8 +451,8 @@ def bundle_preflight_checks(
                 checks.append(Check(
                     label,
                     True,
-                    f"present in the bundle" if present else
-                    f"not present in the bundle; only needed for rebuilds or native installs",
+                    "present in the bundle" if present else
+                    "not present in the bundle; only needed for rebuilds or native installs",
                     required=False,
                     warning=not present,
                     remediation=(
@@ -1826,7 +1826,7 @@ PATCHTRACK_GF_DB_PORT=5432
 PATCHTRACK_GF_DB_NAME=patchtrack
 PATCHTRACK_GF_DB_USER=patchtrack_grafana
 PATCHTRACK_GF_DB_PASSWORD=
-PATCHTRACK_GF_DB_SSLMODE=verify-full
+PATCHTRACK_GF_DB_SSLMODE=prefer
 GF_ADMIN_PASSWORD=
 GF_SERVER_ROOT_URL=http://127.0.0.1:3000
 """
@@ -1865,7 +1865,9 @@ def build_env(cfg: Config, group: str) -> str:
     )
 
 
-def copy_application(cfg: Config) -> None:
+def copy_application(cfg: Config, source: Optional[Path] = None) -> None:
+    source_tree = source or REPO_ROOT
+
     def ignore(directory: str, names: List[str]) -> set:
         ignored = set()
         for name in names:
@@ -1883,7 +1885,7 @@ def copy_application(cfg: Config) -> None:
         return ignored
 
     shutil.copytree(
-        str(REPO_ROOT), str(cfg.install_dir),
+        str(source_tree), str(cfg.install_dir),
         symlinks=True, dirs_exist_ok=True, ignore=ignore,
     )
     # The source tree may itself be a working copy. Never copy a live .env or

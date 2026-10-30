@@ -11,7 +11,6 @@ import asyncio
 import json
 import stat
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -19,7 +18,6 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import HTTPException
-from sqlalchemy import text
 from cryptography.x509.oid import NameOID
 
 import gateway.app.main as gateway_main

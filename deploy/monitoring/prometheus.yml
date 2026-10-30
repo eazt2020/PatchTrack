@@ -1,8 +1,9 @@
 # Prometheus scrape configuration for PatchTrack.
 #
-# Every service exposes /metrics on its internal port. The gateway is not used
-# as a proxy for metrics: a scraper has no user session, and the endpoint is
-# deliberately reachable only on the service network / loopback.
+# Every backend service exposes /metrics on its internal port. The gateway is
+# deliberately absent: its listener is published to operators, so it must not
+# serve an unauthenticated metrics endpoint. The backends are reachable only on
+# the service network, which is where the scraper runs.
 global:
   scrape_interval: 30s
   evaluation_interval: 30s
@@ -19,7 +20,6 @@ scrape_configs:
           - inventory:8002
           - compliance:8003
           - reporting:8004
-          - gateway:8005
         labels:
           environment: production
 

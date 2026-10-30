@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import text
 
-from inventory.app.connectors.base import AssetRecord, NormalisedFinding, PatchAssessment
+from inventory.app.connectors.base import AssetRecord, PatchAssessment
 from inventory.app.sync import match_asset, upsert_asset
 
 NOW = datetime(2026, 10, 26, 12, 0, tzinfo=UTC)

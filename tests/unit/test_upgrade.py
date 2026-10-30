@@ -156,6 +156,71 @@ def test_staging_paths_sit_beside_the_installed_tree(tmp_path):
     assert previous.name == "patchtrack.upgrade-old"
 
 
+def _upgrade_context(tmp_path, **manifest_overrides):
+    config = write_manifest(tmp_path, **manifest_overrides)
+    manifest = upgrader.manifest_reader.load_manifest(config / "install.json")
+    source = tmp_path / "release"
+    source.mkdir()
+    return SimpleNamespace(
+        manifest=manifest,
+        data={},
+        current_version="3.0.0",
+        new_version="3.1.0",
+        source=source,
+        backup_root=tmp_path / "backups",
+        staging=tmp_path / "staging",
+        previous=tmp_path / "previous",
+        probe="https://127.0.0.1:8005",
+        cfg=SimpleNamespace(proxy_url=None, no_proxy=None),
+    )
+
+
+def test_staging_copies_the_source_directory_that_was_validated(
+    tmp_path, monkeypatch,
+):
+    ctx = _upgrade_context(tmp_path)
+    upgrade = upgrader.Upgrade(ctx, backup=None)
+    copied = []
+
+    def fake_copy(cfg, source=None):
+        copied.append(source)
+        ctx.staging.mkdir()
+
+    monkeypatch.setattr(upgrader.base, "copy_application", fake_copy)
+    monkeypatch.setattr(upgrader.base, "run_command", lambda *a, **k: None)
+    monkeypatch.setattr(upgrader.os, "symlink", lambda *a, **k: None)
+
+    upgrade.stage()
+
+    # Preflight validated ctx.source; staging must not silently copy the
+    # script's own working tree instead.
+    assert copied == [ctx.source]
+
+
+def test_airgap_upgrade_uses_the_preloaded_image(tmp_path, monkeypatch):
+    ctx = _upgrade_context(tmp_path, installation_mode="airgap")
+    upgrade = upgrader.Upgrade(ctx, backup=None)
+    calls = []
+    monkeypatch.setattr(upgrader.base, "image_exists", lambda runtime, image: True)
+    monkeypatch.setattr(upgrade, "_compose", lambda *a, **k: calls.append(a))
+
+    upgrade.build_image()
+
+    assert calls == []
+
+
+def test_online_upgrade_builds_the_image(tmp_path, monkeypatch):
+    ctx = _upgrade_context(tmp_path)
+    upgrade = upgrader.Upgrade(ctx, backup=None)
+    calls = []
+    monkeypatch.setattr(upgrader.base, "image_exists", lambda runtime, image: True)
+    monkeypatch.setattr(upgrade, "_compose", lambda *a, **k: calls.append(a))
+
+    upgrade.build_image()
+
+    assert calls == [("build",)]
+
+
 def test_upgrade_help_is_safe_to_run_without_root():
     import subprocess
 

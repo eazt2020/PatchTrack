@@ -1,0 +1,12 @@
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = [".runtime", "dist", ".venv"]
+
+[tool.ruff.lint]
+# Correctness and unused-code checks only. Style is left to review; the goal
+# here is to fail CI on accidentally dead imports and undefined names.
+select = ["E", "F"]
+# Long lines carry prose and SQL in this codebase; wrapping them hurts
+# readability more than it helps.
+ignore = ["E501"]
