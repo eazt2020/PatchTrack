@@ -304,15 +304,22 @@ def test_no_verified_exceptions_section_when_nothing_is_recorded():
     assert "Verified exceptions and remediation" not in text
 
 
-def test_data_quality_timestamps_use_the_system_timezone():
+def test_data_quality_timestamps_use_the_system_timezone_without_time():
     from pypdf import PdfReader
 
-    data = render_report(context(timezone="Asia/Kuala_Lumpur"))
+    # 20:30 UTC is already the next day in Kuala Lumpur; the report shows the
+    # local date, without a clock time or zone abbreviation.
+    late = datetime(2026, 10, 25, 20, 30, tzinfo=UTC)
+    data = render_report(context(
+        timezone="Asia/Kuala_Lumpur",
+        freshness={"inventory_synced_at": late, "patch_synced_at": late},
+    ))
     text = "\n".join(
         page.extract_text() for page in PdfReader(io.BytesIO(data)).pages)
     flat = " ".join(text.split())
-    assert "Inventory last synchronised: 2026-10-26 08:30 +08" in flat
-    assert "Patch compliance last synchronised: 2026-10-26 08:30 +08" in flat
+    assert "Inventory last synchronised: 26/10/2026" in flat
+    assert "Patch compliance last synchronised: 26/10/2026" in flat
+    assert "+08" not in flat
 
 
 MARKUP = '<img src="file:///etc/passwd" onerror="alert(1)">&'

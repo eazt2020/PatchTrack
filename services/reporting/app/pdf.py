@@ -76,13 +76,13 @@ class ReportContext:
 
 
 def _generated_label(context: ReportContext) -> str:
-    """Render the generation instant in the deployment's timezone."""
+    """Render the generation date in the deployment's timezone."""
     try:
         zone = ZoneInfo(context.timezone)
     except Exception:  # noqa: BLE001 - a bad stored name must not break rendering
         zone = ZoneInfo("UTC")
     local = context.generated_at.astimezone(zone)
-    return f"{local:%Y-%m-%d %H:%M} {local.tzname() or 'UTC'}"
+    return f"{local:%d/%m/%Y}"
 
 
 def _fmt_pct(value: Any) -> str:
@@ -1215,19 +1215,23 @@ def _escape(value: str) -> str:
 
 
 def _fmt_date(value: Any) -> str:
+    """A calendar date as DD/MM/YYYY, whether it arrives as a date or a string."""
     if not value:
         return "—"
-    if hasattr(value, "isoformat"):
-        return value.isoformat()
-    return str(value)
+    if hasattr(value, "strftime"):
+        return value.strftime("%d/%m/%Y")
+    try:
+        return datetime.strptime(str(value)[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+    except ValueError:
+        return str(value)
 
 
 def _fmt_ts(value: Any, timezone: str = "UTC") -> str:
-    """An instant in the deployment timezone, with its local abbreviation.
+    """The date of an instant in the deployment timezone, as DD/MM/YYYY.
 
-    Sync and integration timestamps are stored in UTC. Printing them as UTC
-    while the rest of the report and the console use the configured zone makes
-    "last synchronised" look hours stale or in the future.
+    Sync and integration timestamps are stored in UTC. Converting them to the
+    configured zone keeps a late-evening sync on the day it happened locally;
+    the report shows dates only, so no time or zone abbreviation is printed.
     """
     if not value:
         return "never"
@@ -1241,7 +1245,7 @@ def _fmt_ts(value: Any, timezone: str = "UTC") -> str:
             from datetime import UTC
             moment = moment.replace(tzinfo=UTC)
         local = moment.astimezone(zone)
-        return f"{local:%Y-%m-%d %H:%M} {local.tzname() or 'UTC'}"
+        return f"{local:%d/%m/%Y}"
     return str(value)
 
 
