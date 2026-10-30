@@ -211,7 +211,26 @@ async def readyz() -> dict[str, Any]:
                 services[name] = "ok" if response.status_code == 200 else "unhealthy"
             except httpx.HTTPError:
                 services[name] = "unreachable"
-    state = "ready" if all(v == "ok" for v in services.values()) else "degraded"
+        # The backup worker is a container without an HTTP surface. Reporting
+        # reads its heartbeat from shared.backup_worker, so ask reporting.
+        try:
+            response = await client.get(f"{_setting('reporting')}/readyz")
+            if response.status_code == 200:
+                worker = (response.json() or {}).get("worker") or {}
+                if worker.get("available"):
+                    services["backup worker"] = "ok"
+                elif worker.get("last_seen_at"):
+                    services["backup worker"] = "stale"
+                else:
+                    # No heartbeat has ever been recorded.
+                    services["backup worker"] = "unavailable"
+            else:
+                services["backup worker"] = "unavailable"
+        except (httpx.HTTPError, ValueError):
+            services["backup worker"] = "unreachable"
+    # Overall readiness covers the application services only: a stale backup
+    # worker is shown in the console but does not make the gateway unready.
+    state = "ready" if all(services[n] == "ok" for n in SERVICE_MAP) else "degraded"
     return {"status": state, "services": services}
 
 

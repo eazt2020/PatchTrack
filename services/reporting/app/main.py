@@ -88,12 +88,14 @@ def healthz() -> dict[str, str]:
 
 
 @app.get("/readyz")
-def readyz() -> dict[str, str]:
+def readyz() -> dict[str, Any]:
     try:
         fetch_one("SELECT 1 AS ok")
     except Exception as exc:  # pragma: no cover
         raise HTTPException(status_code=503, detail="database unavailable") from exc
-    return {"status": "ready", "service": APP}
+    # The backup worker has no HTTP surface of its own; its heartbeat row is
+    # how the gateway learns whether archives are still being taken.
+    return {"status": "ready", "service": APP, "worker": worker_status()}
 
 
 def _report_view(row: dict[str, Any]) -> dict[str, Any]:
