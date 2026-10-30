@@ -315,7 +315,17 @@ select:focus, input:focus, textarea:focus {
   .topbar .btn-sm { padding: 5px 8px; font-size: 11.5px; }
   .content { padding: 12px 10px 36px; }
   .card { padding: 12px 12px 14px; }
-  .stat-value { font-size: 30px; }
+  /* Keep the KPI rows two-up on phones: five stacked tiles pushed the useful
+     parts of the dashboard thousands of pixels down the page. */
+  .grid-kpi, .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  /* An odd final tile (the dashboard's target tile) takes the whole row
+     rather than leaving a conspicuous empty half. */
+  .grid-kpi > :last-child:nth-child(odd) { grid-column: 1 / -1; }
+  .stat { min-height: 0; gap: 6px; }
+  .stat-value { font-size: 26px; }
+  .stat-value.sm { font-size: 22px; }
+  .stat-label { font-size: 11px; }
+  .stat-foot { font-size: 11px; }
 }
 
 .card {
@@ -411,7 +421,17 @@ select:focus, input:focus, textarea:focus {
 .tooltip .tt-row { display: flex; justify-content: space-between; gap: 14px; }
 
 /* ------------------------------------------------------------------ tables */
+.table-frame { position: relative; }
 .table-wrap { overflow-x: auto; margin: 0 -4px; -webkit-overflow-scrolling: touch; }
+.table-wrap:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* A sideways-scrolling table says so: without this, clipped columns looked
+   like data that was simply missing. Hidden once the reader reaches the end. */
+.table-scroll-hint {
+  display: block; visibility: hidden;
+  padding: 3px 4px 0; text-align: right;
+  color: var(--text-muted); font-size: 11px; letter-spacing: .2px;
+}
+.table-frame.scrollable:not(.at-end) .table-scroll-hint { visibility: visible; }
 .table-tools { display: flex; justify-content: flex-end; padding: 0 4px 6px; }
 table.data {
   width: 100%; border-collapse: collapse; font-size: 12.8px;

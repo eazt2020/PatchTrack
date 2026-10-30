@@ -295,7 +295,34 @@ export function table(columns, rows, options = {}) {
   }
   wrap.appendChild(
     h("table", { class: `data ${options.compact ? "compact" : ""}`.trim() }, thead, tbody));
-  return wrap;
+
+  // Tables can be wider than a phone or a narrow pane. Say so rather than
+  // clipping columns silently, and let keyboard users scroll the region.
+  const frame = h("div", { class: "table-frame" },
+    wrap,
+    h("span", { class: "table-scroll-hint", "aria-hidden": "true" }, "Scroll →"));
+  const syncScrollState = () => {
+    const overflow = wrap.scrollWidth - wrap.clientWidth;
+    const scrollable = overflow > 1;
+    const atEnd = wrap.scrollLeft >= overflow - 1;
+    frame.classList.toggle("scrollable", scrollable);
+    frame.classList.toggle("at-end", atEnd);
+    if (scrollable) {
+      wrap.tabIndex = 0;
+      wrap.setAttribute("role", "region");
+      wrap.setAttribute("aria-label", options.tableLabel || "Table");
+    } else {
+      wrap.removeAttribute("tabindex");
+      wrap.removeAttribute("role");
+      wrap.removeAttribute("aria-label");
+    }
+  };
+  wrap.addEventListener("scroll", syncScrollState, { passive: true });
+  if (typeof ResizeObserver === "function") {
+    new ResizeObserver(syncScrollState).observe(wrap);
+  }
+  requestAnimationFrame(syncScrollState);
+  return frame;
 }
 
 export function select({ label, value, options, onChange, allLabel = "All" }) {
@@ -337,10 +364,21 @@ export function select({ label, value, options, onChange, allLabel = "All" }) {
  */
 export function modal(title, content, actions, { dismissible = true } = {}) {
   const root = document.getElementById("modal-root");
-  const close = () => { root.innerHTML = ""; };
-  const dialog = h("div", { class: "modal", role: "dialog", "aria-modal": "true" },
+  const previousFocus = document.activeElement;
+  const titleId = `modal-title-${Math.random().toString(36).slice(2, 9)}`;
+  const close = () => {
+    root.innerHTML = "";
+    // Return the reader to the control that opened the dialog.
+    if (previousFocus instanceof HTMLElement) {
+      previousFocus.focus({ preventScroll: true });
+    }
+  };
+  const dialog = h("div", {
+    class: "modal", role: "dialog", "aria-modal": "true",
+    "aria-labelledby": titleId, tabindex: "-1",
+  },
     h("div", { class: "row between" },
-      h("h2", {}, title),
+      h("h2", { id: titleId }, title),
       dismissible
         ? h("button", { class: "btn btn-sm", onclick: close, "aria-label": "Close" }, "Close")
         : null),
@@ -354,8 +392,46 @@ export function modal(title, content, actions, { dismissible = true } = {}) {
       if (dismissible && event.target === backdrop) close();
     },
   }, dialog);
+  const focusable = () => Array.from(dialog.querySelectorAll(
+    "a[href], button:not([disabled]), input:not([disabled]), " +
+    "select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])"
+  )).filter((element) => element.getClientRects().length > 0);
+
+  dialog.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      // A forced dialog is the only route forward; swallowing Escape is
+      // friendlier than letting it fall through to the kiosk toggle.
+      event.preventDefault();
+      event.stopPropagation();
+      if (dismissible) close();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const items = focusable();
+    if (items.length === 0) {
+      event.preventDefault();
+      dialog.focus();
+      return;
+    }
+    const first = items[0];
+    const last = items[items.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+
   root.innerHTML = "";
   root.appendChild(backdrop);
+  // Land on the first input so the dialog can be completed from the keyboard;
+  // a content-only dialog focuses itself.
+  const target = dialog.querySelector(
+    "input:not([disabled]), select:not([disabled]), textarea:not([disabled])")
+    || focusable()[0] || dialog;
+  requestAnimationFrame(() => target.focus());
   return close;
 }
 

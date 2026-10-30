@@ -17,6 +17,26 @@ import {
   statTile, table, toMonthInput,
 } from "/static/ui.js";
 
+/* Source names are long ("Red Hat Enterprise Linux"), and the inventory table
+ * has enough columns that the full string wrapped over three lines. Show the
+ * familiar short name and keep the source value in the tooltip. */
+const OS_SHORT_NAMES = [
+  [/^Red Hat Enterprise Linux\b/i, "RHEL"],
+  [/^Microsoft Windows Server\b/i, "Windows Server"],
+  [/^SUSE Linux Enterprise Server\b/i, "SLES"],
+  [/^Oracle Solaris\b/i, "Solaris"],
+];
+
+function osCell(row) {
+  const name = String(row.os_name || "").trim();
+  const version = String(row.os_version || "").trim();
+  const full = `${name} ${version}`.trim();
+  const shortName = OS_SHORT_NAMES.reduce(
+    (value, [pattern, short]) => value.replace(pattern, short), name);
+  return h("span", { title: full },
+    `${shortName} ${version}`.trim() || "—");
+}
+
 const BASIS_CHOICES = [
   { value: "monthly", label: "Monthly" },
   { value: "quarterly", label: "Quarterly" },
@@ -1273,7 +1293,7 @@ async function renderServers(params) {
       href: "#", onclick: (e) => { e.preventDefault(); openServer(r.id); },
     }, r.hostname) },
     { label: "IP address", key: "ip_address", mono: true },
-    { label: "Operating system", render: (r) => `${r.os_name} ${r.os_version}`.trim() },
+    { label: "Operating system", render: osCell },
     { label: "Environment", key: "environment" },
     { label: "Business service", key: "business_group" },
     { label: "Status", render: (r) => statePill(r.state) },
@@ -2043,7 +2063,7 @@ async function renderInventory(params) {
           }, r.hostname) },
           { label: "Asset ID", key: "assetexplorer_id", mono: true },
           { label: "IP address", key: "ip_address", mono: true },
-          { label: "OS", render: (r) => `${r.os_name} ${r.os_version}`.trim() },
+          { label: "OS", render: osCell },
           { label: "Environment", render: (r) => placementCell(r, "environment") },
           { label: "Business service", render: (r) => placementCell(r, "business_group") },
           { label: "Lifecycle", key: "lifecycle_status" },
