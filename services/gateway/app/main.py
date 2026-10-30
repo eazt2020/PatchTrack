@@ -204,30 +204,40 @@ def version() -> dict[str, str]:
 @app.get("/readyz")
 async def readyz() -> dict[str, Any]:
     services: dict[str, str] = {}
+    database = "unknown"
+    worker: dict[str, Any] | None = None
     async with httpx.AsyncClient(timeout=3.0) as client:
         for name in SERVICE_MAP:
             try:
-                response = await client.get(f"{_setting(name)}/healthz")
+                # Readiness, not liveness: /readyz checks the database query,
+                # so an outage is visible here instead of every row staying ok.
+                response = await client.get(f"{_setting(name)}/readyz")
                 services[name] = "ok" if response.status_code == 200 else "unhealthy"
-            except httpx.HTTPError:
+                if name == "reporting":
+                    if response.status_code == 200:
+                        database = "ok"
+                        worker = (response.json() or {}).get("worker") or {}
+                    elif response.status_code == 503:
+                        database = "unavailable"
+            except (httpx.HTTPError, ValueError):
                 services[name] = "unreachable"
-        # The backup worker is a container without an HTTP surface. Reporting
-        # reads its heartbeat from shared.backup_worker, so ask reporting.
-        try:
-            response = await client.get(f"{_setting('reporting')}/readyz")
-            if response.status_code == 200:
-                worker = (response.json() or {}).get("worker") or {}
-                if worker.get("available"):
-                    services["backup worker"] = "ok"
-                elif worker.get("last_seen_at"):
-                    services["backup worker"] = "stale"
-                else:
-                    # No heartbeat has ever been recorded.
-                    services["backup worker"] = "unavailable"
-            else:
-                services["backup worker"] = "unavailable"
-        except (httpx.HTTPError, ValueError):
-            services["backup worker"] = "unreachable"
+    # The database has no HTTP interface and only reporting is asked for it;
+    # the other services would all fail with it anyway.
+    services["database"] = database
+    # The backup worker is a container without an HTTP surface. Reporting
+    # reads its heartbeat from shared.backup_worker, so ask reporting.
+    if worker is not None:
+        if worker.get("available"):
+            services["backup worker"] = "ok"
+        elif worker.get("last_seen_at"):
+            services["backup worker"] = "stale"
+        else:
+            # No heartbeat has ever been recorded.
+            services["backup worker"] = "unavailable"
+    elif database == "unavailable":
+        services["backup worker"] = "unavailable"
+    else:
+        services["backup worker"] = "unreachable"
     # Overall readiness covers the application services only: a stale backup
     # worker is shown in the console but does not make the gateway unready.
     state = "ready" if all(services[n] == "ok" for n in SERVICE_MAP) else "degraded"
