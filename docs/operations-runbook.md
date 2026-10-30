@@ -355,7 +355,6 @@ defect and report it.
 cd /opt/patchtrack
 docker compose restart gateway            # after a config change to the gateway only
 docker compose up -d --force-recreate     # after changing .env
-docker compose stop grafana               # safe at any time
 ```
 
 Maintenance that requires downtime: schema migrations, a database restore, and

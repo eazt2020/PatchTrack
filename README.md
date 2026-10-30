@@ -60,8 +60,6 @@ reported and without the next sync undoing it.
 - **Operations** — on install, one `patchtrack.service` systemd unit is
   enabled; `systemctl start|stop|restart patchtrack` is the normal start and
   stop procedure, and `journalctl -u patchtrack` shows the application log.
-  Grafana dashboards are optional; the application, API and reports work with
-  Grafana stopped.
 
 ## What is in this repository
 
@@ -77,13 +75,12 @@ reported and without the next sync undoing it.
 | `services/reporting` | PDF generation, schedules, email delivery (8004) |
 | `services/gateway` | Web UI, session/CSRF handling, API fan-out and TLS termination (8005) |
 | `services/common` | Config, file-backed secrets, database and scheduler helpers, security, TLS, migrations |
-| `deploy/postgres` | SQL migrations and the Grafana read-only role |
+| `deploy/postgres` | SQL migrations |
 | `deploy/backup` | Data-archive worker run in the PostgreSQL container |
 | `deploy/container` | Service image, entrypoint and pinned requirements |
 | `docker-compose.secrets.yml` | Opt-in Compose override for file-backed bootstrap secrets |
-| `deploy/grafana` | Provisioned datasource and dashboard |
 | `deploy/systemd` | Compose systemd service and native (non-container) units |
-| `scripts` | HTTPS development launcher, demo data, dashboard generator, manual job runner |
+| `scripts` | HTTPS development launcher, demo data, manual job runner |
 | `tests` | Unit tests, database integration tests, browser smoke test |
 | `docs` | Requirements, design, operations and user documentation |
 
@@ -222,9 +219,6 @@ It mounts the database URL, JWT secret, service token and PostgreSQL password
 from `/etc/patchtrack/secrets/`; see
 [secret files](docs/security.md#secret-files) for the layout and the systemd
 equivalent.
-
-Grafana is an optional profile (`--profile dashboards`). The application,
-API and reports work with Grafana stopped.
 
 ## Documentation
 

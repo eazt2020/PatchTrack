@@ -4,8 +4,7 @@
 #   docker compose up -d --build
 #
 # Everything stateful is on a named volume, so a container can be replaced
-# without losing data. Grafana is optional: the application and its API work
-# when the grafana service is stopped or fails to start.
+# without losing data.
 #
 # SELinux: the :Z suffix on the report and inbox bind mounts relabels them for
 # the container. Do not disable SELinux. On hosts where the docker daemon is
@@ -257,40 +256,10 @@ services:
         max-size: "20m"
         max-file: "5"
 
-  grafana:
-    # Grafana 13 is the current supported line; 10.2 is end-of-life.
-    image: ${GRAFANA_IMAGE:-docker.io/grafana/grafana-oss:13.0.2}
-    restart: unless-stopped
-    profiles: ["dashboards"]
-    environment:
-      GF_SECURITY_ADMIN_PASSWORD: ${GF_ADMIN_PASSWORD}
-      GF_SERVER_ROOT_URL: ${GF_SERVER_ROOT_URL:-http://127.0.0.1:3000}
-      GF_USERS_ALLOW_SIGN_UP: "false"
-      GF_ANALYTICS_REPORTING_ENABLED: "false"
-      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
-      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
-      GF_INSTALL_PLUGINS: ""
-      PATCHTRACK_GF_DB_HOST: ${PATCHTRACK_GF_DB_HOST}
-      PATCHTRACK_GF_DB_PORT: ${PATCHTRACK_GF_DB_PORT}
-      PATCHTRACK_GF_DB_NAME: ${PATCHTRACK_GF_DB_NAME}
-      PATCHTRACK_GF_DB_USER: ${PATCHTRACK_GF_DB_USER}
-      PATCHTRACK_GF_DB_PASSWORD: ${PATCHTRACK_GF_DB_PASSWORD}
-      PATCHTRACK_GF_DB_SSLMODE: ${PATCHTRACK_GF_DB_SSLMODE}
-    volumes:
-      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro,Z
-      - ./deploy/grafana/dashboards:/etc/grafana/dashboards:ro,Z
-      - grafana-data:/var/lib/grafana:Z
-    ports:
-      - "${PATCHTRACK_BIND_ADDRESS:-127.0.0.1}:${PATCHTRACK_GRAFANA_PORT:-3000}:3000"
-    depends_on:
-      postgres:
-        condition: service_healthy
-
 volumes:
   pgdata:
   reports:
   backups:
   solaris-inbox:
-  grafana-data:
   prometheus-data:
   tls:

@@ -114,9 +114,6 @@ deployment uses file-backed secrets, as the installer does.
    docker compose stop gateway identity inventory compliance reporting backup
    ```
 
-   Stop Grafana as well if that profile is running; nothing else should hold a
-   connection to the database.
-
 2. **Restore into a new database.** Do not use `--clean` here: the target is a
    fresh database, and the dump creates every schema and object.
 
@@ -223,7 +220,6 @@ deployment uses file-backed secrets, as the installer does.
 | `reports` volume | Archived PDF bytes (the metadata and digests are in the database) | Daily, or after each report run |
 | `/etc/patchtrack/.env` | Secrets, database URL | On change, to the secret store |
 | Credential files | `/etc/patchtrack/secrets/*` | On change, to the secret store |
-| Grafana volume | Grafana's own sqlite (dashboards are provisioned from code, so this is mostly user preferences) | Weekly, or skip |
 
 The **audit trail is the record of who did what** and is append-only; treat the
 database backup as a legal record and apply the organisation's retention

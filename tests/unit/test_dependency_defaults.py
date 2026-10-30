@@ -37,10 +37,11 @@ def test_postgres_13_is_not_a_documented_default():
     assert "library/postgres:13" not in COMPOSE
 
 
-def test_grafana_default_is_current_and_pinned():
-    image = _image(COMPOSE[COMPOSE.index("  grafana:"):])
-    assert _major(image) >= 12
-    assert not image.endswith(":latest")
+def test_the_deployment_does_not_ship_grafana():
+    """Grafana is not part of PatchTrack; the SPA is the only dashboard."""
+    assert "grafana:" not in COMPOSE
+    assert "grafana-data" not in COMPOSE
+    assert not (ROOT / "deploy" / "grafana").exists()
 
 
 def test_python_base_image_is_pinned():

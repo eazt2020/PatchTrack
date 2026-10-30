@@ -2,8 +2,8 @@
 
 The rule under test: AssetExplorer remains the authority for the values it
 supplies. An operator override is stored beside the source value, survives the
-next collection, and is what every reader (inventory, compliance, reports,
-Grafana) sees. Clearing it returns the source value without another sync.
+next collection, and is what every reader (inventory, compliance and reports)
+sees. Clearing it returns the source value without another sync.
 """
 
 from __future__ import annotations

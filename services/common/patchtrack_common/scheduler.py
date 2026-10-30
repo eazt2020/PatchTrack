@@ -24,6 +24,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Callable, Iterable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -390,5 +391,20 @@ def install(app: Any, jobs: Iterable[ScheduledJob]) -> None:
         startup_delay_seconds=settings.scheduler_startup_delay_seconds,
     )
     app.state.patchtrack_scheduler = scheduler
-    app.add_event_handler("startup", scheduler.start)
-    app.add_event_handler("shutdown", scheduler.stop)
+
+    # Compose the scheduler into the application's lifespan. Starlette 1.0
+    # removed the per-event ``add_event_handler`` API, and FastAPI's
+    # ``on_event`` is deprecated; wrapping the existing lifespan works with
+    # both, and preserves any lifespan FastAPI installed itself.
+    previous = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def _lifespan(app_: Any):
+        async with previous(app_):
+            await scheduler.start()
+            try:
+                yield
+            finally:
+                await scheduler.stop()
+
+    app.router.lifespan_context = _lifespan

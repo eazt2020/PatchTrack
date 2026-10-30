@@ -11,7 +11,6 @@ removable media and verified before use.
 | `patchtrack-app-3.0.3.tar` | The built service image (`docker save`) |
 | `ubi9-python-312.tar` | Base image, if not already present on the target |
 | `postgres-17.tar` | PostgreSQL image |
-| `grafana-oss-13.0.2.tar` | Optional dashboard image |
 | `patchtrack-wheels/` | Python wheels for native installation |
 | `SHA256SUMS` | Digest of every file above |
 
@@ -39,9 +38,6 @@ docker save registry.access.redhat.com/ubi9/python-312:1-1762230134 -o "$OUT/ubi
 
 docker pull docker.io/library/postgres:17
 docker save docker.io/library/postgres:17 -o "$OUT/postgres-17.tar"
-
-docker pull docker.io/grafana/grafana-oss:13.0.2
-docker save docker.io/grafana/grafana-oss:13.0.2 -o "$OUT/grafana-oss-13.0.2.tar"
 
 # Source + wheels for a native fallback
 # Builds a verified archive that contains no .env, keys or runtime state.
@@ -81,8 +77,7 @@ Every line must read `OK`. Do not proceed on a mismatch; re-transfer.
 docker load -i patchtrack-app-3.0.3.tar
 docker load -i ubi9-python-312.tar
 docker load -i postgres-17.tar
-docker load -i grafana-oss-13.0.2.tar
-docker images | grep -E 'patchtrack|postgres|grafana'
+docker images | grep -E 'patchtrack|postgres'
 ```
 
 ## 5. Configure compose to use the local images

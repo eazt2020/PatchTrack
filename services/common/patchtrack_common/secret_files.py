@@ -8,8 +8,8 @@ any of the supported variables at a file instead::
 
 The file is read once at start-up. Its content, with a trailing newline
 removed, becomes the setting. The ``_FILE`` variable takes precedence over the
-plain variable, matching the convention used by the PostgreSQL and Grafana
-images; the plain variable remains supported as a fallback.
+plain variable, matching the convention used by the PostgreSQL image; the
+plain variable remains supported as a fallback.
 
 This module only moves where the secret is stored. The file still has to be
 protected (mode 0600, owned by the service account) and, for encryption at

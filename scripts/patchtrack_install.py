@@ -71,7 +71,6 @@ AIRGAP_SUMS = "SHA256SUMS"
 AIRGAP_POSTGRES_IMAGE = "docker.io/library/postgres:17"
 AIRGAP_BASE_ARCHIVE = "ubi9-python-312.tar"
 AIRGAP_POSTGRES_ARCHIVE = "postgres-17.tar"
-AIRGAP_GRAFANA_ARCHIVE = "grafana-oss-13.0.2.tar"
 
 # Directories the installer must never remove as a whole, even if a malformed
 # rollback record somehow names one of them.
@@ -338,7 +337,6 @@ def bundle_archives(version: str) -> dict:
         "app": f"patchtrack-app-{version}.tar",
         "base": AIRGAP_BASE_ARCHIVE,
         "postgres": AIRGAP_POSTGRES_ARCHIVE,
-        "grafana": AIRGAP_GRAFANA_ARCHIVE,
     }
 
 
@@ -443,7 +441,6 @@ def bundle_preflight_checks(
                 ))
             for label, name in (
                 ("pinned base image", archives["base"]),
-                ("Grafana", archives["grafana"]),
                 ("source archive", f"patchtrack-{cfg.version}.tar.gz"),
                 ("Python wheels", "patchtrack-wheels"),
             ):
@@ -1818,18 +1815,7 @@ PATCHTRACK_SOLARIS_INBOX=/var/lib/patchtrack/solaris-inbox
 
 PATCHTRACK_FORWARDED_IPS=127.0.0.1
 PATCHTRACK_INTERNAL_FORWARDED_IPS=172.16.0.0/12
-{proxy_block}
-# Grafana is optional and is not started by the installer. Set these and create
-# the read-only role before enabling the dashboards profile.
-PATCHTRACK_GF_DB_HOST=postgres
-PATCHTRACK_GF_DB_PORT=5432
-PATCHTRACK_GF_DB_NAME=patchtrack
-PATCHTRACK_GF_DB_USER=patchtrack_grafana
-PATCHTRACK_GF_DB_PASSWORD=
-PATCHTRACK_GF_DB_SSLMODE=prefer
-GF_ADMIN_PASSWORD=
-GF_SERVER_ROOT_URL=http://127.0.0.1:3000
-"""
+{proxy_block}"""
 
 
 def env_proxy_block(cfg: Config) -> str:

@@ -35,7 +35,6 @@ Exit criterion was: sign in on a fresh database and reach every route. Met.
 | Schedules, idempotent execution, delivery isolation | Done; SMTP configurable and testable in Settings, live relay still deployment-verified |
 | Retention purge | Done |
 | Executive dashboard (vanilla SPA) | Done; smoke-tested in a browser |
-| Provisioned Grafana dashboard and read-only role | Done; role script awaits operator execution |
 | Numerical agreement between API, dashboard and PDF | Verified |
 
 ## Phase 4 — Hardening and delivery (complete)
@@ -54,14 +53,13 @@ Exit criterion was: sign in on a fresh database and reach every route. Met.
 |---|------|-------|-----------|
 | 1 | Verify each connector against a live source system; adjust `extra.field_map` | Deployment engineer | Yes |
 | 2 | Build and run the Compose stack with **Docker Engine** on RHEL 9.8 / Rocky 9.8 with SELinux enforcing (the same stack runs under Podman on this host) | Deployment engineer | Yes |
-| 3 | Run `deploy/postgres/roles/010_grafana_readonly.sql` on the target to create `patchtrack_grafana` with its own generated password (the grants are exercised on the build host; the password is per-deployment) | Deployment engineer | Only for the dashboard |
-| 4 | Run the two native systemd units on the target host (written and syntax-verified, never started here); scheduled work is in-app and needs no unit | Deployment engineer | Only for native install |
-| 5 | Configure SMTP and test a delivery plus a forced failure | Operations | No |
-| 6 | Confirm the in-app scheduled jobs advance `shared.scheduled_jobs` and appear in the audit trail | Operations | Yes |
-| 7 | Take a backup, restore it to a scratch host, and verify the digests | Operations | Yes |
-| 8 | Run the first full month, and compare the first report against the manual process | Compliance | Yes |
-| 9 | Measure collection run times at production scale; tune timeouts and page sizes | Operations | No |
-| 10 | Review a generated PDF visually | Compliance | Yes |
+| 3 | Run the two native systemd units on the target host (written and syntax-verified, never started here); scheduled work is in-app and needs no unit | Deployment engineer | Only for native install |
+| 4 | Configure SMTP and test a delivery plus a forced failure | Operations | No |
+| 5 | Confirm the in-app scheduled jobs advance `shared.scheduled_jobs` and appear in the audit trail | Operations | Yes |
+| 6 | Take a backup, restore it to a scratch host, and verify the digests | Operations | Yes |
+| 7 | Run the first full month, and compare the first report against the manual process | Compliance | Yes |
+| 8 | Measure collection run times at production scale; tune timeouts and page sizes | Operations | No |
+| 9 | Review a generated PDF visually | Compliance | Yes |
 
 ## Phase 6 — Next release candidates
 

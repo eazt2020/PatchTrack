@@ -22,7 +22,6 @@ check that verifies it. Status meanings:
 | BR-7 Immutable history | `evaluator.create_snapshot`; `snapshots_daily_unique_idx`; no update path | `test_reconciliation.py` audit immutability; schema review | Implemented, procedure-verified |
 | BR-8 Reporting + digest | `reporting/app/pdf.py`, `service.generate_report` | `test_report_pdf.py` (valid, digest, truncation, empty) | Implemented + tested (layout not asserted) |
 | BR-9 Delivery isolation | `reporting/app/mailer.py`, `service.deliver_report`, `reporting.delivery_attempts` | Code review; SMTP path not exercised | Implemented, environment-dependent |
-| BR-10 Dashboard | `gateway/static/*`; `deploy/grafana/*` | `tests/ui/smoke.py`; dashboard verification procedure | Implemented, procedure-verified |
 | BR-11 Roles | `patchtrack_common/security.py`; `require_permission` on every route | `test_security.py` | Implemented + tested |
 | BR-12 Audit | `patchtrack_common/audit.py`; `shared.audit_events` + trigger; configurable retention in `shared.app_settings` | `test_reconciliation.py` append-only test; `test_audit_retention.py` for the window, purge and range guard | Implemented + tested |
 | BR-13 Integrations explicit | migration 006 (disabled rows); `inventory /integrations` | Schema review; `test_secrets.py` | Implemented + tested |
@@ -57,7 +56,7 @@ check that verifies it. Status meanings:
 | FR-F1..F14 evaluation | same | 14/14 | F13 pinned by `test_period_parity.py` |
 | FR-G1..G5 snapshots | same | 5/5 | G1 idempotency via partial unique index |
 | FR-H1..H14 reporting | same | 14/14 | H10 pinned by `test_scheduler.py` |
-| FR-I1..I13 dashboard/API | same | 13/13 | I5 verified by stopping Grafana; I8/I9/I10 exercised in the browser smoke test; I11 pinned by `test_dashboard_breakdown.py`; I12 pinned by `test_period_keys.py` and `test_dashboard_periods.py`; I13 CSV export covered by the smoke test |
+| FR-I1..I13 dashboard/API | same | 10/10 | I8/I9/I10 exercised in the browser smoke test; I11 pinned by `test_dashboard_breakdown.py`; I12 pinned by `test_period_keys.py` and `test_dashboard_periods.py`; I13 CSV export covered by the smoke test |
 | FR-J1..J5 audit | same | 5/5 | J1 enforced by a trigger (retention purge only); J5 pinned by `test_audit_retention.py` |
 | FR-K1..K5 operations | same | 4/5 | K5 offline bundle documented; the bundling script itself is operator-authored (§ below) |
 
@@ -81,5 +80,4 @@ check that verifies it. Status meanings:
 | OIDC sign-in absent | Enterprise identity integration requires code | Product owner, next release |
 | No MFA | Password-only sign-in | Product owner, next release |
 | Dashboard exporter absent | Monitoring is query-based, not Prometheus | Operations |
-| `patchtrack_grafana` password is per-deployment | The role was created and its grants exercised on the build host, but the password is generated at install time and never shipped; the target runs `010_grafana_readonly.sql` itself | Deployment engineer, on the target |
 | No performance measurement at scale | Sizing guidance is an estimate | Operations, during first production month |

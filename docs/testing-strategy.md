@@ -10,8 +10,7 @@ pytest tests.
 | Unit tests | `tests/unit/` | Nothing but Python | 481 |
 | Database integration tests | `tests/integration/` | PostgreSQL | 145 |
 | Browser smoke test | `tests/ui/smoke.py` | Playwright + Chromium + a running stack | 1 script, 14 routes |
-| Dashboard verification | manual procedure (§7) | Grafana + PostgreSQL | 15 panels |
-| Deployment verification | manual procedure (§8) | Docker + RHEL/Rocky 9 | full stack |
+| Deployment verification | manual procedure (§7) | Docker + RHEL/Rocky 9 | full stack |
 
 Run:
 
@@ -99,7 +98,7 @@ Covered:
 - alias retention across renames;
 - conflict raised when a source identifier moves to a different asset;
 - no conflict on an identical re-sync (this test found the `inet::text` `/32`
-  bug — see §9);
+  bug — see §8);
 - match by source link, FQDN, hostname and IP;
 - unmatched record produces no assessment;
 - ambiguous match is refused rather than guessed;
@@ -393,7 +392,7 @@ delivery path now has its own tests.
     labels the families RHEL, Microsoft Windows, Solaris and Other.
 19. **A Settings rename never reached the inventory or the dashboard.** The
     list changed, but every server kept the old spelling, so the inventory,
-    filters, panels, engine, reports and Grafana disagreed with Settings — and
+    filters, panels, engine and reports disagreed with Settings — and
     the next sync would have restored the old value anyway had it been written
     through. Renames now record the old spelling in
     `inventory.placement_aliases` and `inventory.asset_effective` resolves it on
@@ -415,7 +414,6 @@ delivery path now has its own tests.
 | Real AssetExplorer / Satellite / SCCM field names | **Unverified.** The mapping is configuration-driven precisely because the installation's field names are unknown. See the verification checklist in each integration document. |
 | Email delivery | **Not tested against a real SMTP server.** `send_report_email` returns `skipped` when unconfigured; the failure path is exercised only by inspection. |
 | PDF visual layout | **Not asserted.** Tests check validity, size, EOF and digest, not whether a table overflows. Review a generated report visually after any change to `pdf.py`. |
-| Grafana provisioning | **Verified by procedure (§7), not automated.** |
 | Docker Engine topology | **Executed under Podman 5.8.2, not Docker Engine.** The same compose file brought the stack up end to end; Docker's own label and health-check handling should be confirmed on the target. |
 | SELinux enforcing | **Exercised with Podman on an enforcing host** (`:Z` mounts worked without `setenforce`), not with the Docker daemon's relabelling. |
 | Performance at scale | **Not measured.** Estimates are in [architecture.md](architecture.md) and each integration document. |
@@ -423,35 +421,7 @@ delivery path now has its own tests.
 These gaps are the reason [install.md](install.md) includes a verification
 step and each integration document ends with a checklist.
 
-## 7. Dashboard verification procedure
-
-Run after any change to `scripts/gen-grafana-dashboard.py` or the datasource.
-
-1. Regenerate:
-   ```bash
-   /opt/patchtrack-venv/bin/python -I scripts/gen-grafana-dashboard.py
-   ```
-   (Run with `-I` so the generated JSON is read with no local imports on the
-   path.)
-2. Validate every query against PostgreSQL in both the "All" and a filtered
-   form: 15 distinct queries × 2 variants = 30 variants. Each must `PREPARE`
-   without error.
-3. Execute every panel through Grafana's own `/api/ds/query` and confirm
-   `status: OK`.
-4. Render the dashboard in a browser and check for label collisions and
-   categorical axes that got reformatted as numbers.
-5. Compare three figures — in-scope count, compliant count, percentage —
-   against `/api/compliance/summary`. They must be identical.
-
-A quick manual spot check of agreement:
-
-```bash
-curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8003/summary | jq .kpis
-psql -c "SELECT compliant_servers, total_servers, compliance_pct
-         FROM compliance.snapshots ORDER BY captured_at DESC LIMIT 1"
-```
-
-## 8. Deployment verification on RHEL 9.8 / Rocky 9.8
+## 7. Deployment verification on RHEL 9.8 / Rocky 9.8
 
 | Step | Pass condition |
 |------|----------------|
@@ -459,13 +429,12 @@ psql -c "SELECT compliant_servers, total_servers, compliance_pct
 | `docker compose up -d` | postgres healthy, migrate exits 0, five services healthy |
 | `/readyz` on each port | 200 |
 | Sign in | Succeeds; bootstrap form gone |
-| `docker compose stop grafana` | Application unaffected |
 | Generate a report | `completed`, download digest matches |
 | `ausearch -m avc -ts recent` | No denials for the containers |
 | Reboot the host, `docker compose up -d` | Everything returns healthy; snapshots and schedules intact |
 | `sha256sum` of a report before and after restart | Unchanged |
 
-## 9. Adding a test
+## 8. Adding a test
 
 - A change to a published compliance figure requires a change to
   `test_engine.py`. If it does not, the change is either untested or
@@ -477,7 +446,7 @@ psql -c "SELECT compliant_servers, total_servers, compliance_pct
 - Prefer asserting the *reason* text as well as the state for engine tests: the
   reason is what an auditor reads.
 
-## 10. Continuous integration
+## 9. Continuous integration
 
 A suitable CI job:
 

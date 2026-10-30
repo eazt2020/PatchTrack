@@ -138,7 +138,6 @@ defect.
 | `n/a` | Population is empty — no assets synced, or all filtered out |
 | Dropped suddenly | A source stopped collecting; check freshness and integration health |
 | Doesn't match the PDF | You are comparing different periods, or a policy change happened between them |
-| Doesn't match Grafana | Grafana is filtered differently (check the template variables) |
 
 Verify the arithmetic directly:
 
@@ -269,35 +268,6 @@ external host. Do not add a wildcard.
 The console will show a script error. The CSP forbids inline scripts; a
 modified page that injects one will be blocked. Revert the customisation.
 
-## Grafana problems
-
-### `password authentication failed for user "patchtrack_grafana"`
-
-The role was never created, or the password in `.env` differs from the one
-used at creation. Re-run the role script with the current password —
-it rotates the password in place:
-
-```bash
-docker compose exec -T postgres psql -v ON_ERROR_STOP=1 \
-  -v grafana_password="$PATCHTRACK_GF_DB_PASSWORD" -U patchtrack -d patchtrack \
-  < deploy/postgres/roles/010_grafana_readonly.sql
-```
-
-### Dashboard shows "No data" everywhere
-
-- Template variables: an "All" selection depends on the `__all__` sentinel. If
-  someone edited the dashboard, restore it from
-  `deploy/grafana/dashboards/patchtrack-overview.json` — it is provisioned and
-  UI edits are discarded.
-- The datasource may point at the wrong database. Check
-  `deploy/grafana/provisioning/datasources/patchtrack.yaml` and the
-  `PATCHTRACK_GF_DB_*` variables.
-
-### Grafana is down — is the application affected?
-
-No. Stop Grafana at any time; the application, API, reports and schedules are
-independent.
-
 ## Database problems
 
 ### Too many connections
@@ -306,7 +276,7 @@ independent.
 SELECT usename, count(*) FROM pg_stat_activity GROUP BY 1 ORDER BY 2 DESC;
 ```
 
-Five services at pool 5 + overflow 5 plus Grafana can approach PostgreSQL's
+Five services at pool 5 + overflow 5 plus psql can approach PostgreSQL's
 default 100. Lower `PATCHTRACK_DB_POOL_MAX_OVERFLOW` or raise
 `max_connections`.
 

@@ -111,12 +111,6 @@ a different result for the same period.
 Reports can be emailed to a configured recipient list. Delivery failure is
 recorded separately and never invalidates a successfully generated report.
 
-### BR-10 Dashboard
-
-A Grafana dashboard presents the current position and historical trend, using
-the same definitions as the API and the reports. The core application must
-remain fully functional when Grafana is unavailable.
-
 ### BR-11 Roles
 
 Four roles — Viewer, Operations, Report Manager, Administrator — are enforced
@@ -179,11 +173,9 @@ The release is accepted when:
 
 1. A fresh installation on Rocky 9.8 with SELinux enforcing reaches a working
    dashboard, API and PDF report without disabling SELinux or any TLS check.
-2. For a given period and policy version, `/api/compliance/summary`, the
-   Grafana dashboard and the generated PDF agree on every published figure.
+2. For a given period and policy version, `/api/compliance/summary` and the
+   generated PDF agree on every published figure.
 3. A server with no assessment is reported Unknown, and the compliance
    percentage including it is lower than the percentage excluding it.
-4. Stopping Grafana has no effect on authentication, the API, report
-   generation or scheduled delivery.
-5. Every write operation in the audit trail can be attributed to a named user
+4. Every write operation in the audit trail can be attributed to a named user
    or to `system`.

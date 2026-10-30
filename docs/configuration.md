@@ -74,8 +74,8 @@ external PostgreSQL service must use `sslmode=require` at minimum and
 `verify-full` where the server certificate is verifiable. Never `disable`.
 
 **Sizing.** Five services × (pool 5 + overflow 5) = up to 50 connections.
-PostgreSQL's default `max_connections` is 100, which leaves headroom for
-Grafana, psql and maintenance. If you run several instances of anything, raise
+PostgreSQL's default `max_connections` is 100, which leaves headroom for psql
+and maintenance. If you run several instances of anything, raise
 `max_connections` or lower the pools.
 
 ## 3. Secrets
@@ -248,7 +248,6 @@ into logs.
 |----------|---------|-------|
 | `PATCHTRACK_BIND_ADDRESS` | `127.0.0.1` | Published port bind address; keep on loopback behind a proxy |
 | `PATCHTRACK_GATEWAY_PORT` | 8005 | |
-| `PATCHTRACK_GRAFANA_PORT` | 3000 | |
 | `PATCHTRACK_FORWARDED_IPS` | `127.0.0.1` | Comma-separated proxies allowed to set `X-Forwarded-*`. **Never `*`.** |
 | `PATCHTRACK_INTERNAL_FORWARDED_IPS` | `172.16.0.0/12` | Compose only. The backend services' `PATCHTRACK_FORWARDED_IPS`: the compose network that the gateway reaches them from. Without it, audit records show the gateway container's address instead of the operator's. **Never `*`.** |
 | `PATCHTRACK_IDENTITY_URL` … `PATCHTRACK_REPORTING_URL` | loopback ports | Internal service URLs used by the gateway |
@@ -348,22 +347,7 @@ parses the raw header itself: uvicorn rewrites the peer address for trusted
 sources only, and the application records an address it cannot parse as NULL
 rather than rejecting the request.
 
-## 9. Grafana
-
-| Variable | Notes |
-|----------|-------|
-| `GF_ADMIN_PASSWORD` | Generated at install |
-| `GF_SERVER_ROOT_URL` | External URL shown in links |
-| `PATCHTRACK_GF_DB_HOST/PORT/NAME` | Point at `postgres:5432` |
-| `PATCHTRACK_GF_DB_USER` | `patchtrack_grafana` |
-| `PATCHTRACK_GF_DB_PASSWORD` | The password set when creating the role |
-| `PATCHTRACK_GF_DB_SSLMODE` | `prefer` for the bundled database; `verify-full` in production with a TLS-enabled one |
-
-The datasource YAML reads these with `${…}` interpolation at container start.
-Do not edit the provisioned YAML in a running instance; provisioning overwrites
-`allowUiUpdates: false` dashboards and `editable: false` datasources.
-
-## 10. Policy (not environment)
+## 9. Policy (not environment)
 
 Compliance policy is data, not configuration. It lives in
 `compliance.policy_versions` and is managed through
@@ -373,7 +357,7 @@ Compliance policy is data, not configuration. It lives in
 Keep the policy definition in version control alongside the deployment (a copy,
 not the source of truth), so a review can show what changed between quarters.
 
-## 11. Settings that are not configurable, on purpose
+## 10. Settings that are not configurable, on purpose
 
 | Behaviour | Fixed because |
 |-----------|---------------|
@@ -384,7 +368,7 @@ not the source of truth), so a review can show what changed between quarters.
 | Integrations start disabled | Requirements §C-1, §C-3 |
 | No bootstrap password | Requirements §C-1 |
 
-## 12. Changing configuration
+## 11. Changing configuration
 
 Most changes need a restart of the affected service:
 

@@ -88,9 +88,7 @@ run the new release's `upgrade.sh`; see
 [Guided upgrade](upgrade-rollback.md#3-guided-upgrade).
 
 The installer does not open a firewall port. Permit TCP/8005 (or the port you
-chose) in the host firewall before users connect. It also does not enable the
-optional Grafana dashboard; see [Optional: start the Grafana
-dashboard](#12-optional-start-the-grafana-dashboard).
+chose) in the host firewall before users connect.
 
 ### Non-interactive use
 
@@ -184,9 +182,9 @@ Air-gap mode changes the preflight and the installation:
 - it requires `SHA256SUMS` in the bundle and runs
   `sha256sum -c --ignore-missing SHA256SUMS`. The application and PostgreSQL
   archives must be listed and every listed file that is present must verify
-  before anything is changed. A removed optional pinned base, Grafana, source
-  archive or wheel directory is only a warning; a removed required archive
-  fails the separate presence check;
+  before anything is changed. A removed optional pinned base, source archive
+  or wheel directory is only a warning; a removed required archive fails the
+  separate presence check;
 - if packages must be installed it requires an enabled `dnf` repository and
   reminds you to confirm that repository is local. It never adds the remote
   Docker CE repository;
@@ -368,27 +366,7 @@ The migration runner verifies the SHA-256 of every previously applied file; a
 modified migration aborts the run with an explicit error rather than applying a
 silent change.
 
-## 6. Create the Grafana read-only role
-
-Required only if you will run the dashboard. Run it **after** migrations, as a
-superuser, with a password you have generated:
-
-```bash
-GF_PASSWORD="$(openssl rand -base64 32)"
-echo "$GF_PASSWORD"   # store it in the secret store and in .env as PATCHTRACK_GF_DB_PASSWORD
-
-docker compose exec -T postgres \
-  psql -v ON_ERROR_STOP=1 -v grafana_password="$GF_PASSWORD" \
-       -U patchtrack -d patchtrack \
-  < deploy/postgres/roles/010_grafana_readonly.sql
-```
-
-The script refuses an empty or short password, and re-running it rotates the
-password in place. It creates a `LOGIN` role with `default_transaction_read_only`,
-a 30-second statement timeout and `SELECT` on the reporting tables only — not
-on `identity.*`.
-
-## 7. Start the application
+## 6. Start the application
 
 ```bash
 sudo -u patchtrack docker compose up -d
@@ -413,7 +391,7 @@ once you install your own certificate (step 10). Keep the bind address on
 loopback unless a reverse proxy is in front (see
 [configuration.md](configuration.md#8-tls-termination)).
 
-## 8. Create the first administrator
+## 7. Create the first administrator
 
 Open `https://patchtrack.example.com/login`. Because no user exists, the page
 offers a one-time "Create administrator" form. Pick a username and a password
@@ -424,7 +402,7 @@ The form is refused (`409 Platform is already initialised`) once any user
 exists. If you need a different first administrator later, create it from
 **Administration → Users & roles** and deactivate the original.
 
-## 9. Configure integrations
+## 8. Configure integrations
 
 Nothing collects until you configure it — all four integrations are seeded
 disabled with no endpoint and no credential.
@@ -439,7 +417,7 @@ Per-source detail: [AssetExplorer](integration-assetexplorer.md),
 [Satellite](integration-satellite.md), [SCCM](integration-sccm.md),
 [Solaris](integration-solaris.md).
 
-## 10. Set the policy and the organisation name
+## 9. Set the policy and the organisation name
 
 - **Administration → Compliance policy**: review target percentage, freshness
   threshold and blocking severities. Create a version, then activate it.
@@ -455,7 +433,7 @@ Per-source detail: [AssetExplorer](integration-assetexplorer.md),
   proxy terminates TLS instead, this tab reports that certificates are managed
   externally.
 
-## 11. Schedule collection, snapshots and reports
+## 10. Schedule collection, snapshots and reports
 
 Scheduling is built into the services. Each one runs a small scheduler loop in
 its own process and executes the jobs it owns: inventory collects from its
@@ -479,21 +457,7 @@ one job immediately (`sync <integration>`, `daily`, `tick`, `purge`,
 [operations-runbook.md](operations-runbook.md#3-scheduled-jobs) for what each
 job does and the credential it uses.
 
-## 12. Optional: start the Grafana dashboard
-
-```bash
-sudo -u patchtrack docker compose --profile dashboards up -d grafana
-```
-
-Open `http://127.0.0.1:3000` (or behind the proxy). The datasource and the
-"PatchTrack — Patch Compliance Overview" dashboard are provisioned from
-`deploy/grafana/`; do not edit them in the UI, because provisioning will
-overwrite the changes.
-
-If you disable the admin login for Grafana, keep it published only on
-loopback or behind the proxy with authentication.
-
-## 13. Verify the installation
+## 11. Verify the installation
 
 | Check | Expected |
 |-------|----------|
@@ -502,10 +466,9 @@ loopback or behind the proxy with authentication.
 | Sign in | Succeeds; the UI shows the dashboard |
 | `GET /api/compliance/summary` | Returns KPIs (zeros and `null` percentage before the first collection) |
 | Audit trail | Contains your sign-in |
-| `docker compose stop grafana` | Application, API and reports unaffected |
 | `sudo ausearch -m avc -ts recent` | No denials mentioning patchtrack containers |
 
-## 14. Manual uninstallation
+## 12. Manual uninstallation
 
 ```bash
 cd /opt/patchtrack
@@ -549,9 +512,9 @@ By default it removes:
 
 It preserves by default:
 
-- every named data volume, including PostgreSQL, reports, the Solaris inbox,
-  the gateway TLS certificate and Grafana data (`--purge-data` deletes them,
-  after a separate confirmation);
+- every named data volume, including PostgreSQL, reports, the Solaris inbox
+  and the gateway TLS certificate (`--purge-data` deletes them, after a
+  separate confirmation);
 - configuration files it did not create, such as an operator's
   `secrets/satellite.password`; the configuration directory is left in place
   and the files are listed;

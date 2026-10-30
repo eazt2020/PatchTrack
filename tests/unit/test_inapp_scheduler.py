@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -34,13 +36,14 @@ def test_the_scheduler_is_not_installed_when_disabled(monkeypatch):
     class FakeApp:
         state = SimpleNamespace()
 
-        def add_event_handler(self, *_args):
+        @property
+        def router(self):
             raise AssertionError("a disabled scheduler must not register handlers")
 
     install(FakeApp(), [ScheduledJob("x", 60, lambda: None)])
 
 
-def test_install_registers_startup_and_shutdown(monkeypatch):
+def test_install_wraps_the_lifespan_to_start_and_stop(monkeypatch):
     monkeypatch.setattr(
         scheduler_module, "get_settings",
         lambda: SimpleNamespace(
@@ -48,16 +51,45 @@ def test_install_registers_startup_and_shutdown(monkeypatch):
             scheduler_retry_seconds=300, scheduler_startup_delay_seconds=10,
         ),
     )
-    handlers: dict[str, object] = {}
+    events: list[str] = []
+
+    async def start(_self) -> None:
+        events.append("scheduler-start")
+
+    async def stop(_self) -> None:
+        events.append("scheduler-stop")
+
+    monkeypatch.setattr(scheduler_module.InAppScheduler, "start", start)
+    monkeypatch.setattr(scheduler_module.InAppScheduler, "stop", stop)
+
+    @asynccontextmanager
+    async def base_lifespan(_app):
+        events.append("base-start")
+        yield
+        events.append("base-stop")
+
+    class FakeRouter:
+        lifespan_context = staticmethod(base_lifespan)
 
     class FakeApp:
         state = SimpleNamespace()
-
-        def add_event_handler(self, event, handler):
-            handlers[event] = handler
+        router = FakeRouter()
 
     app = FakeApp()
     install(app, [ScheduledJob("x", 60, lambda: None)])
 
-    assert set(handlers) == {"startup", "shutdown"}
-    assert app.state.patchtrack_scheduler.jobs[0].name == "x"
+    scheduler = app.state.patchtrack_scheduler
+    assert scheduler.jobs[0].name == "x"
+    assert app.router.lifespan_context is not base_lifespan
+
+    async def run() -> None:
+        async with app.router.lifespan_context(app):
+            events.append("serving")
+
+    asyncio.run(run())
+
+    # The original lifespan still ran, bracketed by the scheduler's start and
+    # stop, which is what a real uvicorn startup/shutdown does.
+    assert events == [
+        "base-start", "scheduler-start", "serving", "scheduler-stop", "base-stop",
+    ]

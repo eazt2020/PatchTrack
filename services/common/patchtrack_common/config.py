@@ -124,8 +124,6 @@ class Settings(BaseSettings):
     sccm_base_url: str = ""
     solaris_inbox: Path = Path("/var/lib/patchtrack/solaris-inbox")
 
-    grafana_url: str = "http://127.0.0.1:3000"
-
     # In-app scheduler. Each service runs a background loop for the jobs it
     # owns, so no external timer or cron entry is required. Intervals are in
     # seconds; a failed run is retried after scheduler_retry_seconds rather

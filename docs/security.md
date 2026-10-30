@@ -115,10 +115,6 @@ See [roles.md](roles.md) for the human-facing description.
   image does not enable server TLS by default. An external PostgreSQL service
   must use `sslmode=require` or better, with `verify-full` as the documented
   production setting. `disable` is never a supported value.
-- Grafana to PostgreSQL uses `PATCHTRACK_GF_DB_SSLMODE`. It defaults to
-  `prefer`, like the application, because the bundled image offers no TLS; an
-  external database must use `require` or better, with `verify-full` as the
-  production setting.
 
 ### Integration TLS
 
@@ -142,8 +138,6 @@ the host — not to disable verification. See
 | Integration credentials | Referenced by `secret_ref` (`env:NAME` or `file:/path`), resolved at collection time |
 | SMTP password | Encrypted in `shared.app_settings` (`smtp_relay`) when saved in Settings; write-only. Environment fallback for installations that have not saved one |
 | TLS private key | `PATCHTRACK_TLS_DIR` (default `/var/lib/patchtrack/tls`), mode 0600, never in the database and never returned by the API |
-| Grafana DB password | Set when creating the read-only role; supplied at role creation, never defaulted |
-| Grafana admin password | `GF_ADMIN_PASSWORD` at install |
 
 The SMTP password is the one credential stored in the database, because the
 relay must authenticate unattended. It is encrypted with Fernet before it is
@@ -237,7 +231,6 @@ form is refused with an explanation rather than stored.
 | Database password | Update `.env` and the PostgreSQL role, then restart. |
 | Integration credential | Update the referenced environment/file; no restart needed. |
 | `PATCHTRACK_SECRETS_KEY` or the JWT secret used as its fallback | Saved UI credentials (the SMTP password) can no longer be decrypted; re-enter the password in Settings. |
-| Grafana DB password | `ALTER ROLE`, update `.env`, restart Grafana. |
 
 Rotate all of them after any suspected exposure, and on the schedule required
 by the organisation's policy.
@@ -292,14 +285,6 @@ request body is stored.
 
 - The application connects as a dedicated role that owns its schemas. It is not
   a superuser and does not have `CREATEDB`/`CREATEROLE`.
-- Grafana connects as `patchtrack_grafana`:
-  `NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT`,
-  `default_transaction_read_only = on`, `statement_timeout = '30s'`, and
-  `SELECT` granted per table (never `GRANT ... ON ALL TABLES` to `PUBLIC`, and
-  no access to `identity.*`). The role creation script requires a supplied
-  password of at least 20 characters and raises if one is not provided.
-- The `patchtrack_grafana` role is applied by an operator after migrations:
-  `deploy/postgres/roles/010_grafana_readonly.sql`.
 
 ## 9. Container hardening
 
@@ -314,8 +299,7 @@ From `docker-compose.yml`, applied to every service:
 | `cap_drop: ALL` | no capabilities |
 | json-file logging with rotation | bounded disk use |
 
-Only the gateway (and optionally Grafana) publish a port, and by default only on
-`127.0.0.1`.
+Only the gateway publishes a port, and by default only on `127.0.0.1`.
 
 ## 10. SELinux
 

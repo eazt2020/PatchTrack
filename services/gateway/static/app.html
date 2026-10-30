@@ -9,8 +9,10 @@
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%232a78d6'/><path d='M9 16.5l4.6 4.5L23 11.5' stroke='white' stroke-width='3.2' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>">
 </head>
 <body>
+<a class="skip-link" href="#view">Skip to content</a>
+<div class="nav-backdrop" id="nav-backdrop" aria-hidden="true"></div>
 <div class="app-shell">
-  <aside class="sidebar">
+  <aside class="sidebar" id="sidebar">
     <div class="brand">
       <div class="brand-mark">PT</div>
       <div>
@@ -35,6 +37,9 @@
     <!-- Hover strip at the very top of the screen; reveals the header in TV mode. -->
     <div class="topbar-hotzone" aria-hidden="true"></div>
     <header class="topbar">
+      <button class="btn btn-sm nav-toggle" id="nav-toggle" type="button"
+              aria-controls="sidebar" aria-expanded="false"
+              aria-label="Open navigation">☰</button>
       <h1 id="page-title">Executive dashboard</h1>
       <span id="page-context" class="topbar-meta"></span>
       <span class="spacer"></span>

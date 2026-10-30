@@ -8,9 +8,9 @@
 *.p12
 *.jks
 
-# Local runtime state: the development PostgreSQL cluster, Grafana's own
-# database, service logs, generated reports and screenshots. None of this is
-# application source, and some of it holds live session data.
+# Local runtime state: the development PostgreSQL cluster, service logs,
+# generated reports and screenshots. None of this is application source, and
+# some of it holds live session data.
 .runtime/
 .pytest_cache/
 .pytest-markers

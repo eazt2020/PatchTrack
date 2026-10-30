@@ -2,8 +2,7 @@
 
 ## 1. Shape of the system
 
-PatchTrack is five small FastAPI services around one PostgreSQL database, with
-an optional Grafana instance reading the same tables through a read-only role.
+PatchTrack is five small FastAPI services around one PostgreSQL database.
 
 ```
                      ┌──────────────────────────────┐
@@ -19,10 +18,10 @@ an optional Grafana instance reading the same tables through a read-only role.
        │              │                │                │
        └──────────────┴────────────────┴────────────────┘
                              │
-                    ┌────────▼─────────┐        ┌────────────────────┐
-                    │   PostgreSQL 13  │◀───────│ Grafana (optional) │
-                    │  schema per svc  │  RO    │  :3000             │
-                    └──────────────────┘        └────────────────────┘
+                    ┌────────▼─────────┐
+                    │   PostgreSQL 17  │
+                    │  schema per svc  │
+                    └──────────────────┘
                              ▲
                              │ pull (outbound only)
         ┌────────────────────┼────────────────────┬──────────────────┐
@@ -117,8 +116,6 @@ independent queries.
 | Argon2id | Current password-hashing recommendation; parameters recorded in code |
 | ReportLab | Deterministic PDF generation with no browser or headless service dependency |
 | Vanilla ES modules for the UI | No build step, no supply chain in the browser, CSP can forbid inline scripts |
-| Grafana provisioned as code | The dashboard is reviewed in git, not clicked together in an instance |
-| Grafana reads via a dedicated DB role | Grafana cannot alter data even if it is compromised |
 
 ## 6. Failure behaviour
 
@@ -126,7 +123,6 @@ independent queries.
 |---------|-----------|
 | AssetExplorer unreachable | Sync run marked failed; assets keep their last known state; the dashboard shows the inventory sync as stale |
 | Satellite/SCCM unreachable | Sync run marked failed; **no** assessment written; affected servers become Stale once the freshness threshold passes, then Unknown only if there is no assessment at all |
-| Grafana down | No user-visible effect on the application, API or reports |
 | SMTP down | Report stays `completed`; delivery attempt recorded `failed` |
 | compliance service down | Gateway returns 503 for compliance routes; reports and inventory continue |
 | Database down | Every service reports unhealthy on `/readyz`; no partial writes are possible |
@@ -139,8 +135,7 @@ A single host, Docker Compose (or Podman Compose), with:
 - `postgres` on a named volume;
 - seven application containers, all non-root, read-only root filesystem,
   `no-new-privileges`, all capabilities dropped;
-- a one-shot `migrate` container gating the rest;
-- optional `grafana` under the `dashboards` profile.
+- a one-shot `migrate` container gating the rest.
 
 The gateway terminates TLS itself: on first start it generates a self-signed
 certificate, and an administrator can install the organisation's certificate

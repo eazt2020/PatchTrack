@@ -305,9 +305,8 @@ The correction is stored *beside* the source value:
   override. The asset stays matched by its immutable AssetExplorer ID, so
   reconciliation is unaffected.
 - Lists, filters, the dashboard's environment and business-service panels,
-  the compliance engine, reports and the Grafana dashboard all use the
-  effective placement, so a correction moves the server into its new group on
-  the next refresh. Overridden cells carry a **LOCAL** marker whose
+  the compliance engine and reports all use the effective placement, so a
+  correction moves the server into its new group on the next refresh. Overridden cells carry a **LOCAL** marker whose
   tooltip names the AssetExplorer value, and the server detail shows both.
   A value that an administrator renamed in Settings shows the new name with
   `(AssetExplorer: old name)` and no **LOCAL** marker — it is the list, not a
@@ -496,7 +495,7 @@ service values an operator can choose when correcting a server.
   entry.
 - **Edit** renames the value everywhere. Every server holding the old spelling
   shows the new name in the inventory, filters, the dashboard panels, the
-  compliance engine, reports and Grafana on the next render. The *In use*
+  compliance engine and reports on the next render. The *In use*
   column tells you how many servers a rename will carry. Compliance is
   re-evaluated after a rename, because a scope rule may match the environment
   by name.

@@ -966,7 +966,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--purge-data", action="store_true",
-        help="ALSO delete the PostgreSQL, report, Solaris inbox, TLS and Grafana volumes",
+        help="ALSO delete the PostgreSQL, report, Solaris inbox and TLS volumes",
     )
     parser.add_argument(
         "--keep-image", action="store_true",
@@ -1029,8 +1029,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if options.purge_data and state.volumes:
         if not options.yes:
             base.warn(
-                "This permanently deletes the database, reports, Solaris inbox, "
-                "TLS certificate and Grafana data volumes listed above."
+                "This permanently deletes the database, reports, Solaris inbox "
+                "and TLS certificate volumes listed above."
             )
             try:
                 confirmed = _ask_yes_no(

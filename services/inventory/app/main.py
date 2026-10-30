@@ -1124,8 +1124,8 @@ def rename_placement_option(
                                "there",
                     )
                 # The old spelling keeps resolving to this entry, so every
-                # reader (inventory, compliance, reports, Grafana) shows the
-                # new name without the source record being rewritten.
+                # reader (inventory, compliance and reports) shows the new
+                # name without the source record being rewritten.
                 conn.execute(
                     text(
                         """

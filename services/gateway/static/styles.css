@@ -25,6 +25,23 @@
 
 * { box-sizing: border-box; }
 
+/* `display` rules on components (notably .field) otherwise beat the browser's
+   own [hidden] rule, leaving fields marked hidden on screen. */
+[hidden] { display: none !important; }
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.skip-link {
+  position: absolute; left: 12px; top: -48px; z-index: 200;
+  padding: 8px 14px; border-radius: 0 0 var(--radius) var(--radius);
+  background: var(--accent-strong); color: #fff; font-weight: 600;
+  transition: top .15s ease;
+}
+.skip-link:focus { top: 0; text-decoration: none; }
+
 html, body {
   margin: 0;
   padding: 0;
@@ -85,6 +102,7 @@ button, input, select, textarea {
   padding: 8px 10px; border-radius: 6px; margin-bottom: 2px;
   color: var(--text-secondary); font-size: 13.5px;
   border-left: 2px solid transparent;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .nav a:hover { background: var(--surface-2); color: var(--text-primary); text-decoration: none; }
 .nav a.active {
@@ -255,9 +273,49 @@ select:focus, input:focus, textarea:focus {
   .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .grid-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+/* The sidebar becomes an off-canvas drawer below 1000px: hiding it outright
+   would leave no navigation at all. */
+.nav-toggle { display: none; }
+.nav-backdrop { display: none; }
+
 @media (max-width: 1000px) {
   .grid-kpi, .grid-4, .grid-3, .grid-2, .grid-2-1, .grid-1-2 { grid-template-columns: 1fr; }
-  .sidebar { display: none; }
+
+  .nav-toggle { display: inline-flex; }
+
+  .sidebar {
+    position: fixed; inset: 0 auto 0 0; z-index: 80;
+    width: 264px; height: 100vh;
+    transform: translateX(-100%);
+    transition: transform .18s ease;
+    box-shadow: 0 0 40px rgba(0, 0, 0, .6);
+  }
+  body.nav-open .sidebar { transform: translateX(0); }
+
+  body.nav-open .nav-backdrop {
+    display: block; position: fixed; inset: 0; z-index: 70;
+    background: rgba(0, 0, 0, .55);
+  }
+
+  /* Keep the page from growing wider than the viewport: the top bar and long
+     table cells were forcing a horizontal scrollbar on phones. */
+  .topbar { flex-wrap: wrap; gap: 8px 10px; padding: 10px 12px; }
+  .topbar h1 { font-size: 16px; }
+  #page-context { flex-basis: 100%; order: 5; font-size: 11px; }
+  #last-refresh { display: none; }
+  .content { padding: 14px 12px 40px; }
+}
+
+@media (max-width: 560px) {
+  .topbar { gap: 6px 8px; }
+  .topbar h1 { flex: 1 1 auto; min-width: 0; font-size: 15px; }
+  /* TV mode targets a wall display; on a phone it only crowds the bar. */
+  #kiosk-toggle { display: none; }
+  .topbar .spacer { display: none; }
+  .topbar .btn-sm { padding: 5px 8px; font-size: 11.5px; }
+  .content { padding: 12px 10px 36px; }
+  .card { padding: 12px 12px 14px; }
+  .stat-value { font-size: 30px; }
 }
 
 .card {
@@ -353,7 +411,7 @@ select:focus, input:focus, textarea:focus {
 .tooltip .tt-row { display: flex; justify-content: space-between; gap: 14px; }
 
 /* ------------------------------------------------------------------ tables */
-.table-wrap { overflow-x: auto; margin: 0 -4px; }
+.table-wrap { overflow-x: auto; margin: 0 -4px; -webkit-overflow-scrolling: touch; }
 .table-tools { display: flex; justify-content: flex-end; padding: 0 4px 6px; }
 table.data {
   width: 100%; border-collapse: collapse; font-size: 12.8px;
@@ -368,7 +426,7 @@ table.data td {
 }
 table.data tbody tr:hover { background: var(--surface-2); }
 table.data td.num, table.data th.num { text-align: right; font-variant-numeric: tabular-nums; }
-table.data td.mono { font-family: var(--mono); font-size: 12px; }
+table.data td.mono { font-family: var(--mono); font-size: 12px; white-space: nowrap; }
 table.data.compact td, table.data.compact th { padding: 6px 9px; }
 table.data td.select-cell, table.data th.select-cell {
   width: 34px; text-align: center; padding-right: 0;

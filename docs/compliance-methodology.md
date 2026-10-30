@@ -65,7 +65,7 @@ compliance_pct = compliant / (compliant + non_compliant + unknown + stale) × 10
 ```
 
 Rounded to two decimal places. When the denominator is zero the value is
-`null`, and every consumer — API, UI, PDF, Grafana — renders "n/a" rather than
+`null`, and every consumer — API, UI and PDF — renders "n/a" rather than
 `0%` or `100%`. An empty estate is not a perfect estate.
 
 `gap_pct = compliance_pct − target_pct`, also `null` when either input is

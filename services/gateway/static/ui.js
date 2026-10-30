@@ -242,6 +242,7 @@ export function table(columns, rows, options = {}) {
   const thead = h("thead", {}, h("tr", {},
     ...columns.map((col) => h("th", {
       class: col.numeric ? "num" : "",
+      scope: "col",
       style: col.width ? { width: col.width } : undefined,
     }, col.label))));
   const tbody = h("tbody");

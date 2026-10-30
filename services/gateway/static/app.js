@@ -227,8 +227,43 @@ function renderNav() {
 
 function setActiveNav(id) {
   for (const link of nav.querySelectorAll("a")) {
-    link.classList.toggle("active", link.dataset.route === id);
+    const active = link.dataset.route === id;
+    link.classList.toggle("active", active);
+    if (active) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
   }
+}
+
+/* Below 1000px the sidebar is an off-canvas drawer; this is the only way to
+   reach another area on a phone or narrow window. */
+function bindNavToggle() {
+  const sidebar = document.getElementById("sidebar");
+  const toggle = document.getElementById("nav-toggle");
+  if (!sidebar || !toggle) return;
+  const setOpen = (open) => {
+    document.body.classList.toggle("nav-open", open);
+    toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    toggle.setAttribute("aria-label", open ? "Close navigation" : "Open navigation");
+    if (open) sidebar.querySelector("a")?.focus();
+  };
+  toggle.addEventListener("click", () => {
+    setOpen(!document.body.classList.contains("nav-open"));
+  });
+  document.getElementById("nav-backdrop")?.addEventListener("click", () => setOpen(false));
+  sidebar.addEventListener("click", (event) => {
+    if (event.target.closest("a")) setOpen(false);
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && document.body.classList.contains("nav-open")) {
+      setOpen(false);
+      toggle.focus();
+    }
+  });
+  // A drawer left open past the breakpoint would otherwise cover the desktop
+  // layout with no way to close it.
+  window.matchMedia("(min-width: 1001px)").addEventListener("change", (event) => {
+    if (event.matches) setOpen(false);
+  });
 }
 
 /* ------------------------------------------------------------------ shared pieces */
@@ -824,10 +859,9 @@ function kpiRow(summary) {
     statTile({
       label: "Compliant",
       value: fmtNumber(k.compliant),
+      // The share belongs in one place: repeating it as a delta implied a
+      // comparison that this tile does not make.
       sub: fmtPct(k.compliance_pct),
-      delta: k.total_servers
-        ? fmtPct((k.compliant / Math.max(1, k.in_scope)) * 100)
-        : null,
       tone: "good",
       meter: k.in_scope ? (k.compliant / k.in_scope) * 100 : 0,
       accent: STATUS.compliant,
@@ -1579,9 +1613,9 @@ async function openServer(assetId) {
 /* Environment and business service come from AssetExplorer. An operator can
  * correct either locally: the correction is stored beside the source value, so
  * the next collection keeps updating its own columns and the override stands.
- * Everything that reads placement — lists, the compliance engine, reports and
- * the Grafana dashboard — reads the effective value, and the source answer is
- * always shown next to it. */
+ * Everything that reads placement — lists, the compliance engine and reports
+ * — reads the effective value, and the source answer is always shown next to
+ * it. */
 function placementText(asset, field) {
   // Effective value differs from the source either because an operator
   // overrode it or because an administrator renamed the Settings value. Both
@@ -1891,7 +1925,6 @@ function inventoryStatsPanel(stats) {
       label: "Compliant",
       value: fmtNumber(compliant),
       sub: pct(compliant),
-      delta: pct(compliant),
       tone: "good",
       meter: population ? (compliant / population) * 100 : 0,
       accent: STATUS.compliant,
@@ -3122,14 +3155,13 @@ async function renderHealth() {
   }));
   const panels = [
     ["services", "Services", card("Service availability",
-      "Core functionality remains available if Grafana is down",
+      "Backend health as reported through the gateway",
       table([
         { label: "Component", key: "name" },
         { label: "Status", render: (r) => pill(r.status, r.status) },
       ], [
         { name: "gateway", status: gateway.status || "unknown" },
         ...serviceRows,
-        { name: "grafana (optional)", status: "separate" },
       ], { compact: true, export: false }))],
     ["freshness", "Data freshness", card("Data freshness",
       "Inventory and patch collection are tracked separately",
@@ -3943,6 +3975,7 @@ async function boot() {
   } catch { /* display falls back to the browser timezone */ }
   await loadDimensions();
   bindKiosk();
+  bindNavToggle();
   document.getElementById("refresh").addEventListener("click", () => renderRoute());
   window.addEventListener("hashchange", renderRoute);
   const route = parseHash().path;

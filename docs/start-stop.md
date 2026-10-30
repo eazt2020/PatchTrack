@@ -100,7 +100,7 @@ $COMPOSE up -d
 This starts PostgreSQL, waits for its health check, runs the one-shot
 `migrate` service, then starts the services that depend on it. Migrations are
 idempotent; an up-to-date database changes nothing and applies only new
-migration files. Grafana is optional and starts only with its profile.
+migration files.
 
 Verify readiness rather than relying on the command's exit status:
 

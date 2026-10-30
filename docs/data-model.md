@@ -281,7 +281,7 @@ aliases with it.
 ### `inventory.asset_effective` (view)
 
 Every reader that needs placement — the inventory list and filters, the
-compliance engine, reporting and Grafana — reads this view, so one definition of
+compliance engine and reporting — reads this view, so one definition of
 "effective environment" is used everywhere.
 
 It exposes all `inventory.assets` columns with `environment` and
