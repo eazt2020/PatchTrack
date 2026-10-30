@@ -914,7 +914,7 @@ function kpiRow(summary) {
       sub: `${fmtNumber(k.unknown)} unknown · ${fmtNumber(k.stale)} stale`,
       delta: k.in_scope
         ? fmtPct(((k.unknown + k.stale) / k.in_scope) * 100) : null,
-      tone: "neutral",
+      tone: "warn",
       meter: k.in_scope ? ((k.unknown + k.stale) / k.in_scope) * 100 : 0,
       accent: STATUS.unknown,
       foot: "Counted against compliance, never as compliant",
@@ -1978,7 +1978,7 @@ function inventoryStatsPanel(stats) {
       value: fmtNumber(noData),
       sub: unknownParts.join(" · "),
       delta: pct(noData),
-      tone: "neutral",
+      tone: "warn",
       meter: population ? (noData / population) * 100 : 0,
       accent: STATUS.unknown,
       foot: "Never counted as compliant",

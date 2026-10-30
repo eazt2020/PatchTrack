@@ -387,6 +387,8 @@ select:focus, input:focus, textarea:focus {
 .stat-delta.good { color: var(--good); font-weight: 700; }
 .stat-delta.bad { color: var(--critical-text); }
 .stat-delta.neutral { color: var(--text-secondary); }
+/* Matches the amber bar of the tile; bold so it reads at a glance. */
+.stat-delta.warn { color: var(--warning); font-weight: 700; }
 .meter {
   height: 6px; border-radius: 3px; background: var(--surface-3); overflow: hidden;
 }
