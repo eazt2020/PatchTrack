@@ -384,7 +384,7 @@ select:focus, input:focus, textarea:focus {
 .stat-value.sm { font-size: 26px; }
 .stat-of { font-size: 13px; color: var(--text-muted); }
 .stat-delta { font-size: 12.5px; font-weight: 600; margin-left: auto; }
-.stat-delta.good { color: var(--good); }
+.stat-delta.good { color: var(--good); font-weight: 700; }
 .stat-delta.bad { color: var(--critical-text); }
 .stat-delta.neutral { color: var(--text-secondary); }
 .meter {

@@ -891,9 +891,9 @@ function kpiRow(summary) {
     statTile({
       label: "Compliant",
       value: fmtNumber(k.compliant),
-      // The share belongs in one place: repeating it as a delta implied a
-      // comparison that this tile does not make.
-      sub: fmtPct(k.compliance_pct),
+      // The share sits where every other tile's share sits — right-aligned in
+      // green — so the KPI row reads as one column of percentages.
+      delta: fmtPct(k.compliance_pct),
       tone: "good",
       meter: k.in_scope ? (k.compliant / k.in_scope) * 100 : 0,
       accent: STATUS.compliant,
@@ -1958,7 +1958,7 @@ function inventoryStatsPanel(stats) {
     statTile({
       label: "Compliant",
       value: fmtNumber(compliant),
-      sub: pct(compliant),
+      delta: pct(compliant),
       tone: "good",
       meter: population ? (compliant / population) * 100 : 0,
       accent: STATUS.compliant,
