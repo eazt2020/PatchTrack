@@ -20,7 +20,13 @@
   /* Small text needs a lighter red: #d03b3b is only 3.6:1 on the card surface. */
   --critical-text: #ff9a9a;
   --serious: #ec835a;
-  --radius: 8px;
+  --radius: 12px;
+  --radius-sm: 8px;
+  /* One easing vocabulary keeps every control feeling like the same
+     instrument: quick to leave, gentle to arrive. */
+  --ease: cubic-bezier(.22, .61, .36, 1);
+  --quick: .16s var(--ease);
+  --soft: .24s var(--ease);
   --font: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
   --mono: "JetBrains Mono", "SFMono-Regular", ui-monospace, monospace;
 }
@@ -52,6 +58,25 @@ html, body {
   font-family: var(--font);
   font-size: 14px;
   -webkit-font-smoothing: antialiased;
+  scroll-behavior: smooth;
+}
+
+/* Each route arrives as one piece rather than every card appearing on its
+   own. The class is applied by the router and removed after the transition,
+   so the dashboard's silent auto-refresh does not replay it. */
+#view.route-enter > * { animation: page-in var(--soft) var(--ease) both; }
+@keyframes page-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html, body { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
 }
 
 a { color: var(--accent); text-decoration: none; }
@@ -100,13 +125,19 @@ button, input, select, textarea {
   color: var(--text-muted); padding: 14px 10px 6px;
 }
 .nav a {
+  position: relative;
   display: flex; align-items: center; gap: 10px;
-  padding: 8px 10px; border-radius: 6px; margin-bottom: 2px;
+  padding: 8px 10px; border-radius: var(--radius-sm); margin-bottom: 2px;
   color: var(--text-secondary); font-size: 13.5px;
   border-left: 2px solid transparent;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  transition: background-color var(--quick), color var(--quick),
+              border-color var(--quick), transform var(--quick);
 }
-.nav a:hover { background: var(--surface-2); color: var(--text-primary); text-decoration: none; }
+.nav a:hover {
+  background: var(--surface-2); color: var(--text-primary);
+  transform: translateX(2px); text-decoration: none;
+}
 .nav a.active {
   background: var(--surface-3); color: var(--text-primary);
   border-left-color: var(--accent); font-weight: 560;
@@ -134,7 +165,10 @@ button, input, select, textarea {
   display: flex; align-items: center; gap: 16px;
   padding: 14px 22px;
   border-bottom: 1px solid var(--border);
-  background: var(--surface-1);
+  /* Translucent so content glides under the bar while scrolling. */
+  background: rgba(23, 27, 33, .86);
+  backdrop-filter: blur(12px) saturate(1.2);
+  -webkit-backdrop-filter: blur(12px) saturate(1.2);
   position: sticky; top: 0; z-index: 20;
 }
 .topbar h1 { font-size: 17px; margin: 0; font-weight: 620; letter-spacing: .1px; }
@@ -165,26 +199,28 @@ button, input, select, textarea {
   display: inline-flex;
   background: var(--surface-2);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 2px;
+  border-radius: 999px;
+  padding: 3px;
   min-height: 34px;
   align-items: center;
 }
 .segmented button {
   background: transparent;
   border: 0;
-  border-radius: 4px;
-  padding: 6px 12px;
+  border-radius: 999px;
+  padding: 6px 14px;
   color: var(--text-secondary);
   cursor: pointer;
   font-size: 12.5px;
   font-weight: 550;
+  transition: background-color var(--quick), color var(--quick),
+              box-shadow var(--quick);
 }
 .segmented button:hover { color: var(--text-primary); }
 .segmented button.active {
   background: var(--surface-3);
   color: var(--text-primary);
-  box-shadow: inset 0 0 0 1px var(--border);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .35), inset 0 0 0 1px var(--border);
 }
 
 /* List toolbar: the same field styling as the filter bar, sitting inside a
@@ -240,7 +276,10 @@ input[type="email"], input[type="number"], input[type="month"], textarea {
   border-radius: 6px;
   padding: 7px 9px;
   min-height: 34px;
+  border-radius: var(--radius-sm);
   outline: none;
+  transition: border-color var(--quick), box-shadow var(--quick),
+              background-color var(--quick);
 }
 select:focus, input:focus, textarea:focus {
   border-color: var(--accent);
@@ -249,16 +288,25 @@ select:focus, input:focus, textarea:focus {
 .btn {
   background: var(--surface-3);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   padding: 7px 13px;
   min-height: 34px;
   cursor: pointer;
   font-weight: 550;
   display: inline-flex; align-items: center; gap: 7px;
+  transition: background-color var(--quick), border-color var(--quick),
+              transform var(--quick), box-shadow var(--quick);
 }
-.btn:hover { background: #2b333d; }
-.btn-primary { background: var(--accent-strong); border-color: var(--accent-strong); color: #fff; }
-.btn-primary:hover { background: #256abf; }
+.btn:hover { background: #2b333d; transform: translateY(-1px); }
+.btn:active { transform: translateY(0); transition-duration: 60ms; }
+.btn-primary {
+  background: var(--accent-strong); border-color: var(--accent-strong); color: #fff;
+  box-shadow: 0 4px 14px rgba(57, 135, 229, .18);
+}
+.btn-primary:hover {
+  background: #256abf;
+  box-shadow: 0 6px 18px rgba(57, 135, 229, .28);
+}
 .btn-danger { background: transparent; border-color: var(--critical); color: #ff9a9a; }
 .btn-sm { min-height: 28px; padding: 3px 9px; font-size: 12.5px; }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
@@ -290,7 +338,7 @@ select:focus, input:focus, textarea:focus {
     position: fixed; inset: 0 auto 0 0; z-index: 80;
     width: 264px; height: 100vh;
     transform: translateX(-100%);
-    transition: transform .18s ease;
+    transition: transform var(--soft);
     box-shadow: 0 0 40px rgba(0, 0, 0, .6);
   }
   body.nav-open .sidebar { transform: translateX(0); }
@@ -309,9 +357,26 @@ select:focus, input:focus, textarea:focus {
   .content { padding: 14px 12px 40px; }
 }
 
+/* The disclosure slides open rather than snapping; the first row is the
+   toggle itself, the second the bar. */
+.filter-shell { display: grid; grid-template-rows: auto 1fr; }
 @media (max-width: 700px) {
   .btn.filter-toggle { display: inline-flex; margin-bottom: 10px; }
-  .filter-shell:not(.open) .filterbar { display: none; }
+  .filter-shell { grid-template-rows: auto 0fr; transition: grid-template-rows var(--soft); }
+  .filter-shell.open { grid-template-rows: auto 1fr; }
+  .filter-shell .filterbar {
+    overflow: hidden; min-height: 0; margin-bottom: 0;
+    border-color: transparent;
+    transition: margin-bottom var(--soft), padding-top var(--soft),
+                padding-bottom var(--soft), border-color var(--soft),
+                border-width var(--soft);
+  }
+  /* The bar's own padding and border would otherwise keep a sliver visible
+     when the row collapses to zero. */
+  .filter-shell:not(.open) .filterbar {
+    padding-top: 0; padding-bottom: 0; border-width: 0;
+  }
+  .filter-shell.open .filterbar { margin-bottom: 16px; border-color: var(--border); }
 }
 
 @media (max-width: 560px) {
@@ -337,12 +402,17 @@ select:focus, input:focus, textarea:focus {
 }
 
 .card {
-  background: var(--surface-1);
+  background: linear-gradient(180deg, rgba(255, 255, 255, .018), transparent 42%),
+              var(--surface-1);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 14px 16px 16px;
   min-width: 0;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, .02) inset,
+              0 10px 30px rgba(0, 0, 0, .12);
+  transition: border-color var(--soft), box-shadow var(--soft);
 }
+.card:hover { border-color: #333c48; }
 .card-head {
   display: flex; align-items: baseline; justify-content: space-between;
   gap: 10px; margin-bottom: 10px;
@@ -361,6 +431,8 @@ select:focus, input:focus, textarea:focus {
   border-bottom: none; border-radius: var(--radius) var(--radius) 0 0;
   color: var(--text-secondary); padding: 9px 16px; font-size: 12.5px;
   font-weight: 500; cursor: pointer; margin-bottom: -1px;
+  transition: color var(--quick), background-color var(--quick),
+              border-color var(--quick);
 }
 .tab:hover { color: var(--text-primary); background: var(--surface-2); }
 .tab[aria-selected="true"] {
@@ -392,7 +464,10 @@ select:focus, input:focus, textarea:focus {
 .meter {
   height: 6px; border-radius: 3px; background: var(--surface-3); overflow: hidden;
 }
-.meter > span { display: block; height: 100%; border-radius: 3px; }
+.meter > span {
+  display: block; height: 100%; border-radius: 3px;
+  transition: width .5s var(--ease);
+}
 .stat-foot { font-size: 11.5px; color: var(--text-muted); }
 .hero-value { font-size: 40px; font-weight: 660; letter-spacing: -1px; }
 
@@ -453,7 +528,9 @@ table.data th {
 }
 table.data td {
   padding: 8px 10px; border-bottom: 1px solid #232931; vertical-align: middle;
+  transition: background-color var(--quick);
 }
+table.data tbody tr { transition: background-color var(--quick); }
 table.data tbody tr:hover { background: var(--surface-2); }
 table.data td.num, table.data th.num { text-align: right; font-variant-numeric: tabular-nums; }
 table.data td.mono { font-family: var(--mono); font-size: 12px; white-space: nowrap; }
@@ -468,6 +545,8 @@ table.data input[type="checkbox"] { accent-color: var(--accent, #3987e5); }
   padding: 2px 8px; border-radius: 999px; font-size: 11.5px; font-weight: 600;
   border: 1px solid var(--border); background: var(--surface-2);
   white-space: nowrap;
+  transition: background-color var(--quick), color var(--quick),
+              border-color var(--quick);
 }
 .pill .dot { width: 7px; height: 7px; border-radius: 50%; }
 .pill.compliant { color: #79e079; border-color: rgba(12,163,12,.45); background: rgba(12,163,12,.10); }
@@ -524,13 +603,24 @@ table.data input[type="checkbox"] { accent-color: var(--accent, #3987e5); }
 .pagination { display: flex; align-items: center; gap: 10px; margin-top: 12px; font-size: 12.5px; }
 
 .modal-backdrop {
-  position: fixed; inset: 0; background: rgba(0,0,0,.62);
+  position: fixed; inset: 0; background: rgba(0,0,0,.55);
+  backdrop-filter: blur(5px);
+  -webkit-backdrop-filter: blur(5px);
   display: grid; place-items: center; z-index: 90; padding: 20px;
+  animation: backdrop-in .2s var(--ease) both;
 }
 .modal {
   background: var(--surface-1); border: 1px solid var(--border);
-  border-radius: 10px; width: min(760px, 100%); max-height: 86vh; overflow: auto;
+  border-radius: var(--radius); width: min(760px, 100%);
+  max-height: 86vh; overflow: auto;
   padding: 18px 20px 20px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, .5);
+  animation: modal-in .26s var(--ease) both;
+}
+@keyframes backdrop-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes modal-in {
+  from { opacity: 0; transform: translateY(10px) scale(.985); }
+  to { opacity: 1; transform: none; }
 }
 .modal h2 { margin: 0 0 4px; font-size: 16px; }
 

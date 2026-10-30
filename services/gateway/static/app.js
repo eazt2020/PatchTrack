@@ -222,6 +222,9 @@ async function renderRoute() {
     return;
   }
   state.route = route.id;
+  // One arrival animation per route, not per refresh.
+  view.classList.add("route-enter");
+  setTimeout(() => view.classList.remove("route-enter"), 320);
   renderNav();
   pageTitle.textContent = route.label;
   setActiveNav(route.id);
