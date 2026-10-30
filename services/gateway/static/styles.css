@@ -485,8 +485,8 @@ table.data input[type="checkbox"] { accent-color: var(--accent, #3987e5); }
 .pill.degraded, .pill.partial, .pill.stale, .pill.pending {
   color: #ffd06b; border-color: rgba(250,178,25,.45); background: rgba(250,178,25,.10);
 }
-.pill.unavailable, .pill.failed, .pill.authentication_failure, .pill.denied,
-.pill.unhealthy, .pill.unreachable {
+.pill.unavailable, .pill.failed, .pill.failure, .pill.authentication_failure,
+.pill.denied, .pill.unhealthy, .pill.unreachable {
   color: #ff9a9a; border-color: rgba(208,59,59,.5); background: rgba(208,59,59,.12);
 }
 
