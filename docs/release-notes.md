@@ -1,6 +1,6 @@
 # Release notes
 
-## 3.0.7 — 2026-10-31
+## 3.0.7 — 2026-11-01
 
 Executive dashboard insights and lower request latency. Migrations
 `023_report_board_pack`, `024_solaris_ssh_targets` and `025_search_indexes` are
@@ -115,9 +115,9 @@ applied by the migrate service on start-up.
 ### Upgrade
 
 - **Only published releases can be upgraded from.** The retracted 3.0.5 is no
-  longer a valid source; only 3.0.3 is published. A host on 3.0.5 is refused
-  with an instruction to reinstall 3.0.3 and restore its data, and 3.0.5 can
-  no longer be selected as a target.
+  longer a valid source; 3.0.3 and 3.0.7 are the published releases. A host on
+  3.0.5 is refused with an instruction to reinstall a published release and
+  restore its data, and 3.0.5 can no longer be selected as a target.
 - **The upgrade replaces everything, all at once.** Every managed file and
   symlink in the installed tree is compared with the staged release before any
   container starts, and an installer-owned `patchtrack.service` unit is
@@ -179,8 +179,8 @@ manual step is needed.
 ## 3.0.5 — 2026-10-30 (withdrawn)
 
 This release was retracted after publication and is not a supported install or
-upgrade source. 3.0.3 remains the only published release; reinstall it and
-restore the deployment's data instead of upgrading from 3.0.5.
+upgrade source. Reinstall a published release (3.0.3 or 3.0.7) and restore the
+deployment's data instead of upgrading from 3.0.5.
 
 Console-only release; no database migration is required.
 

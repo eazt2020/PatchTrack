@@ -66,14 +66,15 @@ def test_upgrade_version_must_change_and_cannot_downgrade():
 
 def test_upgrade_only_starts_from_a_published_release():
     assert upgrader.validate_published_source_version("3.0.3") is None
+    assert upgrader.validate_published_source_version("3.0.7") is None
 
     withdrawn = upgrader.validate_published_source_version("3.0.5")
     assert withdrawn and "withdrawn" in withdrawn
-    assert "reinstall 3.0.3" in withdrawn
+    assert "3.0.3, 3.0.7" in withdrawn
 
     unpublished = upgrader.validate_published_source_version("3.0.4")
     assert unpublished and "not a published release" in unpublished
-    assert "3.0.3" in unpublished
+    assert "3.0.3, 3.0.7" in unpublished
 
 
 def test_withdrawn_release_cannot_be_an_upgrade_target():

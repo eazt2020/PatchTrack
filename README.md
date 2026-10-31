@@ -59,8 +59,9 @@ reported and without the next sync undoing it.
   database, replaces every file in the tree, recreates all containers at once
   from the new image (never a rolling upgrade), applies migrations, verifies
   the stack and restores everything automatically if any step fails. It only
-  upgrades from a published release; a host on the retracted 3.0.5 is refused
-  and must be reinstalled on 3.0.3 with its data restored.
+  upgrades from a published release (3.0.3 or 3.0.7); a host on the retracted
+  3.0.5 is refused and must be reinstalled on a published release with its data
+  restored.
 - **Transport and secrets** — HTTPS from first start with a generated
   certificate, replacement with the organisation's own certificate in
   Settings, and optional file-backed bootstrap secrets for Docker, Podman or

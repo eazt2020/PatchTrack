@@ -8,8 +8,8 @@
 - An upgrade is: back up → load the new image → run migrations → start → verify.
 - Only a release that was actually published may be upgraded from. A host still
   running a withdrawn release (3.0.5) or an unpublished build is refused; it
-  must be reinstalled on the published release and its data restored rather
-  than upgraded in place.
+  must be reinstalled on a published release (3.0.3 or 3.0.7) and its data
+  restored rather than upgraded in place.
 - The upgrade replaces the whole application tree and recreates every container
   at once from the new image (Compose's **recreate / simultaneous** strategy).
   It never performs a rolling replacement, so no old and new component serves
@@ -64,9 +64,9 @@ upgrade backup. See
 `PATCHTRACK_VERSION`. The target must differ from the installed version and
 must not be older or a withdrawn release; a downgrade needs a database restore,
 not an upgrade. The installed version must itself be a published release:
-upgrading is supported from 3.0.3. A host carrying the retracted 3.0.5 is
-refused with an instruction to reinstall 3.0.3 and restore its data, because
-no supported upgrade path starts there.
+upgrading is supported from 3.0.3 and 3.0.7. A host carrying the retracted
+3.0.5 is refused with an instruction to reinstall a published release and
+restore its data, because no supported upgrade path starts there.
 
 The prechecks read `/etc/patchtrack/install.json`, so they know the runtime,
 image, account and directories the installation created. They require root, a
