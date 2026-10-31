@@ -29,7 +29,12 @@ reported and without the next sync undoing it.
   verification evidence.
 - **Reporting** — branded PDF reports on monthly or quarterly schedules.
   Scheduled reports can be emailed through an SMTP relay configured in
-  Settings; the password is write-only and encrypted at rest.
+  Settings; the password is write-only and encrypted at rest. **Export
+  Dashboard** turns the board the reader is looking at into one landscape page
+  for a management audience: headline measures, the trend against target, the
+  backlog by severity, compliance by environment, business service and
+  operating system, and the two widest outstanding advisories from each
+  platform, so no operating system disappears behind another's backlog.
 - **Scheduling** — collection, daily snapshot, audit purge, report tick and
   report-retention jobs run inside the services and are listed at
   **Reporting → Schedules → System jobs**, where an administrator can change an
@@ -141,17 +146,20 @@ These captures come from the development stack running the 100-asset,
 five-year demo seed above. Every record is synthetic; the layout, figures and
 workflows are the application's own.
 
-**Executive dashboard.** Live estate with KPI tiles, compliance by operating
-system, environment and business service, status distribution, the 12-month
-trend, the period summary and the servers with the most outstanding patches.
+**Executive dashboard.** The live estate: six headline measures, the monthly
+trend against the 95% target, server compliance, and breakdowns by environment,
+operating system and business service, with the most overdue advisories,
+remediation SLA, data freshness, movers and recent non-compliant servers below.
+**Export Dashboard** produces the one-page management sheet from the same
+figures.
 
 ![Executive dashboard showing live compliance KPIs and breakdown charts](docs/images/dashboard.png)
 
-**Recorded period.** The same dashboard for Q1 2026, read from the immutable
-snapshots captured in that quarter. Dimension filters are disabled here because
-a snapshot stores group totals rather than server rows.
+**Recorded period.** The same dashboard for September 2026, read from the
+immutable snapshot captured in that month. Dimension filters are disabled here
+because a snapshot stores group totals rather than server rows.
 
-![Executive dashboard showing a recorded Q1 2026 snapshot](docs/images/dashboard-period.png)
+![Executive dashboard showing a recorded September 2026 snapshot](docs/images/dashboard-period.png)
 
 **History & trends.** Monthly and quarterly compliance against the 95% target,
 with the retained snapshot ledger behind the charts. Green quarters meet the
@@ -159,10 +167,12 @@ target; orange quarters miss it.
 
 ![History and trends charts with the snapshot ledger](docs/images/trends.png)
 
-**Non-compliant servers.** The drill-down register, with state tabs, filters,
-severity counts and CSV export; a hostname opens its full assessment.
+**Patch status.** The server register behind the tiles, with state tabs
+(non-compliant, compliant, unknown, stale), filters by environment, business
+service, application and operating system, search, sorting and CSV export; a
+hostname opens its full assessment.
 
-![Non-compliant server register](docs/images/servers.png)
+![Patch status register with state tabs and filters](docs/images/servers.png)
 
 **Remediation.** Outstanding findings by severity, the active policy's
 remediation windows and the finding register.
@@ -178,6 +188,14 @@ source, current state and audited local placement overrides.
 including the delivery status and recorded hash.
 
 ![Report generation and report history](docs/images/reports.png)
+
+**Management summary.** The one-page landscape sheet from **Export
+Dashboard**: what the estate stands at, how the backlog is moving, where
+exposure concentrates, and which patches remain. Advisories are faceted by
+operating system, so RHEL, Windows and Solaris each keep two rows in the
+capped list.
+
+![One-page landscape management summary PDF](docs/images/management-summary.png)
 
 ## Deployment
 
@@ -254,7 +272,7 @@ PATCHTRACK_TEST_DATABASE_URL=postgresql+psycopg://patchtrack@/patchtrack_test?ho
   /opt/patchtrack-venv/bin/python -m pytest tests/integration
 ```
 
-The suite currently contains 626 tests: 481 unit tests and 145 database
+The suite currently contains 685 tests: 534 unit tests and 151 database
 integration tests. Integration tests create and drop their own scratch
 database; never point them at a database holding real data.
 
@@ -269,6 +287,30 @@ It ignores certificate errors so it can run against the development stack's
 self-signed certificate. Point it at an `http://` URL with
 `PATCHTRACK_TLS_ENABLED=false scripts/dev-run.sh restart` to test a plain-HTTP
 stack instead.
+
+Component/API acceptance and the user-acceptance walkthrough run against a
+running stack, not pytest:
+
+```bash
+PATCHTRACK_URL=http://127.0.0.1:8005 PATCHTRACK_USER=admin \
+  PATCHTRACK_PASSWORD=... python tests/api/acceptance.py
+PATCHTRACK_URL=http://127.0.0.1:8005 PATCHTRACK_USER=admin \
+  PATCHTRACK_PASSWORD=... python tests/uat/acceptance.py
+PATCHTRACK_URL=http://127.0.0.1:8005 PATCHTRACK_USER=admin \
+  PATCHTRACK_PASSWORD=... LOAD_SECONDS=30 LOAD_WORKERS=8 \
+  python tests/perf/load.py
+PATCHTRACK_URL=http://127.0.0.1:8005 PATCHTRACK_USER=admin \
+  PATCHTRACK_PASSWORD=... python tests/security/acceptance.py
+```
+
+The API script checks sessions, CSRF, role boundaries, every read endpoint and
+both PDF paths; the UAT script follows the user stories in a browser and needs
+a populated dataset with a monthly snapshot; the load script measures p50/p95
+latency, throughput and concurrent PDF export; the security script checks
+headers, cookies, CSRF, injection and traversal handling, request limits,
+enumeration, lockout and throttling. All four create throwaway accounts and
+should be aimed at a development or demo stack. Run the security script last:
+it deliberately trips the login throttle for the client address.
 
 ## License
 

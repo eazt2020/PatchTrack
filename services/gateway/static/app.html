@@ -17,21 +17,30 @@
       <div class="brand-mark">
         <img class="brand-logo" src="/static/brand/logo.png" alt="">
       </div>
-      <div>
+      <div class="brand-copy">
         <div class="brand-name">PatchTrack</div>
-        <div class="brand-sub">Patch compliance</div>
+        <div class="brand-sub">Patch intelligence. Simplified</div>
       </div>
     </div>
     <nav class="nav" id="nav" aria-label="Primary"></nav>
     <div class="sidebar-foot">
+      <div class="version-chip">
+        <span class="version-mark" aria-hidden="true">◆</span>
+        <div>
+          <div class="version-name" id="app-version">v3.0.7</div>
+          <div class="version-sub">Open Source Edition</div>
+        </div>
+      </div>
       <div class="user-chip">
         <div class="avatar" id="user-initials">–</div>
-        <div>
+        <div class="user-copy">
           <div class="user-name" id="user-name">–</div>
           <div class="user-role" id="user-role">–</div>
         </div>
+        <button class="icon-btn" id="logout" type="button" title="Sign out" aria-label="Sign out">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 17l5-5-5-5M15 12H3"/></svg>
+        </button>
       </div>
-      <button class="btn btn-sm" id="logout" style="width:100%;justify-content:center">Sign out</button>
     </div>
   </aside>
 
@@ -42,12 +51,21 @@
       <button class="btn btn-sm nav-toggle" id="nav-toggle" type="button"
               aria-controls="sidebar" aria-expanded="false"
               aria-label="Open navigation">☰</button>
-      <h1 id="page-title">Executive dashboard</h1>
-      <span id="page-context" class="topbar-meta"></span>
+      <div class="page-heading">
+        <h1 id="page-title">Executive Dashboard</h1>
+        <p id="page-context" class="page-subtitle"></p>
+      </div>
       <span class="spacer"></span>
-      <span class="topbar-meta" id="last-refresh"></span>
-      <button class="btn btn-sm" id="kiosk-toggle" title="Hide the navigation for a wall display (K)" aria-pressed="false">⛶ TV mode</button>
-      <button class="btn btn-sm" id="refresh" title="Refresh data">Refresh</button>
+      <div id="page-actions" class="page-actions"></div>
+      <div class="topbar-tools">
+        <span class="topbar-meta" id="last-refresh"></span>
+        <button class="icon-btn" id="refresh" type="button" title="Refresh data" aria-label="Refresh data">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></svg>
+        </button>
+        <button class="icon-btn" id="kiosk-toggle" type="button" title="Hide the navigation for a wall display (K)" aria-pressed="false" aria-label="TV mode">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+        </button>
+      </div>
     </header>
     <main class="content" id="view" tabindex="-1"></main>
   </div>

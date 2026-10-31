@@ -787,11 +787,30 @@ def dimensions(
         )
         return [r["v"] for r in rows]
 
+    def placement(kind: str, column: str) -> list[str]:
+        """Values in use plus the configured vocabulary.
+
+        The Settings list is the vocabulary every screen offers, so a value
+        an administrator has just added must appear in a filter even before a
+        server reports it. Values still found on assets but since removed
+        from the list stay selectable so existing inventory remains reachable.
+        Duplicates that differ only in case collapse to the configured spelling.
+        """
+        configured_rows = fetch_all(
+            "SELECT value FROM inventory.placement_options WHERE kind = :kind",
+            kind=kind,
+        )
+        configured = {r["value"].lower(): r["value"] for r in configured_rows}
+        merged: dict[str, str] = dict(configured)
+        for value in distinct(column):
+            merged.setdefault(value.lower(), value)
+        return sorted(merged.values(), key=str.lower)
+
     return {
         "os_family": distinct("os_family"),
         "os_version": distinct("os_version"),
-        "environment": distinct("environment"),
-        "business_group": distinct("business_group"),
+        "environment": placement("environment", "environment"),
+        "business_group": placement("business_group", "business_group"),
         "application_group": distinct("application_group"),
         "patch_source": distinct("patch_source"),
         "lifecycle_status": distinct("lifecycle_status"),

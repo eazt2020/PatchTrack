@@ -2479,11 +2479,17 @@ class Installer:
                 status, body = self._get_json(opener, "/readyz", timeout=5)
             except (urllib.error.URLError, TimeoutError, OSError, ValueError):
                 return False
+            # /readyz reports the four application services plus the database
+            # and backup worker, which the console displays but which do not
+            # decide readiness. Require the application set by name rather
+            # than counting entries, so a new informational service cannot
+            # make a healthy installation fail its verification.
+            services = body.get("services") or {}
+            required = ("identity", "inventory", "compliance", "reporting")
             return (
                 status == 200
                 and body.get("status") == "ready"
-                and all(value == "ok" for value in body.get("services", {}).values())
-                and len(body.get("services", {})) == 4
+                and all(services.get(name) == "ok" for name in required)
             )
 
         wait_for(ready, timeout=240, interval=5, label="the gateway and all four services")

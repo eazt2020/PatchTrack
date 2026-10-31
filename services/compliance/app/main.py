@@ -192,6 +192,172 @@ def _remediation_insight(filters: dict[str, str]) -> dict[str, Any]:
     }
 
 
+def _management_insight(filters: dict[str, str]) -> dict[str, Any]:
+    """SLA and ageing statistics for a management audience.
+
+    NIST SP 800-40r4 asks for remediation measured against the maintenance
+    plan's own deadline, cut by vulnerability severity, rather than a single
+    "% patched" figure. The due date and the release date are already stored on
+    every current finding, so those statistics need no new collection:
+
+    * how many findings are open, due within a week, or past their deadline;
+    * how long past deadline the overdue ones are, in age buckets;
+    * the median and maximum age of the open findings in each severity;
+    * the same overdue counts per environment, for the unit table.
+
+    Time-to-patch (release to *resolution*) is deliberately absent: PatchTrack
+    keeps current findings, not a resolved-finding history, so that number
+    cannot be produced honestly yet.
+    """
+    where, params = _filter_sql(filters)
+    today = datetime.now(UTC).date()
+    soon = today + timedelta(days=7)
+    now = datetime.now(UTC)
+    rows = fetch_all(
+        f"""
+        SELECT f.severity,
+               count(*)::int AS open,
+               count(*) FILTER (
+                 WHERE f.remediation_due >= :today
+                   AND f.remediation_due <= :soon)::int AS due_soon,
+               count(*) FILTER (WHERE f.remediation_due < :today)::int
+                 AS overdue,
+               count(*) FILTER (WHERE f.remediation_due IS NULL)::int
+                 AS undated,
+               coalesce(max(:today - f.remediation_due)
+                 FILTER (WHERE f.remediation_due < :today), 0)::int
+                 AS oldest_days,
+               percentile_cont(0.5) WITHIN GROUP (
+                 ORDER BY EXTRACT(EPOCH FROM (:now - f.released_at)) / 86400)
+                 FILTER (WHERE f.released_at IS NOT NULL) AS median_age_days,
+               count(*) FILTER (
+                 WHERE f.remediation_due < :today
+                   AND :today - f.remediation_due <= 7)::int AS age_1_7,
+               count(*) FILTER (
+                 WHERE :today - f.remediation_due > 7
+                   AND :today - f.remediation_due <= 30)::int AS age_8_30,
+               count(*) FILTER (
+                 WHERE :today - f.remediation_due > 30
+                   AND :today - f.remediation_due <= 90)::int AS age_31_90,
+               count(*) FILTER (
+                 WHERE :today - f.remediation_due > 90)::int AS age_90_plus
+        FROM compliance.findings f
+        JOIN inventory.asset_effective a ON a.id = f.asset_id
+        JOIN compliance.asset_latest_assessment la
+          ON la.assessment_id = f.assessment_id
+        WHERE {where}
+        GROUP BY f.severity
+        """,
+        **params, today=today, soon=soon, now=now,
+    )
+    order = ("critical", "important", "moderate", "low", "unknown")
+    rows.sort(key=lambda row: order.index(row["severity"])
+              if row["severity"] in order else len(order))
+    for row in rows:
+        median = row.get("median_age_days")
+        row["median_age_days"] = round(float(median), 1) if median is not None else None
+        row["oldest_days"] = int(row.get("oldest_days") or 0)
+        for key in ("open", "due_soon", "overdue", "undated"):
+            row[key] = int(row.get(key) or 0)
+        for key in ("age_1_7", "age_8_30", "age_31_90", "age_90_plus"):
+            row[f"days_{key[4:]}"] = int(row.pop(key, 0) or 0)
+
+    units = fetch_all(
+        f"""
+        SELECT a.environment AS group_key,
+               count(DISTINCT f.asset_id)::int AS affected_servers,
+               count(*)::int AS open,
+               count(*) FILTER (WHERE f.remediation_due < :today)::int
+                 AS overdue,
+               coalesce(max(:today - f.remediation_due)
+                 FILTER (WHERE f.remediation_due < :today), 0)::int
+                 AS oldest_days
+        FROM compliance.findings f
+        JOIN inventory.asset_effective a ON a.id = f.asset_id
+        JOIN compliance.asset_latest_assessment la
+          ON la.assessment_id = f.assessment_id
+        WHERE {where}
+        GROUP BY a.environment
+        ORDER BY overdue DESC, open DESC
+        """,
+        **params, today=today,
+    )
+    for unit in units:
+        unit["oldest_days"] = int(unit.get("oldest_days") or 0)
+
+    # Patch-level transparency: the advisories that account for the backlog,
+    # aggregated across hosts and faceted by platform. A single global top-N
+    # ranks whichever operating system has the most late findings, which hides
+    # the other platforms entirely; taking the widest two per OS keeps every
+    # platform represented and lets the reader compare like with like. Breadth
+    # leads the within-platform order because the panel is about how far a
+    # missing patch has spread, not just how late one host is.
+    advisories = fetch_all(
+        f"""
+        WITH per_advisory AS (
+            SELECT coalesce(a.os_family, '') AS os_family,
+                   f.advisory_id,
+                   max(f.title) AS title,
+                   f.severity,
+                   count(DISTINCT f.asset_id)::int AS affected_servers,
+                   count(*)::int AS open,
+                   count(*) FILTER (WHERE f.remediation_due < :today)::int
+                     AS overdue,
+                   coalesce(max(:today - f.remediation_due)
+                     FILTER (WHERE f.remediation_due < :today), 0)::int
+                     AS oldest_days
+            FROM compliance.findings f
+            JOIN inventory.asset_effective a ON a.id = f.asset_id
+            JOIN compliance.asset_latest_assessment la
+              ON la.assessment_id = f.assessment_id
+            WHERE {where}
+            GROUP BY coalesce(a.os_family, ''), f.advisory_id, f.severity
+        ), ranked AS (
+            SELECT per_advisory.*,
+                   row_number() OVER (
+                     PARTITION BY os_family
+                     ORDER BY affected_servers DESC, overdue DESC, open DESC,
+                              oldest_days DESC, advisory_id
+                   ) AS platform_rank
+            FROM per_advisory
+        )
+        SELECT os_family, advisory_id, title, severity, affected_servers,
+               open, overdue, oldest_days
+        FROM ranked
+        WHERE platform_rank <= 2
+        ORDER BY overdue DESC, affected_servers DESC, open DESC,
+                 os_family, advisory_id
+        LIMIT 30
+        """,
+        **params, today=today,
+    )
+    for advisory in advisories:
+        advisory["os_family"] = str(advisory.get("os_family") or "")
+        advisory["advisory_id"] = str(advisory.get("advisory_id") or "—")
+        advisory["title"] = str(advisory.get("title") or "")
+        advisory["oldest_days"] = int(advisory.get("oldest_days") or 0)
+        for key in ("affected_servers", "open", "overdue"):
+            advisory[key] = int(advisory.get(key) or 0)
+
+    return {
+        "as_of": today.isoformat(),
+        "due_soon_days": 7,
+        "by_severity": rows,
+        "units": units,
+        "advisories": advisories,
+        "total_open": sum(row["open"] for row in rows),
+        "overdue": sum(row["overdue"] for row in rows),
+        "due_soon": sum(row["due_soon"] for row in rows),
+        "undated": sum(row["undated"] for row in rows),
+        "overdue_age": {
+            "days_1_7": sum(row["days_1_7"] for row in rows),
+            "days_8_30": sum(row["days_8_30"] for row in rows),
+            "days_31_90": sum(row["days_31_90"] for row in rows),
+            "days_90_plus": sum(row["days_90_plus"] for row in rows),
+        },
+    }
+
+
 def _movers_insight() -> dict[str, Any]:
     """Month-over-month business-service compliance movement.
 
@@ -339,6 +505,10 @@ def summary(
             "excluded": excluded_breakdown(selected.values(), selected_assets),
             "movers": _movers_insight(),
         },
+        # Management statistics span the same filtered population as the KPIs.
+        # They are omitted from recorded-period responses below: a snapshot
+        # stores group totals, not the findings and deadlines these need.
+        "management": _management_insight(filters),
     }
 
 
@@ -497,6 +667,7 @@ def _period_summary(value: str) -> dict[str, Any]:
         "by_application_group": panel("application_group"),
         "severity": severity,
         "dimensions": sorted(by_dimension),
+        "management": None,
     }
 
 

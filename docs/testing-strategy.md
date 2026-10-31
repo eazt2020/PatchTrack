@@ -2,22 +2,26 @@
 
 ## 1. What is verified, and how
 
-The suite has three layers, plus two verification activities that are not
-pytest tests.
+The suite has seven layers, plus the deployment verification activity that is
+not a pytest or browser test.
 
 | Layer | Location | Needs | Count |
 |-------|----------|-------|-------|
-| Unit tests | `tests/unit/` | Nothing but Python | 481 |
-| Database integration tests | `tests/integration/` | PostgreSQL | 145 |
-| Browser smoke test | `tests/ui/smoke.py` | Playwright + Chromium + a running stack | 1 script, 14 routes |
+| Unit tests | `tests/unit/` | Nothing but Python | 534 |
+| Component / API acceptance | `tests/api/acceptance.py` | a running stack and an administrator | 1 script, 63 checks |
+| Database integration tests | `tests/integration/` | PostgreSQL | 151 |
+| Browser end-to-end smoke | `tests/ui/smoke.py` | Playwright + Chromium + a running stack | 1 script, 14 routes |
+| User acceptance walkthrough | `tests/uat/acceptance.py` | Playwright + Chromium + populated data and a monthly snapshot | 1 script, 48 checks |
+| Performance and load | `tests/perf/load.py` | a running stack with seeded history | 1 script, 3 workloads |
+| Security acceptance | `tests/security/acceptance.py` | a running stack and an administrator | 1 script, 41 checks |
 | Deployment verification | manual procedure (§7) | Docker + RHEL/Rocky 9 | full stack |
 
 Run:
 
 ```bash
-/opt/patchtrack-venv/bin/python -m pytest                       # 481 pass, 145 skip without a DB
+/opt/patchtrack-venv/bin/python -m pytest                       # 534 pass, 151 skip without a DB
 PATCHTRACK_TEST_DATABASE_URL='postgresql+psycopg://patchtrack@/patchtrack_test?host=/tmp' \
-  /opt/patchtrack-venv/bin/python -m pytest                     # 626 pass
+  /opt/patchtrack-venv/bin/python -m pytest                     # 683 pass, 2 environmental skips
 ```
 
 `pytest.ini` sets `testpaths = tests`, `--strict-markers` and fails on an
@@ -256,25 +260,62 @@ Historical dashboard periods (`test_dashboard_periods.py`):
   the dimensions it does have, rather than filling the gap from live inventory;
 - reading a period twice does not modify the stored snapshot.
 
-## 4. Browser smoke test
+## 4. Component, API, end-to-end and user acceptance
+
+### 4.1 Component / API acceptance
+
+`tests/api/acceptance.py` drives the running gateway over HTTP. It checks:
+
+- anonymous reads and the management export are refused, a wrong password is
+  rejected, and an administrator can sign in;
+- a mutating request without the `X-PatchTrack-CSRF` header is refused and the
+  same request with it succeeds;
+- every read endpoint the console uses answers 200 — summary, trends,
+  snapshots, periods, policies, inventory dimensions and integrations, sync
+  runs, placement settings, reports, schedules and scheduler jobs, SMTP and
+  backup settings, users, roles, audit and timezone;
+- the summary's headline measures are present and consistent, all three
+  operating systems are represented, and the advisory facet holds at most two
+  per platform with `group_key` on every management unit;
+- a recorded period is labelled as a snapshot and refuses a dimension filter;
+- the server register pages non-compliant rows and the findings register
+  filters by severity;
+- the management PDF export refuses a CSRF-less request and, with the header,
+  returns one valid landscape page carrying every platform;
+- a monthly report is accepted, completes, downloads as a PDF and is recorded
+  with a stored report entry;
+- a viewer can read the dashboard and reports but cannot evaluate compliance,
+  list users or generate reports; the audit trail records `auth.login` success
+  and failure and `user.created`.
+
+```bash
+PATCHTRACK_URL=http://127.0.0.1:8005 PATCHTRACK_USER=admin \
+PATCHTRACK_PASSWORD=… python tests/api/acceptance.py
+```
+
+It creates a uniquely named viewer and changes only that account. It is not
+part of the pytest suite and should be run against a development or demo stack,
+never production.
+
+### 4.2 Browser end-to-end smoke
 
 `tests/ui/smoke.py` signs in and visits all 14 routes. It fails on:
 
 - a console error or an unhandled promise rejection;
 - the text "This view could not be loaded";
 - an empty view element;
-- fewer than 5 `.stat` tiles, or fewer than 4 chart panels on the dashboard.
+- fewer than 5 `.kpi` tiles, or fewer than 4 chart panels on the dashboard.
   A `.chart-empty` placeholder counts as a panel: on a fresh installation
   every chart correctly shows its empty state, and demanding SVG axes there
   would fail a healthy deployment;
-- a Timeframe control that does not start with the three Live options, still
-  shows a separate Basis control, or does not swap in the matching trend panel
-  or persist the choice across a reload;
-- an auto-refresh control missing any of its four documented settings;
-- a Timeframe control that does not list the recorded periods, or a selected
-  period that fails to name its snapshot in the header, leaves the live server
-  list or the dimension filters on screen, or does not return to the live
-  panels when a Live timeframe is chosen;
+- a **Reporting period** control that does not start with the three Live
+  options, still shows a separate Basis control, or does not swap in the
+  matching trend panel or persist the choice across a reload;
+- a **Refresh** control missing any of its four documented settings;
+- a **Reporting period** control that does not list the recorded periods, or a
+  selected period that fails to name its snapshot in the header, leaves the
+  live server list or the dimension filters on screen, or does not return to
+  the live panels when a Live option is chosen;
 - TV mode that does not hide the navigation through the button, `K`, `Esc`
   and the `#/dashboard?tv=1` deep link, or that fails to restore it;
 - any of the eleven registers missing a search box or a Sort by control;
@@ -310,9 +351,95 @@ stack serves HTTPS with a self-signed certificate; set
 `PATCHTRACK_TLS_ENABLED=false` and use an `http://` URL to run it against a
 plain-HTTP stack instead. Its `--screenshot` option produces an artifact for visual review.
 
+### 4.3 User acceptance walkthrough
+
+`tests/uat/acceptance.py` follows the personas in
+[user stories](user-stories.md) through the console:
+
+- **US-1** — the dashboard shows every headline measure, the percentage equals
+  `compliant / (compliant + non_compliant + unknown + stale)`, the counts add
+  up to the in-scope total, unknown and stale are visible, freshness names the
+  collections, and the monthly trend states its target.
+- **US-3** — a recorded period names its snapshot, explains that it is a frozen
+  record, withholds live dimension filters, and appears in the history ledger.
+- **US-4** — a non-compliant server shows its compliance reason, last
+  assessment and outstanding advisories, and never claims PatchTrack deploys
+  the patch.
+- **US-5** — the findings register shows hostname, advisory, severity and
+  source, severities are counted, and deadlines come from the policy.
+- **Export** — the console downloads a one-page landscape management summary
+  carrying RHEL, Windows, Solaris, business services and per-platform
+  advisories.
+- **US-8** — a reporting month resolves to a frozen monthly snapshot, the PDF
+  is generated and downloaded, carries summary, compliance, methodology and
+  data-quality content, states whether the target was met, and its SHA-256
+  matches the archived record.
+- **Role** — a viewer can read the dashboard but is not offered the management
+  export or user administration.
+
+```bash
+PATCHTRACK_URL=http://127.0.0.1:8005 PATCHTRACK_USER=admin \
+PATCHTRACK_PASSWORD=… python tests/uat/acceptance.py
+```
+
+It needs a populated demo or real dataset with at least one monthly snapshot;
+it creates a uniquely named viewer and leaves the rest of the data alone.
+
+### 4.4 Performance and load
+
+`tests/perf/load.py` drives a mixed read workload with concurrent clients and
+reports p50/p95/p99 latency, throughput and errors. It also measures recorded
+period reads, which rebuild the summary from the snapshot ledger, and runs
+concurrent PDF exports to check the one-page management summary under parallel
+load.
+
+```bash
+PATCHTRACK_URL=http://127.0.0.1:8005 PATCHTRACK_USER=admin \
+  PATCHTRACK_PASSWORD=… LOAD_SECONDS=30 LOAD_WORKERS=8 \
+  python tests/perf/load.py
+```
+
+The script passes when the read mix has no errors and p95 stays under 2 s, the
+recorded-period p95 under 3 s, and every concurrent export succeeds as a
+one-page PDF with p95 under 10 s. These are smoke bounds for a development or
+demo stack, not a production capacity guarantee; see
+[architecture.md](architecture.md) for sizing guidance.
+
+### 4.5 Security acceptance
+
+`tests/security/acceptance.py` checks the application's security controls from
+the outside:
+
+- security headers, CSP directives, HSTS on TLS only, no wildcard CORS and no
+  server banner;
+- session and CSRF cookie attributes, a fresh CSRF token per sign-in, and
+  refusal of mutations with a missing or wrong token;
+- SQL metacharacters and script payloads handled as data, encoded path
+  traversal refused, and no HTML negotiation from an API route;
+- a declared body over 64 MB refused before it is read, wrong methods refused,
+  and a form body not accepted as JSON;
+- identical 401 bodies for an unknown account and a wrong password, lockout
+  after five failures even with the correct password, and 429 with
+  `Retry-After` once the per-address throttle trips;
+- logout invalidating the session.
+
+```bash
+PATCHTRACK_URL=http://127.0.0.1:8005 PATCHTRACK_USER=admin \
+  PATCHTRACK_PASSWORD=… python tests/security/acceptance.py
+```
+
+Run it last on a throwaway stack: it creates a probe account and deliberately
+trips the login throttle for the client address, which affects later sign-ins
+from that address for fifteen minutes.
+
+The runtime pins in `deploy/container/requirements.txt` are also scanned with
+`pip-audit`; the hashed lock is regenerated with `pip-compile`. This pass moved
+`paramiko` to 5.1.0 and `python-multipart` to 0.0.33 after known advisories and
+reran the affected connector and gateway tests.
+
 ## 5. What the tests have already found
 
-Twenty real defects, all fixed:
+Twenty-one real defects, all fixed:
 
 1. **Freshness slack.** The engine rounded assessment age to two decimals
    before comparing it with the threshold, so an assessment up to 30 seconds
@@ -406,6 +533,12 @@ delivery path now has its own tests.
     the inventory still displayed. Deletion is now refused (409) while any
     server holds the value; rename is the way to change it. The Settings button
     is disabled in that case, and the browser test asserts it.
+21. **A throttled sign-in lost its `Retry-After`.** The gateway's proxy
+    whitelist forwarded only content headers, and the dedicated login route
+    rebuilt the upstream error without its headers. A client received a bare
+    429 with no instruction on how long to wait. Both paths now forward
+    `Retry-After`; `test_gateway_proxy_headers.py` covers the whitelist and the
+    login conversion.
 
 ## 6. Coverage gaps, stated honestly
 
@@ -417,7 +550,7 @@ delivery path now has its own tests.
 | PDF visual layout | **Not asserted.** Tests check validity, size, EOF and digest, not whether a table overflows. Review a generated report visually after any change to `pdf.py`. |
 | Docker Engine topology | **Executed under Podman 5.8.2, not Docker Engine.** The same compose file brought the stack up end to end; Docker's own label and health-check handling should be confirmed on the target. |
 | SELinux enforcing | **Exercised with Podman on an enforcing host** (`:Z` mounts worked without `setenforce`), not with the Docker daemon's relabelling. |
-| Performance at scale | **Not measured.** Estimates are in [architecture.md](architecture.md) and each integration document. |
+| Performance at scale | **Measured on demo scale only.** `tests/perf/load.py` was run against 100 assets and five years of synthetic history, not a production estate or network. Capacity planning still needs a representative dataset; estimates are in [architecture.md](architecture.md). |
 
 These gaps are the reason [install.md](install.md) includes a verification
 step and each integration document ends with a checklist.

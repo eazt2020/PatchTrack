@@ -17,9 +17,11 @@ from __future__ import annotations
 import argparse
 import csv
 import io
+import json
 import os
 import re
 import sys
+import time
 
 from playwright.sync_api import sync_playwright
 
@@ -32,6 +34,38 @@ ROUTES = [
 BASE = os.environ.get("PATCHTRACK_URL", "https://127.0.0.1:8005")
 USER = os.environ.get("PATCHTRACK_USER", "admin")
 PASSWORD = os.environ.get("PATCHTRACK_PASSWORD", "")
+
+
+def _generate_fixture_report(context) -> None:
+    """Create one completed report so the administrator's selection column has a row.
+
+    The seeded demo database does not ship report history, and the register
+    renders its empty state (no table, no checkbox column) until one exists.
+    """
+    token = next((cookie["value"] for cookie in context.cookies()
+                  if cookie["name"] == "patchtrack_csrf"), "")
+    headers = {"X-PatchTrack-CSRF": token, "Content-Type": "application/json"}
+    snapshots = context.request.get(
+        f"{BASE}/api/compliance/snapshots?limit=40").json()
+    rows = snapshots if isinstance(snapshots, list) else snapshots.get("snapshots") or []
+    monthly = [row for row in rows if row.get("scope") == "monthly"]
+    if not monthly:
+        return
+    created = context.request.post(
+        f"{BASE}/api/reporting/reports", headers=headers,
+        data=json.dumps({"report_type": "monthly_management",
+                         "snapshot_id": monthly[0]["id"]}))
+    if created.status != 202:
+        return
+    report_id = (created.json() or {}).get("id")
+    for _ in range(45):
+        payload = context.request.get(
+            f"{BASE}/api/reporting/reports?limit=10").json()
+        items = payload if isinstance(payload, list) else payload.get("items") or []
+        current = next((row for row in items if row.get("id") == report_id), None)
+        if (current or {}).get("status") in ("completed", "failed"):
+            return
+        time.sleep(1)
 
 
 def main() -> int:
@@ -93,7 +127,7 @@ def main() -> int:
         page.goto(f"{BASE}/#/dashboard", wait_until="networkidle")
         page.wait_for_timeout(800)
         charts = page.locator("#view svg").count()
-        tiles = page.locator("#view .stat").count()
+        tiles = page.locator("#view .kpi").count()
         # On a brand-new installation the estate is empty, and every chart
         # renders its documented empty state ("No servers match the current
         # filters.") instead of axes. That is correct behaviour, not a
@@ -127,7 +161,7 @@ def main() -> int:
                   f"({len(business_labels)})")
         os_card = page.locator("#view .card", has_text="Compliance by operating system")
         os_labels = [t.strip() for t in
-                     os_card.locator("svg .axis-label").all_text_contents()]
+                     os_card.locator(".donut-legend-name").all_text_contents()]
         family_labels = {"rhel": "RHEL", "windows": "Microsoft Windows",
                          "solaris": "Solaris", "other": "Other"}
         expected_os = {family_labels.get(r["group"], r["group"])
@@ -141,15 +175,15 @@ def main() -> int:
 
         # --- timeframe: one control for liveness and trend granularity --------
         timeframe = page.locator(
-            '.dashboard-controls .field', has_text="Timeframe").locator("select")
+            '.dashboard-controls .field', has_text="Reporting period").locator("select")
         if timeframe.count() != 1:
             fail(f"dashboard: expected one Timeframe control, found {timeframe.count()}")
             period_options: list[str] = []
         else:
             period_options = [o.strip() for o in
                               timeframe.first.locator("option").all_text_contents()]
-            expected_live = ["Live · monthly trend", "Live · quarterly trend",
-                             "Live · yearly trend"]
+            expected_live = ["Live · monthly", "Live · quarterly",
+                             "Live · yearly"]
             if period_options[:3] != expected_live:
                 fail(f"dashboard: Timeframe must start with {expected_live}, "
                      f"got {period_options[:3]}")
@@ -178,7 +212,7 @@ def main() -> int:
             page.reload(wait_until="networkidle")
             page.wait_for_timeout(800)
             timeframe = page.locator(
-                '.dashboard-controls .field', has_text="Timeframe").locator("select")
+                '.dashboard-controls .field', has_text="Reporting period").locator("select")
             kept = timeframe.first.input_value()
             if kept != "live:quarterly":
                 fail(f"dashboard: the timeframe choice did not survive a reload "
@@ -203,7 +237,7 @@ def main() -> int:
                 if chosen["label"] not in context:
                     fail(f"dashboard: period view did not name {chosen['label']} "
                          f"(context was {context!r})")
-                if "Recent non-compliant servers" in body:
+                if "Recent Non-Compliant Servers" in body:
                     fail("dashboard: the live server list is still shown in a period view")
                 if page.locator(
                         '.filterbar .field', has_text="Environment").count() != 0:
@@ -213,7 +247,7 @@ def main() -> int:
                          + " | ".join(console_errors))
                 timeframe.select_option("live:monthly")
                 page.wait_for_timeout(900)
-                if "Recent non-compliant servers" not in (page.text_content("#view") or ""):
+                if "Recent Non-Compliant Servers" not in (page.text_content("#view") or ""):
                     fail("dashboard: returning to Live did not restore the live panels")
                 print(f"ok  dashboard timeframe offers {len(period_options) - 3} "
                       f"recorded periods and switches to {chosen['label']} and back")
@@ -221,7 +255,7 @@ def main() -> int:
                 print("ok  dashboard timeframe present; no snapshots recorded yet")
         # --- auto-refresh ----------------------------------------------------
         refresh = page.locator(
-            '.dashboard-controls .field', has_text="Auto-refresh").locator("select")
+            '.dashboard-controls .field', has_text="Refresh").locator("select")
         options: list[str] = []
         if refresh.count() != 1:
             fail(f"dashboard: expected one auto-refresh control, found {refresh.count()}")
@@ -371,9 +405,17 @@ def main() -> int:
         print("ok  dashboard, operational health, settings and reports have no CSV export")
 
         # Report deletion is selectable in the UI for an administrator, but the
-        # checkbox column must not appear as data in the CSV export.
+        # checkbox column must not appear as data in the CSV export. A fresh
+        # install has no reports yet and the table renders its empty state, so
+        # ask the API for one first rather than testing an empty register.
         page.goto(f"{BASE}/#/reports", wait_until="networkidle")
         page.wait_for_timeout(400)
+        if not page.locator("table.data .select-cell").count():
+            _generate_fixture_report(browser_context)
+            # Already on #/reports: navigating to the same hash is a no-op, so
+            # reload the page to let the SPA fetch the new row.
+            page.reload(wait_until="networkidle")
+            page.wait_for_timeout(400)
         if not page.locator("table.data .select-cell input[type=checkbox]").count():
             fail("reports: no selection checkboxes for an administrator")
         if page.get_by_role("button", name="Delete selected").count() == 0:
@@ -645,6 +687,18 @@ def main() -> int:
         # A value that servers still hold cannot be deleted: the inventory must
         # never show a placement the list no longer recognises. The button is
         # disabled, so the refusal is visible before the click.
+        #
+        # Demo data is inserted after migrations, so the settings list starts
+        # empty and needs one existing environment added before this rule can
+        # be observed. Add it only once so a rerun stays idempotent.
+        placement_rows = [t.strip() for t in page.locator(
+            "#view tbody tr td:first-child").all_text_contents()]
+        if "Production" not in placement_rows:
+            env_add = page.locator(
+                "#view input[placeholder='New environment value']")
+            env_add.fill("Production")
+            page.locator("#view").get_by_role("button", name="Add").first.click()
+            page.wait_for_timeout(1200)
         in_use_delete = page.locator("#view tbody tr button:disabled").filter(
             has_text="Delete")
         if in_use_delete.count() == 0:

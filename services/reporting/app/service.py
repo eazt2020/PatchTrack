@@ -267,34 +267,46 @@ def _reason_labels(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return rows
 
 
+def organization_branding() -> dict[str, Any]:
+    """The organisation name, logo and sign-off names used on every export."""
+    organization = fetch_one(
+        "SELECT value FROM shared.app_settings WHERE key = 'organization'"
+    )
+    branding: dict[str, Any] = {
+        "name": "PatchTrack", "logo_path": None, "logo_data": None,
+        "preparer_name": "", "preparer_title": "",
+        "concur_name": "", "concur_title": "",
+    }
+    if organization:
+        value = organization["value"]
+        if isinstance(value, str):
+            value = json.loads(value)
+        if isinstance(value, dict):
+            branding["name"] = value.get("name") or branding["name"]
+            # The logo is stored with the setting so every reporting replica
+            # renders the same cover; a legacy path is still honoured for an
+            # installation that had one before the uploader existed.
+            branding["logo_path"] = value.get("logo_path")
+            branding["logo_data"] = _decode_logo(value.get("logo_data"))
+            for key in ("preparer_name", "preparer_title",
+                        "concur_name", "concur_title"):
+                branding[key] = str(value.get(key) or "")
+    return branding
+
+
 def build_context(report: dict[str, Any]) -> ReportContext:
     snapshot = _load_snapshot_for(report)
     groups = _snapshot_groups(str(snapshot["id"]))
     period_label = _period_label(snapshot)
-    organization = fetch_one(
-        "SELECT value FROM shared.app_settings WHERE key = 'organization'"
-    )
-    org_name = "PatchTrack"
-    logo_path = None
-    logo_data = None
-    organization_fields: dict[str, str] = {}
-    if organization:
-        value = organization["value"]
-        if isinstance(value, str):
-            import json
-            value = json.loads(value)
-        if isinstance(value, dict):
-            org_name = value.get("name") or org_name
-            # The logo is stored with the setting so every reporting replica
-            # renders the same cover; a legacy path is still honoured for an
-            # installation that had one before the uploader existed.
-            logo_path = value.get("logo_path")
-            logo_data = _decode_logo(value.get("logo_data"))
-            organization_fields = {
-                key: str(value.get(key) or "") for key in (
-                    "preparer_name", "preparer_title", "concur_name", "concur_title",
-                )
-            }
+    branding = organization_branding()
+    org_name = branding["name"]
+    logo_path = branding["logo_path"]
+    logo_data = branding["logo_data"]
+    organization_fields = {
+        key: branding[key] for key in (
+            "preparer_name", "preparer_title", "concur_name", "concur_title",
+        )
+    }
     methodology = snapshot.get("methodology") or {}
     if isinstance(methodology, str):
         import json

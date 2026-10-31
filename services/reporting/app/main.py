@@ -22,7 +22,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
@@ -86,6 +86,7 @@ from .service import (
     REPORT_TITLES,
     deliver_report,
     generate_report,
+    organization_branding,
     purge_expired,
     report_retention_days,
 )
@@ -513,6 +514,198 @@ def request_board_pack(
     background.add_task(_background_generate, report_id, False, [])
     return {"id": report_id, "status": "queued",
             "snapshot_id": str(snapshot["id"])}
+
+
+class DashboardKpis(BaseModel):
+    """The figures already rendered on the board; the PDF repeats them."""
+
+    total_servers: float = 0
+    in_scope: float = 0
+    compliant: float = 0
+    non_compliant: float = 0
+    unknown: float = 0
+    stale: float = 0
+    excluded: float = 0
+    compliance_pct: float | None = None
+    target_pct: float | None = None
+    gap_pct: float | None = None
+    gap_servers: float = 0
+    critical_findings: float = 0
+    total_findings: float = 0
+
+
+class DashboardGroupRow(BaseModel):
+    group: str = ""
+    total_servers: float = 0
+    compliant: float = 0
+    non_compliant: float = 0
+    unknown: float = 0
+    stale: float = 0
+    in_scope: float = 0
+
+
+class DashboardSeverityRow(BaseModel):
+    severity: str = ""
+    count: float = 0
+
+
+class DashboardTrendPoint(BaseModel):
+    label: str = ""
+    compliance_pct: float | None = None
+    target_pct: float | None = None
+    total_servers: float | None = None
+
+
+class DashboardServerRow(BaseModel):
+    hostname: str = ""
+    environment: str = ""
+    os_name: str = ""
+    os_version: str = ""
+    total_patches: float = 0
+    days_since_assessment: float | None = None
+
+
+class DashboardRemediation(BaseModel):
+    overdue: float = 0
+    total: float = 0
+    due_soon: float = 0
+    due_soon_days: float = 0
+    oldest_days_overdue: float = 0
+    on_track: float = 0
+    undated: float = 0
+
+
+class DashboardFreshness(BaseModel):
+    """Whether the numbers rest on current collection, not a stale cache."""
+
+    total_sources: float = 0
+    stale_sources: float = 0
+    oldest_age_hours: float | None = None
+
+
+class ManagementSeveritySla(BaseModel):
+    severity: str = ""
+    open: float = 0
+    due_soon: float = 0
+    overdue: float = 0
+    undated: float = 0
+    oldest_days: float = 0
+    median_age_days: float | None = None
+    days_1_7: float = 0
+    days_8_30: float = 0
+    days_31_90: float = 0
+    days_90_plus: float = 0
+
+
+class ManagementUnit(BaseModel):
+    group: str = ""
+    group_key: str = ""
+    affected_servers: float = 0
+    open: float = 0
+    overdue: float = 0
+    oldest_days: float = 0
+
+
+class ManagementOverdueAge(BaseModel):
+    days_1_7: float = 0
+    days_8_30: float = 0
+    days_31_90: float = 0
+    days_90_plus: float = 0
+
+
+class ManagementAdvisory(BaseModel):
+    """One outstanding advisory, aggregated across the fleet."""
+
+    advisory_id: str = ""
+    title: str = ""
+    severity: str = ""
+    os_family: str = ""
+    affected_servers: float = 0
+    open: float = 0
+    overdue: float = 0
+    oldest_days: float = 0
+
+
+class DashboardManagement(BaseModel):
+    """SLA and ageing statistics computed by the compliance service."""
+
+    as_of: str = ""
+    due_soon_days: float = 7
+    by_severity: list[ManagementSeveritySla] = Field(default_factory=list, max_length=10)
+    units: list[ManagementUnit] = Field(default_factory=list, max_length=80)
+    advisories: list[ManagementAdvisory] = Field(default_factory=list, max_length=30)
+    overdue_age: ManagementOverdueAge = Field(default_factory=ManagementOverdueAge)
+    total_open: float = 0
+    overdue: float = 0
+    due_soon: float = 0
+    undated: float = 0
+
+
+class DashboardExportRequest(BaseModel):
+    """The current dashboard view, ready to be drawn.
+
+    The console sends the numbers it just displayed, so the sheet cannot
+    disagree with the screen. Counts are capped in the renderer, not trusted
+    for anything beyond layout.
+    """
+
+    mode: str = "live"
+    scope_label: str = Field("Live", max_length=240)
+    environment: str = Field("", max_length=120)
+    kpis: DashboardKpis = Field(default_factory=DashboardKpis)
+    remediation: DashboardRemediation | None = None
+    freshness: DashboardFreshness | None = None
+    management: DashboardManagement | None = None
+    by_environment: list[DashboardGroupRow] = Field(default_factory=list, max_length=80)
+    by_business_group: list[DashboardGroupRow] = Field(default_factory=list, max_length=80)
+    by_os: list[DashboardGroupRow] = Field(default_factory=list, max_length=80)
+    severity: list[DashboardSeverityRow] = Field(default_factory=list, max_length=20)
+    trend: list[DashboardTrendPoint] = Field(default_factory=list, max_length=120)
+    servers: list[DashboardServerRow] = Field(default_factory=list, max_length=20)
+
+
+@app.post("/reports/dashboard-export")
+def export_dashboard(
+    payload: DashboardExportRequest,
+    request: Request,
+    principal: Annotated[Principal, Depends(require_permission("reports:generate"))],
+) -> Response:
+    """Render the current dashboard as a one-page management summary.
+
+    Unlike the board pack this is rendered synchronously and is not archived:
+    it is a picture of the screen the operator is looking at, shaped for a
+    management reader. Because the document is already in the browser response,
+    no queue or file retention is involved.
+    """
+    from .management_pdf import render_management_pdf
+
+    branding = organization_branding()
+    generated = datetime.now(UTC)
+    document = render_management_pdf(
+        payload,
+        organization=str(branding.get("name") or "PatchTrack"),
+        generated_at=generated,
+        generated_by=principal.username,
+        timezone=timezone_settings.system_timezone(),
+        logo_data=branding.get("logo_data"),
+        logo_path=branding.get("logo_path"),
+    )
+    filename = f"patchtrack-management-summary-{generated:%Y%m%d-%H%M}.pdf"
+    record_audit(
+        event_type="report.dashboard_exported", outcome="success",
+        principal=principal, target_type="report", target_id="dashboard",
+        context={"mode": payload.mode, "scope": payload.scope_label,
+                 "environment": payload.environment},
+        source_ip=_client_ip(request), service=APP,
+    )
+    return Response(
+        content=document,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 def _background_generate(report_id: str, deliver: bool,
