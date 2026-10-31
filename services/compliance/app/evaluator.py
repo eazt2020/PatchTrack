@@ -120,34 +120,42 @@ def evaluate_all(*, now: datetime | None = None) -> tuple[
 def persist_states(
     evaluations: dict[str, Evaluation], version_id: str | None
 ) -> None:
+    # One executemany round trip instead of one execute per asset: a scheduled
+    # refresh writes the whole population, and at a thousand assets the
+    # per-row round trips dominated the refresh (hundreds of milliseconds).
+    params = [
+        {
+            "a": evaluation.asset_id, "s": evaluation.state,
+            "r": evaluation.reason, "pv": version_id,
+            "age": evaluation.assessment_age_hours,
+            "crit": evaluation.severity_counts.get("critical", 0),
+            "total": evaluation.total_patches,
+        }
+        for evaluation in evaluations.values()
+    ]
+    if not params:
+        return
     with connection() as conn:
-        for evaluation in evaluations.values():
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO compliance.asset_compliance (
-                        asset_id, state, reason, policy_version_id, evaluated_at,
-                        assessment_age_hours, critical_count, total_patches
-                    ) VALUES (
-                        :a, :s, :r, :pv, now(), :age, :crit, :total
-                    )
-                    ON CONFLICT (asset_id) DO UPDATE SET
-                        state = EXCLUDED.state, reason = EXCLUDED.reason,
-                        policy_version_id = EXCLUDED.policy_version_id,
-                        evaluated_at = EXCLUDED.evaluated_at,
-                        assessment_age_hours = EXCLUDED.assessment_age_hours,
-                        critical_count = EXCLUDED.critical_count,
-                        total_patches = EXCLUDED.total_patches
-                    """
-                ),
-                {
-                    "a": evaluation.asset_id, "s": evaluation.state,
-                    "r": evaluation.reason, "pv": version_id,
-                    "age": evaluation.assessment_age_hours,
-                    "crit": evaluation.severity_counts.get("critical", 0),
-                    "total": evaluation.total_patches,
-                },
-            )
+        conn.execute(
+            text(
+                """
+                INSERT INTO compliance.asset_compliance (
+                    asset_id, state, reason, policy_version_id, evaluated_at,
+                    assessment_age_hours, critical_count, total_patches
+                ) VALUES (
+                    :a, :s, :r, :pv, now(), :age, :crit, :total
+                )
+                ON CONFLICT (asset_id) DO UPDATE SET
+                    state = EXCLUDED.state, reason = EXCLUDED.reason,
+                    policy_version_id = EXCLUDED.policy_version_id,
+                    evaluated_at = EXCLUDED.evaluated_at,
+                    assessment_age_hours = EXCLUDED.assessment_age_hours,
+                    critical_count = EXCLUDED.critical_count,
+                    total_patches = EXCLUDED.total_patches
+                """
+            ),
+            params,
+        )
 
 
 def apply_remediation_due(

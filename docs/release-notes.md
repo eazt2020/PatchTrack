@@ -2,8 +2,9 @@
 
 ## 3.0.7 — 2026-10-31
 
-Executive dashboard insights. Migrations `023_report_board_pack` and
-`024_solaris_ssh_targets` are applied by the migrate service on start-up.
+Executive dashboard insights and lower request latency. Migrations
+`023_report_board_pack`, `024_solaris_ssh_targets` and `025_search_indexes` are
+applied by the migrate service on start-up.
 
 ### Executive dashboard
 
@@ -90,6 +91,26 @@ Executive dashboard insights. Migrations `023_report_board_pack` and
   date at evaluation time, so the SLA buckets and the overdue filter populate
   for collected data. Existing undated findings are backfilled on the next
   compliance refresh; a date already recorded is never rewritten.
+
+### Performance
+
+- **Compliance refresh writes the population in one round trip.** The state
+  upsert was one statement per asset; a thousand-asset estate made a scheduled
+  refresh take roughly 440 ms. It is now a single `executemany` (about 70 ms
+  for the whole refresh, including evaluation).
+- **Dashboard panels make fewer queries.** The freshness panel resolves both
+  headline tiles and every source in two queries instead of four, the movers
+  panel reads both months and their groups in two instead of five, and the
+  server register derives its page total from the stats query unless a
+  compliance-state filter is applied.
+- **Reports no longer query deliveries per row.** A reports page loads the
+  five most recent delivery attempts for every report in one query instead of
+  one query per report, and the integrations list resolves each source's
+  latest and latest-successful run together.
+- **Substring search has trigram indexes.** Migration `025_search_indexes`
+  adds `pg_trgm` GIN indexes on hostname, FQDN, owner, department and location
+  so the register's leading-wildcard search can use an index instead of a
+  sequential scan as the estate grows.
 
 ## 3.0.6 — 2026-10-30
 

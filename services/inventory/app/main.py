@@ -197,16 +197,9 @@ def list_assets(
     if sort == "hostname":
         sort_column = "a.hostname"
     order = "DESC" if direction.lower() == "desc" else "ASC"
-    total = fetch_one(
-        f"SELECT count(*) AS n FROM inventory.asset_effective a "
-        f"LEFT JOIN compliance.asset_compliance c ON c.asset_id = a.id WHERE {where}",
-        **params,
-    )
-    rows = fetch_all(
-        f"{ASSET_BASE_SQL} WHERE {where} ORDER BY {sort_column} {order}, a.id "
-        "LIMIT :limit OFFSET :offset",
-        **params, limit=page_size, offset=(page - 1) * page_size,
-    )
+    # The stats query already counts the whole filtered register, so when the
+    # compliance-state filter is absent (the common page load) its total is the
+    # page total too. Only a state-filtered list needs the extra count.
     stats = fetch_one(
         "SELECT count(*) AS total, "
         "count(*) FILTER (WHERE c.state = 'excluded') AS excluded, "
@@ -220,9 +213,24 @@ def list_assets(
         f"WHERE {stats_where}",
         **stats_params,
     ) or {}
+    if compliance_state:
+        total = fetch_one(
+            f"SELECT count(*) AS n FROM inventory.asset_effective a "
+            f"LEFT JOIN compliance.asset_compliance c ON c.asset_id = a.id "
+            f"WHERE {where}",
+            **params,
+        )
+        total_n = total["n"] if total else 0
+    else:
+        total_n = stats.get("total", 0)
+    rows = fetch_all(
+        f"{ASSET_BASE_SQL} WHERE {where} ORDER BY {sort_column} {order}, a.id "
+        "LIMIT :limit OFFSET :offset",
+        **params, limit=page_size, offset=(page - 1) * page_size,
+    )
     return {
         "items": rows,
-        "total": total["n"] if total else 0,
+        "total": total_n,
         "page": page,
         "page_size": page_size,
         "stats": stats,
@@ -1272,36 +1280,39 @@ def list_integrations(
     rows = fetch_all(
         f"SELECT {INTEGRATION_PUBLIC_COLUMNS} FROM inventory.integrations ORDER BY key"
     )
+    # Solaris target counts are set-based, so read them once rather than from
+    # inside the per-integration loop.
+    solaris_counts = fetch_one(
+        """
+        SELECT count(*) AS total,
+               count(*) FILTER (WHERE enabled) AS enabled,
+               count(*) FILTER (WHERE enabled AND last_error <> '') AS failing
+        FROM inventory.solaris_targets
+        """
+    ) or {}
     for row in rows:
+        # The latest run and the latest successful run come back together;
+        # one round trip per integration instead of two.
         last = fetch_one(
             """
             SELECT status, started_at, finished_at, records_seen, records_created,
-                   records_updated, records_rejected, assets_unmatched, error_summary,
-                   EXTRACT(EPOCH FROM (finished_at - started_at)) AS duration_s
+                   records_updated, records_rejected, assets_unmatched,
+                   error_summary,
+                   EXTRACT(EPOCH FROM (finished_at - started_at)) AS duration_s,
+                   (SELECT max(finished_at) FROM inventory.sync_runs
+                    WHERE integration_key = :k AND status = 'success')
+                     AS last_success_at
             FROM inventory.sync_runs WHERE integration_key = :k
             ORDER BY started_at DESC LIMIT 1
             """,
             k=row["key"],
         )
-        success = fetch_one(
-            "SELECT max(finished_at) AS at FROM inventory.sync_runs "
-            "WHERE integration_key = :k AND status = 'success'",
-            k=row["key"],
-        )
         row["last_run"] = last
-        row["last_success_at"] = success["at"] if success else None
+        row["last_success_at"] = last.pop("last_success_at") if last else None
         if row["key"] == "solaris":
-            counts = fetch_one(
-                """
-                SELECT count(*) AS total,
-                       count(*) FILTER (WHERE enabled) AS enabled,
-                       count(*) FILTER (WHERE enabled AND last_error <> '') AS failing
-                FROM inventory.solaris_targets
-                """
-            ) or {}
-            row["target_count"] = int(counts.get("enabled") or 0)
-            row["target_total"] = int(counts.get("total") or 0)
-            row["target_failing"] = int(counts.get("failing") or 0)
+            row["target_count"] = int(solaris_counts.get("enabled") or 0)
+            row["target_total"] = int(solaris_counts.get("total") or 0)
+            row["target_failing"] = int(solaris_counts.get("failing") or 0)
         row["health"] = _health(row, last)
     return rows
 

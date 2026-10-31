@@ -547,15 +547,35 @@ def list_reports(
         f"SELECT count(*) AS n FROM reporting.reports WHERE {where}",
         **{k: v for k, v in params.items() if k not in ("l", "o")},
     )
+    # One delivery query for the page instead of one per report. The list is
+    # the Reports screen's first paint, so a 50-row page used to make 50
+    # round trips before it could render.
+    deliveries_by_report: dict[Any, list[dict[str, Any]]] = {}
+    if rows:
+        deliveries = fetch_all(
+            """
+            SELECT report_id, status, attempted_at, detail
+            FROM (
+                SELECT report_id, status, attempted_at, detail,
+                       row_number() OVER (
+                           PARTITION BY report_id ORDER BY attempted_at DESC
+                       ) AS position
+                FROM reporting.delivery_attempts
+                WHERE report_id = ANY(:ids)
+            ) ranked
+            WHERE position <= 5
+            ORDER BY report_id, attempted_at DESC
+            """,
+            ids=[row["id"] for row in rows],
+        )
+        for delivery in deliveries:
+            deliveries_by_report.setdefault(
+                delivery.pop("report_id"), []
+            ).append(delivery)
     items = []
     for row in rows:
         view = _report_view(row)
-        deliveries = fetch_all(
-            "SELECT status, attempted_at, detail FROM reporting.delivery_attempts "
-            "WHERE report_id = :id ORDER BY attempted_at DESC LIMIT 5",
-            id=row["id"],
-        )
-        view["deliveries"] = deliveries
+        view["deliveries"] = deliveries_by_report.get(row["id"], [])
         items.append(view)
     return {"items": items, "total": total["n"] if total else 0}
 

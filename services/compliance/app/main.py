@@ -47,7 +47,6 @@ from .evaluator import (
     create_snapshot,
     ensure_daily_snapshot,
     evaluate_all,
-    load_assets,
     refresh_compliance,
 )
 
@@ -193,55 +192,63 @@ def _remediation_insight(filters: dict[str, str]) -> dict[str, Any]:
     }
 
 
-def _snapshot_panel_for_month(month_start) -> dict[str, Any] | None:
-    """The latest daily snapshot inside one calendar month, with its groups."""
-    snapshot = fetch_one(
-        """
-        SELECT id, period_start FROM compliance.snapshots
-        WHERE scope = 'daily'
-          AND period_start >= :start
-          AND period_start < (CAST(:start AS date) + interval '1 month')
-        ORDER BY period_start DESC, captured_at DESC LIMIT 1
-        """,
-        start=month_start,
-    )
-    if snapshot is None:
-        return None
-    rows = fetch_all(
-        """
-        SELECT group_key, total_servers, compliant, non_compliant, unknown,
-               stale, finding_count
-        FROM compliance.snapshot_groups
-        WHERE snapshot_id = :id AND dimension = 'business_group'
-        """,
-        id=snapshot["id"],
-    )
-    return {
-        "period_start": snapshot["period_start"],
-        "rows": _snapshot_group_rows(rows),
-    }
-
-
 def _movers_insight() -> dict[str, Any]:
     """Month-over-month business-service compliance movement.
 
     Recorded snapshots store one dimension per snapshot, so this panel is
     fleet-wide: it cannot follow the live dimension filters without inventing
     numbers the snapshots do not hold.
+
+    Both months are resolved and read in one transaction: the panel refreshes
+    with every dashboard poll, and four round trips for two immutable rows were
+    pure latency.
     """
-    months = fetch_all(
+    picked = fetch_all(
         """
-        SELECT DISTINCT date_trunc('month', period_start)::date AS month
-        FROM compliance.snapshots WHERE scope = 'daily'
-        ORDER BY month DESC LIMIT 2
+        WITH months AS (
+            SELECT DISTINCT date_trunc('month', period_start)::date AS month
+            FROM compliance.snapshots
+            WHERE scope = 'daily'
+            ORDER BY month DESC
+            LIMIT 2
+        )
+        SELECT m.month, s.id, s.period_start
+        FROM months m
+        CROSS JOIN LATERAL (
+            SELECT s.id, s.period_start
+            FROM compliance.snapshots s
+            WHERE s.scope = 'daily'
+              AND s.period_start >= m.month
+              AND s.period_start < (m.month + interval '1 month')
+            ORDER BY s.period_start DESC, s.captured_at DESC
+            LIMIT 1
+        ) s
+        ORDER BY m.month DESC
         """
     )
-    if len(months) < 2:
+    if len(picked) < 2:
         return {"current": None, "previous": None, "rows": []}
-    current = _snapshot_panel_for_month(months[0]["month"])
-    previous = _snapshot_panel_for_month(months[1]["month"])
-    if current is None or previous is None:
-        return {"current": None, "previous": None, "rows": []}
+    groups = fetch_all(
+        """
+        SELECT snapshot_id, group_key, total_servers, compliant, non_compliant,
+               unknown, stale, finding_count
+        FROM compliance.snapshot_groups
+        WHERE snapshot_id = ANY(:ids) AND dimension = 'business_group'
+        """,
+        ids=[row["id"] for row in picked],
+    )
+    by_snapshot: dict[Any, list[dict[str, Any]]] = {}
+    for group in groups:
+        by_snapshot.setdefault(group["snapshot_id"], []).append(group)
+
+    def panel(row) -> dict[str, Any]:
+        return {
+            "period_start": row["period_start"],
+            "rows": _snapshot_group_rows(by_snapshot.get(row["id"], [])),
+        }
+
+    current = panel(picked[0])
+    previous = panel(picked[1])
     return {
         "current": current["period_start"].isoformat(),
         "previous": previous["period_start"].isoformat(),
@@ -537,47 +544,45 @@ def snapshot_periods(
 
 
 def _freshness() -> dict[str, Any]:
-    inventory = fetch_one(
+    # The two headline tiles and the per-source list are read in one round trip
+    # each. Every dashboard poll asks for this panel, and the sync tables change
+    # at the cadence of a scheduled integration, not per request.
+    tiles = fetch_one(
         """
-        SELECT max(finished_at) AS at FROM inventory.sync_runs
-        WHERE integration_key = 'assetexplorer' AND status IN ('success', 'partial')
+        SELECT max(finished_at) FILTER (WHERE integration_key = 'assetexplorer')
+                 AS inventory_at,
+               max(finished_at) FILTER (
+                 WHERE integration_key IN ('satellite', 'sccm', 'solaris')) AS patch_at
+        FROM inventory.sync_runs
+        WHERE status IN ('success', 'partial')
         """
-    )
-    patch = fetch_one(
-        """
-        SELECT max(finished_at) AS at FROM inventory.sync_runs
-        WHERE integration_key IN ('satellite', 'sccm', 'solaris')
-          AND status IN ('success', 'partial')
-        """
-    )
-    per_source = fetch_all(
-        """
-        SELECT r.integration_key, max(r.finished_at) AS at,
-               max(i.display_name) AS display_name, max(i.kind) AS kind
-        FROM inventory.sync_runs r
-        LEFT JOIN inventory.integrations i ON i.key = r.integration_key
-        WHERE r.status IN ('success', 'partial')
-        GROUP BY r.integration_key
-        """
-    )
+    ) or {}
     # Every configured source is listed, including one that has never synced:
     # silence about a missing feed is indistinguishable from a healthy one.
-    configured = fetch_all(
-        "SELECT key, display_name, kind FROM inventory.integrations ORDER BY key"
+    # The join is keyed on the integration so the "latest run" aggregate and the
+    # configured-source list cannot disagree about a source's age.
+    per_source = fetch_all(
+        """
+        SELECT i.key AS integration_key, i.display_name, i.kind,
+               max(r.finished_at) AS at
+        FROM inventory.integrations i
+        LEFT JOIN inventory.sync_runs r
+          ON r.integration_key = i.key AND r.status IN ('success', 'partial')
+        GROUP BY i.key, i.display_name, i.kind
+        ORDER BY i.key
+        """
     )
-    known = {r["integration_key"]: r for r in per_source}
     now = datetime.now(UTC)
     sources = []
-    for row in configured:
-        last = known.get(row["key"])
-        at = last["at"] if last else None
+    for row in per_source:
+        at = row["at"]
         age = None
         if at is not None:
             aware = at if at.tzinfo else at.replace(tzinfo=UTC)
             age = round((now - aware).total_seconds() / 3600, 1)
         sources.append({
-            "key": row["key"],
-            "label": row["display_name"] or row["key"],
+            "key": row["integration_key"],
+            "label": row["display_name"] or row["integration_key"],
             "kind": row["kind"],
             "synced_at": at,
             "age_hours": age,
@@ -587,8 +592,8 @@ def _freshness() -> dict[str, Any]:
         })
     sources.sort(key=lambda s: (s["age_hours"] is None, -(s["age_hours"] or 0)))
     return {
-        "inventory_synced_at": inventory["at"] if inventory else None,
-        "patch_synced_at": patch["at"] if patch else None,
+        "inventory_synced_at": tiles.get("inventory_at"),
+        "patch_synced_at": tiles.get("patch_at"),
         "per_source": {r["integration_key"]: r["at"] for r in per_source},
         "sources": sources,
     }
@@ -717,8 +722,9 @@ def breakdown(
 ) -> list[dict[str, Any]]:
     if dimension not in DIMENSIONS:
         raise HTTPException(status_code=404, detail="Unknown dimension")
-    _, evaluations, _, _ = evaluate_all()
-    assets = load_assets()
+    # evaluate_all already loaded the assets; re-reading them made the panel
+    # pay for the register query twice and risked mixing two snapshots.
+    assets, evaluations, _, _ = evaluate_all()
     return group_breakdown(list(evaluations.values()), assets, dimension)
 
 
