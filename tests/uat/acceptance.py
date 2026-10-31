@@ -16,7 +16,6 @@ import io
 import os
 import re
 import sys
-import time
 
 import httpx
 from playwright.sync_api import sync_playwright
