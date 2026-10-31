@@ -9,28 +9,28 @@
  *  - hover tooltip on every mark
  */
 
-const SURFACE = "#0f0f1c";
-const INK = "#f5f2ff";
-const INK_2 = "#c3bfe0";
-const MUTED = "#918dae";
-const BORDER = "#2c2b4d";
-const ACCENT = "#ff2d95";
+const SURFACE = "#0b1324";
+const INK = "#eef2fc";
+const INK_2 = "#b7c2dd";
+const MUTED = "#7d8bab";
+const BORDER = "#1e2c47";
+const ACCENT = "#4f7dff";
 
 export const STATUS = {
   compliant: "#22e6a6",
-  non_compliant: "#ff3b6b",
+  non_compliant: "#ff4767",
   unknown: "#ffb020",
-  stale: "#8d8aa8",
-  excluded: "#4b4a63",
-  critical: "#ff3b6b",
+  stale: "#64748b",
+  excluded: "#3a4a66",
+  critical: "#ff4767",
 };
 
 export const SEVERITY = {
-  critical: "#ff2d6f",
-  important: "#ff8a3d",
+  critical: "#ff4767",
+  important: "#ff9f43",
   moderate: "#ffd23f",
-  low: "#38c6ff",
-  unknown: "#8d8aa8",
+  low: "#38bdf8",
+  unknown: "#64748b",
 };
 
 const NS = "http://www.w3.org/2000/svg";
@@ -89,7 +89,10 @@ function niceMax(value) {
   const exp = Math.floor(Math.log10(value));
   const base = 10 ** exp;
   const norm = value / base;
-  const step = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10;
+  // Finer steps than the classic 1/2/5 ladder: a 1,251-server ceiling should
+  // round to 1,500, not 2,000, or the bars only fill half the plot.
+  const step = [1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10]
+    .find((candidate) => norm <= candidate) ?? 10;
   return step * base;
 }
 
@@ -369,7 +372,8 @@ export function stackedRows(container, options) {
     return;
   }
   const {
-    rows, keys, labels, colors, maxRows = 7, withPct = false, onSelect,
+    rows, keys, labels, colors, maxRows = 7, withPct = false, withTotal = false,
+    onSelect,
     label = "Server counts by group, split by compliance state",
   } = options;
   if (!rows || rows.length === 0) {
@@ -377,11 +381,15 @@ export function stackedRows(container, options) {
     return;
   }
   const shown = rows.slice(0, maxRows);
-  const rowH = 30;
-  const height = shown.length * rowH + 8;
+  const rowH = 32;
+  const height = shown.length * rowH + 10;
   const width = widthFor(container);
   // The group labels need room; on a narrow pane trade plot width for them.
-  const pad = { left: 148, right: withPct ? 66 : 46 };
+  // With both trailing figures, keep the bar clear of the Total column so a
+  // full-width bar cannot run underneath its own number. The Total and
+  // Compliance % anchors below mirror the column widths in `.chart-cols-meta`
+  // (34px + 12px gap, then 84px) so each caption sits over its own numbers.
+  const pad = { left: 132, right: withPct && withTotal ? 132 : 62 };
   const plotW = width - pad.left - pad.right;
   const max = Math.max(
     1, ...shown.map((r) => keys.reduce((s, k) => s + (r[k] || 0), 0))
@@ -395,8 +403,8 @@ export function stackedRows(container, options) {
     const groupLabel = String(row.group).length > 22
       ? `${String(row.group).slice(0, 21)}…` : row.group;
     const groupText = el("text", {
-      x: pad.left - 10, y: y + 15, "text-anchor": "end", class: "axis-label",
-      style: `fill:${INK_2}`,
+      x: pad.left - 10, y: y + 14, "text-anchor": "end", class: "axis-label",
+      style: `fill:${INK_2};font-size:11.5px`,
     }, groupLabel);
     if (onSelect) {
       groupText.style.cursor = "pointer";
@@ -406,7 +414,7 @@ export function stackedRows(container, options) {
 
     const fullW = (total / max) * plotW;
     svg.appendChild(el("rect", {
-      x: pad.left, y, width: fullW, height: 14, rx: 3, fill: "#1e1e38",
+      x: pad.left, y, width: fullW, height: 13, rx: 3, fill: "rgba(30, 44, 71, .75)",
     }));
     let cursor = pad.left;
     keys.forEach((key) => {
@@ -414,7 +422,7 @@ export function stackedRows(container, options) {
       if (value <= 0) return;
       const w = (value / max) * plotW;
       const rect = el("rect", {
-        x: cursor + 1, y, width: Math.max(1, w - 2), height: 14,
+        x: cursor + 1, y, width: Math.max(1, w - 2), height: 13,
         fill: fill(colors[key]),
       });
       bindTip(rect, tipBody(row.group, [
@@ -430,26 +438,36 @@ export function stackedRows(container, options) {
     });
 
     const denom = row.compliant + row.non_compliant + row.unknown + row.stale;
-    const text = withPct && denom
-      ? `${((row.compliant / denom) * 100).toFixed(1)}%`
-      : compact(total);
-    svg.appendChild(el("text", {
-      x: width - 4, y: y + 11, "text-anchor": "end", class: "axis-tick",
-      style: `fill:${INK};font-weight:600`,
-    }, text));
+    if (withTotal) {
+      svg.appendChild(el("text", {
+        x: width - (withPct ? 100 : 4), y: y + 11, "text-anchor": "end",
+        class: "axis-tick", style: `fill:${INK_2};font-size:11.5px`,
+      }, compact(total)));
+    }
+    if (withPct) {
+      const text = denom ? `${((row.compliant / denom) * 100).toFixed(1)}%` : "—";
+      svg.appendChild(el("text", {
+        x: width - 4, y: y + 11, "text-anchor": "end", class: "axis-tick",
+        style: `fill:${INK};font-weight:600;font-size:11.5px`,
+      }, text));
+    } else if (!withTotal) {
+      svg.appendChild(el("text", {
+        x: width - 4, y: y + 11, "text-anchor": "end", class: "axis-tick",
+        style: `fill:${INK};font-weight:600`,
+      }, compact(total)));
+    }
   });
 }
 
 /* ------------------------------------------------------------------ donut */
 export function donut(container, options) {
-  const { rows, centerLabel = "Servers", centerValue } = options;
+  const { rows, centerLabel = "Servers", centerValue, size = 230 } = options;
   const total = rows.reduce((s, r) => s + (r.value || 0), 0);
   if (!total) {
     emptyState(container, "No compliance data available.");
     return;
   }
   container.innerHTML = "";
-  const size = 230;
   const svg = el("svg", { viewBox: `0 0 ${size} ${size}`, class: "chart", role: "img" });
   svg.setAttribute("aria-label",
     `Compliance breakdown: ${rows.map((r) => `${r.label} ${r.value}`).join(", ")}`);
@@ -457,8 +475,8 @@ export function donut(container, options) {
   svg.style.width = `${size}px`;
   const cx = size / 2;
   const cy = size / 2;
-  const radius = 86;
-  const stroke = 26;
+  const radius = size * 0.374;
+  const stroke = size * 0.113;
   const circumference = 2 * Math.PI * radius;
   const gap = 2.5;
   const paint = gradientFactory(svg);
@@ -485,12 +503,12 @@ export function donut(container, options) {
   });
 
   svg.appendChild(el("text", {
-    x: cx, y: cy - 6, "text-anchor": "middle",
-    style: `fill:${INK};font-size:26px;font-weight:650;letter-spacing:-.5px`,
+    x: cx, y: cy - 4, "text-anchor": "middle",
+    style: `fill:${INK};font-size:${size * 0.116}px;font-weight:700;letter-spacing:-.6px`,
   }, centerValue ?? compact(total)));
   svg.appendChild(el("text", {
     x: cx, y: cy + 16, "text-anchor": "middle",
-    style: `fill:${MUTED};font-size:11.5px`,
+    style: `fill:${MUTED};font-size:${Math.max(10, size * 0.052)}px`,
   }, centerLabel));
   container.appendChild(svg);
 }
@@ -766,7 +784,7 @@ export function concentrationCurve(container, points) {
   const path = data.map((p, i) =>
     `${i === 0 ? "M" : "L"}${x(p.server_share)},${y(p.patch_share)}`).join(" ");
   svg.appendChild(el("path", {
-    d: `${path} L${x(100)},${y(0)} Z`, fill: "rgba(255,45,149,.14)",
+    d: `${path} L${x(100)},${y(0)} Z`, fill: "rgba(79,125,255,.16)",
   }));
   svg.appendChild(el("path", {
     d: path, fill: "none", stroke: ACCENT, "stroke-width": 2.5,
@@ -787,6 +805,178 @@ export function concentrationCurve(container, points) {
     svg.appendChild(dot);
   }
   container.appendChild(svg);
+}
+
+/* ------------------------------------------------------- compliance trend */
+/* Stacked server counts with the compliance rate drawn over them. The bar
+ * scale and the rate scale are labelled on opposite sides because they answer
+ * different questions ("how many" and "how healthy"), and every mark carries a
+ * tooltip that spells both values out in words. */
+export function comboTrend(container, options) {
+  if (!container.isConnected) {
+    queueChartDraw(container, () => {
+      if (container.isConnected) comboTrend(container, options);
+    });
+    return;
+  }
+  const {
+    points, target, keys, labels, colors, height = 236, unit = "%", empty,
+  } = options;
+  if (!points || points.length < 2) {
+    emptyState(container, empty
+      || "Not enough recorded snapshots yet. The trend is built from one per period.");
+    return;
+  }
+  const width = widthFor(container);
+  const pad = { top: 16, right: 52, bottom: 32, left: 48 };
+  const plotW = width - pad.left - pad.right;
+  const plotH = height - pad.top - pad.bottom;
+  const totals = points.map((p) => keys.reduce((sum, k) => sum + (p[k] || 0), 0));
+  // Headroom above the tallest bar keeps the compliance line readable instead
+  // of pinning it to the top edge of the plot.
+  const maxServers = niceMax(Math.max(...totals) * 1.2);
+  const svg = frame(container, height,
+    `Compliance trend: ${points.map((p) => `${p.label} ${Number(p.value).toFixed(1)}${unit}`
+      + ` of ${p.total} servers`).join(", ")}`
+    + (target !== null && target !== undefined ? `, target ${target}${unit}` : ""), width);
+  const fill = gradientFactory(svg);
+  const band = plotW / points.length;
+  const barW = Math.min(30, band * 0.46);
+  const yServers = (value) => pad.top + plotH - (value / maxServers) * plotH;
+  const yRate = (value) => pad.top + plotH - (value / 100) * plotH;
+
+  for (let i = 0; i <= 4; i += 1) {
+    const servers = (maxServers / 4) * i;
+    const yy = yServers(servers);
+    svg.appendChild(el("line", {
+      x1: pad.left, x2: width - pad.right, y1: yy, y2: yy, class: "gridline",
+    }));
+    svg.appendChild(el("text", {
+      x: pad.left - 8, y: yy + 4, "text-anchor": "end", class: "axis-tick",
+    }, compact(servers)));
+    svg.appendChild(el("text", {
+      x: width - pad.right + 8, y: yy + 4, class: "axis-tick",
+    }, `${Math.round((i / 4) * 100)}${unit}`));
+  }
+
+  points.forEach((point, index) => {
+    const cx = pad.left + band * index + band / 2;
+    let cursor = pad.top + plotH;
+    const segments = keys
+      .map((key) => ({ key, value: point[key] || 0 }))
+      .filter((segment) => segment.value > 0);
+    segments.forEach((segment, segIndex) => {
+      const barH = (segment.value / maxServers) * plotH;
+      const isTop = segIndex === segments.length - 1;
+      const y = cursor - barH;
+      const rect = el("rect", {
+        x: cx - barW / 2, y: isTop ? y : y + 1,
+        width: barW, height: Math.max(1, barH - (isTop ? 0 : 1)),
+        fill: fill(colors[segment.key]),
+        rx: isTop ? 3 : 0, ry: isTop ? 3 : 0,
+      });
+      bindTip(rect, tipBody(point.label, [
+        ...keys.map((k) => tipRow(labels[k], compact(point[k] || 0), colors[k])),
+        tipRow("Total servers", compact(totals[index])),
+      ]));
+      svg.appendChild(rect);
+      cursor = y;
+    });
+    // When the bands are too narrow for every month, thin the labels from the
+    // right so the newest period always keeps its label instead of colliding
+    // with the one before it.
+    const showLabel = band >= 52 || (points.length - 1 - index) % 2 === 0;
+    svg.appendChild(el("text", {
+      x: cx, y: height - 12, "text-anchor": "middle", class: "axis-label",
+    }, showLabel ? point.label : ""));
+  });
+
+  if (target !== null && target !== undefined) {
+    svg.appendChild(el("line", {
+      x1: pad.left, x2: width - pad.right, y1: yRate(target), y2: yRate(target),
+      stroke: "#ffb020", "stroke-width": 1.4, "stroke-dasharray": "5 4",
+      opacity: 0.8,
+    }));
+  }
+
+  const linePoints = points
+    .map((point, index) => (point.value === null || point.value === undefined
+      ? null
+      : { x: pad.left + band * index + band / 2, y: yRate(Number(point.value)) }))
+    .filter(Boolean);
+  if (linePoints.length > 1) {
+    svg.appendChild(el("path", {
+      d: linePoints.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" "),
+      fill: "none", stroke: ACCENT, "stroke-width": 2.2,
+      "stroke-linejoin": "round", "stroke-linecap": "round",
+    }));
+    for (const [index, dot] of linePoints.entries()) {
+      const point = points[index];
+      const circle = el("circle", {
+        cx: dot.x, cy: dot.y, r: 3, fill: ACCENT, stroke: "#0b1324",
+        "stroke-width": 1.5,
+      });
+      bindTip(circle, tipBody(point.label, [
+        tipRow("Compliance", `${Number(point.value).toFixed(1)}${unit}`, ACCENT),
+        tipRow("Servers", compact(point.total)),
+        target ? tipRow("Target", `${target}${unit}`, "#ffb020") : null,
+      ]));
+      svg.appendChild(circle);
+    }
+  }
+}
+
+/* ------------------------------------------------------------- ranked bars */
+/* One measure ranked longest-first. The bar answers "how many", the trailing
+   number repeats it for readers who cannot judge length. */
+export function rankedBars(container, rows, options = {}) {
+  if (!container.isConnected) {
+    queueChartDraw(container, () => {
+      if (container.isConnected) rankedBars(container, rows, options);
+    });
+    return;
+  }
+  const {
+    color = "#ff4d7d", maxRows = 6, valueLabel = "Servers", label = "",
+  } = options;
+  const data = (rows || []).slice(0, maxRows).filter((row) => row.value > 0);
+  if (!data.length) {
+    emptyState(container, options.empty || "No outstanding findings match these filters.");
+    return;
+  }
+  const rowH = 34;
+  const height = data.length * rowH + 4;
+  const width = widthFor(container);
+  const pad = { left: 128, right: 40 };
+  const plotW = width - pad.left - pad.right;
+  const max = Math.max(1, ...data.map((row) => row.value));
+  const svg = frame(container, height, label, width);
+  const paint = gradientFactory(svg, false);
+  data.forEach((row, index) => {
+    const y = index * rowH + 6;
+    svg.appendChild(el("text", {
+      x: pad.left - 10, y: y + 11, "text-anchor": "end", class: "axis-label",
+      style: `fill:${INK_2};font-size:11.5px`,
+    }, String(row.label).length > 20
+      ? `${String(row.label).slice(0, 19)}…` : row.label));
+    svg.appendChild(el("rect", {
+      x: pad.left, y, width: plotW, height: 13, rx: 3,
+      fill: "rgba(30, 44, 71, .7)",
+    }));
+    const bar = el("rect", {
+      x: pad.left, y, width: Math.max(3, (row.value / max) * plotW),
+      height: 13, rx: 3, fill: paint(color),
+    });
+    bindTip(bar, tipBody(row.label, [
+      tipRow(valueLabel, compact(row.value), color),
+      row.meta ? tipRow(row.meta.label, row.meta.value) : null,
+    ].filter(Boolean)));
+    svg.appendChild(bar);
+    svg.appendChild(el("text", {
+      x: width - 4, y: y + 11, "text-anchor": "end", class: "axis-tick",
+      style: `fill:${INK};font-weight:600;font-size:11.5px`,
+    }, compact(row.value)));
+  });
 }
 
 /* ------------------------------------------------------------------ sparkline */

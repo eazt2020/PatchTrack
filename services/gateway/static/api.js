@@ -52,9 +52,18 @@ export async function api(path, options = {}) {
   return response;
 }
 
-export async function download(path, fallbackName) {
+export async function download(path, fallbackName, options = {}) {
+  // A POST download carries the rendered board to the reporting service, so it
+  // needs the same JSON body and CSRF header as `api`.
+  const { method = "GET", body } = options;
+  const headers = {};
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  if (method !== "GET") headers["X-PatchTrack-CSRF"] = csrfToken();
   const response = await fetch(`/api/${path.replace(/^\//, "")}`, {
+    method,
+    headers,
     credentials: "same-origin",
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (!response.ok) {
     let detail = `Download failed (${response.status})`;

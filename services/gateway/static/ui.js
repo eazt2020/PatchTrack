@@ -170,10 +170,17 @@ export function statTile({ label, value, sub, delta, tone, meter, foot, accent,
   return card;
 }
 
-export function card(title, subtitle, body, extra) {
+export function card(title, subtitle, body, extra, options = {}) {
+  const heading = h("div", { class: "card-title-row" });
+  if (options.icon) {
+    const icon = h("span", { class: "card-icon", html: options.icon, "aria-hidden": "true" });
+    if (options.accent) icon.style.color = options.accent;
+    heading.appendChild(icon);
+  }
+  heading.appendChild(h("span", { class: "card-title" }, title));
   const head = h("div", { class: "card-head" },
     h("div", {},
-      h("div", { class: "card-title" }, title),
+      heading,
       subtitle ? h("div", { class: "card-sub" }, subtitle) : null),
     extra || null);
   return h("div", { class: "card" }, head, body);

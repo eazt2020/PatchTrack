@@ -7,7 +7,7 @@
 
 import { api, download } from "/static/api.js";
 import {
-  STATUS, concentrationCurve, donut, legend, severityBars,
+  STATUS, comboTrend, concentrationCurve, donut, legend, rankedBars, severityBars,
   stackedColumns, stackedRows, targetColumns, trendLine,
 } from "/static/charts.js";
 import {
@@ -49,6 +49,9 @@ const REFRESH_CHOICES = [
   { value: "300", label: "5 minutes" },
 ];
 const BASIS_POINTS = { monthly: 12, quarterly: 8, yearly: 5 };
+const BASIS_LABELS = {
+  monthly: "last 12 months", quarterly: "last 8 quarters", yearly: "last 5 years",
+};
 const BASIS_NOUNS = { monthly: "months", quarterly: "quarters", yearly: "years" };
 
 function stored(key, fallback) {
@@ -163,32 +166,73 @@ const state = {
   kiosk: stored("patchtrack.kiosk", "0") === "1",
 };
 
+/* Stroke icons drawn inline so the console keeps working on an isolated
+   network: no icon font and no CDN. */
+const ICONS = {
+  dashboard: '<svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>',
+  servers: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01"/></svg>',
+  shield: '<svg viewBox="0 0 24 24"><path d="M12 3 5 6v5c0 4.5 3 7.9 7 10 4-2.1 7-5.5 7-10V6l-7-3Z"/><path d="m9 12 2 2 4-4"/></svg>',
+  trend: '<svg viewBox="0 0 24 24"><path d="M3 17l5-6 4 3 6-8"/><path d="M14 6h4v4"/></svg>',
+  reports: '<svg viewBox="0 0 24 24"><path d="M6 2h8l5 5v15H6V2Z"/><path d="M14 2v6h5M9 13h7M9 17h5"/></svg>',
+  inventory: '<svg viewBox="0 0 24 24"><path d="M3 7.5 12 3l9 4.5v9L12 21l-9-4.5v-9Z"/><path d="M3 7.5 12 12l9-4.5M12 12v9"/></svg>',
+  reconcile: '<svg viewBox="0 0 24 24"><path d="M4 8h14l-3-3M20 16H6l3 3"/></svg>',
+  policy: '<svg viewBox="0 0 24 24"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>',
+  integrations: '<svg viewBox="0 0 24 24"><path d="M9 7V3M15 7V3M7 7h10v4a5 5 0 0 1-10 0V7ZM12 16v5"/></svg>',
+  calendar: '<svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>',
+  database: '<svg viewBox="0 0 24 24"><ellipse cx="12" cy="5.5" rx="8" ry="3"/><path d="M4 5.5v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6M4 11.5v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg>',
+  settings: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2 2 2 0 1 1-4 0 1.7 1.7 0 0 0-2.9-1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.7 1.7 0 0 0 3 15a2 2 0 1 1 0-4 1.7 1.7 0 0 0 1.4-2.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.7 1.7 0 0 0 10 4a2 2 0 1 1 4 0 1.7 1.7 0 0 0 2.9 1.4l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1A1.7 1.7 0 0 0 21 11a2 2 0 1 1 0 4Z"/></svg>',
+  users: '<svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-5.5 6-5.5s6 2.2 6 5.5"/><circle cx="17.5" cy="9" r="2.4"/><path d="M16 14.6c2.8.2 5 2.2 5 5.4"/></svg>',
+  audit: '<svg viewBox="0 0 24 24"><path d="M4 5h16M4 12h16M4 19h10"/><circle cx="19" cy="19" r="2"/></svg>',
+  health: '<svg viewBox="0 0 24 24"><path d="M3 12h4l2-5 4 10 2-5h6"/></svg>',
+  clock: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
+  alert: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>',
+  help: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.7.4-1 1-1 1.7v.5M12 17h.01"/></svg>',
+  target: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.2"/></svg>',
+  download: '<svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M4 20h16"/></svg>',
+  arrange: '<svg viewBox="0 0 24 24"><path d="M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01"/></svg>',
+};
+
 const ROUTES = [
-  { group: "Compliance" },
-  { id: "dashboard", label: "Executive dashboard", icon: "▦", perm: "dashboard:view" },
-  { id: "servers", label: "Non-compliant servers", icon: "▤", perm: "compliance:view" },
-  { id: "findings", label: "Remediation", icon: "⚑", perm: "findings:view" },
-  { id: "trends", label: "History & trends", icon: "◷", perm: "dashboard:view" },
-  { group: "Inventory" },
-  { id: "inventory", label: "Server inventory", icon: "▣", perm: "inventory:view" },
-  { id: "reconciliation", label: "Reconciliation", icon: "⇄", perm: "inventory:view" },
-  { group: "Reporting" },
-  { id: "reports", label: "Reports", icon: "▧", perm: "reports:view" },
-  { id: "schedules", label: "Schedules", icon: "◔", perm: "reports:view" },
+  { group: "Monitor" },
+  { id: "dashboard", label: "Dashboard", icon: "dashboard", perm: "dashboard:view",
+    subtitle: "Real-time patch compliance across your fleet" },
+  { id: "servers", label: "Patch status", icon: "servers", perm: "compliance:view",
+    subtitle: "Server-level patch state and outstanding remediations" },
+  { id: "findings", label: "Remediation", icon: "shield", perm: "findings:view",
+    subtitle: "Advisories, due dates and outstanding patch work" },
+  { id: "trends", label: "History & trends", icon: "trend", perm: "dashboard:view",
+    subtitle: "Recorded compliance over time" },
+  { id: "reports", label: "Reports", icon: "reports", perm: "reports:view",
+    subtitle: "Board packs and scheduled exports" },
+  { group: "Configuration" },
+  { id: "inventory", label: "Server inventory", icon: "inventory", perm: "inventory:view",
+    subtitle: "Every discovered asset and its placement" },
+  { id: "reconciliation", label: "Reconciliation", icon: "reconcile", perm: "inventory:view",
+    subtitle: "Reconcile source systems against the register" },
+  { id: "policies", label: "Compliance policy", icon: "policy", perm: "compliance:view",
+    subtitle: "Scope, targets and remediation windows" },
+  { id: "integrations", label: "Integrations", icon: "integrations", perm: "integrations:view",
+    subtitle: "Data sources feeding PatchTrack" },
+  { id: "schedules", label: "Schedules", icon: "calendar", perm: "reports:view",
+    subtitle: "When reports are produced and delivered" },
+  { id: "backups", label: "Data backups", icon: "database", perm: "settings:manage",
+    subtitle: "Backup and restore of the console's data" },
+  { id: "settings", label: "Settings", icon: "settings", perm: "settings:manage",
+    subtitle: "Console, security and retention settings" },
   { group: "Administration" },
-  { id: "integrations", label: "Integrations", icon: "⇌", perm: "integrations:view" },
-  { id: "policies", label: "Compliance policy", icon: "◎", perm: "compliance:view" },
-  { id: "users", label: "Users & roles", icon: "☖", perm: "users:manage" },
-  { id: "audit", label: "Audit trail", icon: "⌸", perm: "audit:view" },
-  { id: "health", label: "Operational health", icon: "♡", perm: "integrations:view" },
-  { id: "backups", label: "Data backups", icon: "⛁", perm: "settings:manage" },
-  { id: "settings", label: "Settings", icon: "⚙", perm: "settings:manage" },
+  { id: "users", label: "Users & roles", icon: "users", perm: "users:manage",
+    subtitle: "Accounts, roles and access" },
+  { id: "audit", label: "Audit logs", icon: "audit", perm: "audit:view",
+    subtitle: "Every action recorded in the console" },
+  { id: "health", label: "System health", icon: "health", perm: "integrations:view",
+    subtitle: "Service status and collection health" },
 ];
 
 const view = document.getElementById("view");
 const nav = document.getElementById("nav");
 const pageTitle = document.getElementById("page-title");
 const pageContext = document.getElementById("page-context");
+const pageActions = document.getElementById("page-actions");
 const lastRefresh = document.getElementById("last-refresh");
 
 const can = (permission) =>
@@ -229,7 +273,11 @@ async function renderRoute() {
   view.classList.add("route-enter");
   setTimeout(() => view.classList.remove("route-enter"), 320);
   renderNav();
-  pageTitle.textContent = route.label;
+  pageTitle.textContent = route.id === "dashboard" ? "Executive Dashboard" : route.label;
+  pageContext.textContent = route.subtitle || "";
+  // The dashboard mounts its own timeframe and export controls here; every
+  // other route starts with an empty action slot rather than inheriting them.
+  pageActions.replaceChildren();
   setActiveNav(route.id);
   try {
     const renderer = RENDERERS[route.id];
@@ -247,7 +295,7 @@ function renderNav() {
     return h("a", {
       href: `#/${route.id}`,
       dataset: { route: route.id },
-    }, h("span", { class: "ico" }, route.icon), route.label);
+    }, h("span", { class: "ico", html: ICONS[route.icon] || "" }), route.label);
   }));
 }
 
@@ -301,6 +349,13 @@ async function loadDimensions(force = false) {
   }
   state.dimensions = await dimensionsPromise;
   return state.dimensions;
+}
+
+/* Settings edits the vocabulary the filters offer, so the next screen must
+ * re-read it rather than reusing the list fetched when the console loaded. */
+function invalidateDimensions() {
+  dimensionsPromise = null;
+  state.dimensions = {};
 }
 
 function filterBar(onChange, options = {}) {
@@ -734,10 +789,12 @@ function setKiosk(on, { persist = true } = {}) {
   document.body.classList.toggle("kiosk", state.kiosk);
   const button = document.getElementById("kiosk-toggle");
   if (button) {
-    button.textContent = state.kiosk ? "⛶ Exit TV" : "⛶ TV mode";
+    // The control is an icon button; the state lives in the title and
+    // aria-pressed rather than replacing the icon with a text label.
     button.title = state.kiosk
       ? "Show the navigation (Esc)"
       : "Hide the navigation for a wall display (K)";
+    button.setAttribute("aria-label", state.kiosk ? "Exit TV mode" : "TV mode");
     button.setAttribute("aria-pressed", state.kiosk ? "true" : "false");
   }
   if (persist) remember("patchtrack.kiosk", state.kiosk ? "1" : "0");
@@ -842,7 +899,7 @@ function timeframeOptions(periods) {
   return [
     ...BASIS_CHOICES.map((choice) => ({
       value: `live:${choice.value}`,
-      label: `Live · ${choice.label.toLowerCase()} trend`,
+      label: `Live · ${choice.label.toLowerCase()}`,
     })),
     ...periods.map((period) => ({
       value: period.key,
@@ -901,90 +958,119 @@ function drillToServers(stateName, changes = {}) {
   navigate("servers", { state: stateName });
 }
 
-function kpiRow(summary) {
+/* A KPI is one instrument on the executive board. The accent colours the icon
+   tile, the headline number and the meter; the delta repeats the movement in
+   words so the arrow is never the only carrier of meaning. */
+function kpiTile({ label, value, share, foot, delta, tone = "neutral", meter,
+  accent, icon, href }) {
+  const tile = h("div", { class: "kpi" });
+  tile.style.setProperty("--kpi-accent", accent);
+  tile.style.setProperty("--kpi-tint", `color-mix(in srgb, ${accent} 15%, transparent)`);
+  tile.style.setProperty("--kpi-line", `color-mix(in srgb, ${accent} 32%, transparent)`);
+  tile.style.setProperty("--kpi-glow", `color-mix(in srgb, ${accent} 22%, transparent)`);
+  tile.style.setProperty("--kpi-border", `color-mix(in srgb, ${accent} 45%, #1e2c47)`);
+  tile.style.setProperty("--kpi-ring", `color-mix(in srgb, ${accent} 18%, transparent)`);
+  tile.appendChild(h("div", { class: "kpi-head" },
+    h("span", { class: "kpi-icon", html: ICONS[icon] || ICONS.dashboard }),
+    h("span", { class: "kpi-label" }, label)));
+  const main = h("div", { class: "kpi-main" },
+    h("span", { class: "kpi-value" }, value));
+  if (share) main.appendChild(h("span", { class: "kpi-share" }, share));
+  tile.appendChild(main);
+  if (meter !== undefined && meter !== null) {
+    tile.appendChild(h("div", { class: "kpi-meter" },
+      h("span", { style: { width: `${Math.max(0, Math.min(100, meter))}%`,
+        background: `linear-gradient(90deg, color-mix(in srgb, ${accent} 70%, #0b1324), ${accent})` } })));
+  }
+  const footRow = h("div", { class: "kpi-foot" }, h("span", {}, foot || ""));
+  if (delta) {
+    footRow.appendChild(h("span", { class: `kpi-delta ${tone}` }, delta));
+  }
+  tile.appendChild(footRow);
+  if (href) {
+    return h("a", { class: "kpi-link", href, "aria-label": `${label}: ${value}` }, tile);
+  }
+  return tile;
+}
+
+function kpiRow(summary, series = []) {
   const k = summary.kpis;
   const target = k.target_pct;
   const gap = k.gap_pct;
   const met = gap !== null && gap >= 0;
-  const short = k.gap_servers;
-  const quarterly = summary.policy?.quarterly_target_pct;
-  const gapFoot = short === null || short === undefined
-    ? (quarterly !== null && quarterly !== undefined
-      ? `Quarterly target ${fmtPct(quarterly, 0)}` : "")
-    : short === 0
-      ? `Target met · quarterly target ${fmtPct(quarterly, 0)}`
-      : `${fmtNumber(short)} server${short === 1 ? "" : "s"} short · quarterly target ${
-        fmtPct(quarterly, 0)}`;
   const remediation = summary.dashboard?.remediation;
   const overdue = remediation?.overdue || 0;
-  return h("div", { class: `grid grid-kpi${remediation ? " grid-kpi-6" : ""}` },
-    statTile({
-      label: "Total servers (in scope)",
+  const last = series[series.length - 1];
+  const change = last?.change;
+  const changeText = change === null || change === undefined
+    ? null : `${change >= 0 ? "↑" : "↓"} ${Math.abs(change).toFixed(1)} pp`;
+  const share = (value) => (k.in_scope ? fmtPct((value / k.in_scope) * 100) : null);
+  return h("div", { class: "kpi-grid" },
+    kpiTile({
+      label: "Total Servers",
       value: fmtNumber(k.in_scope),
-      sub: k.excluded
+      foot: k.excluded
         ? `${fmtNumber(k.excluded)} excluded of ${fmtNumber(k.total_servers)}`
-        : "",
-      foot: "Active lifecycle, in compliance scope",
-      accent: "#22d3ee",
+        : "Active lifecycle, in scope",
+      accent: "#4f7dff",
+      icon: "servers",
       href: serversLink(""),
     }),
-    statTile({
+    kpiTile({
       label: "Compliant",
       value: fmtNumber(k.compliant),
-      // The share sits where every other tile's share sits — right-aligned in
-      // green — so the KPI row reads as one column of percentages.
-      delta: fmtPct(k.compliance_pct),
+      share: fmtPct(k.compliance_pct),
+      foot: "No blocking findings",
+      delta: changeText,
       tone: "good",
-      meter: k.in_scope ? (k.compliant / k.in_scope) * 100 : 0,
       accent: STATUS.compliant,
-      foot: "No outstanding blocking findings",
+      icon: "shield",
       href: serversLink("compliant"),
     }),
-    statTile({
-      label: "Non-compliant",
+    kpiTile({
+      label: "Non-Compliant",
       value: fmtNumber(k.non_compliant),
-      delta: k.in_scope ? fmtPct((k.non_compliant / k.in_scope) * 100) : null,
-      tone: "bad",
-      meter: k.in_scope ? (k.non_compliant / k.in_scope) * 100 : 0,
-      accent: STATUS.non_compliant,
+      share: share(k.non_compliant),
       foot: "Blocking findings outstanding",
+      delta: changeText
+        ? `${change >= 0 ? "↓" : "↑"} ${Math.abs(change).toFixed(1)} pp` : null,
+      tone: "bad",
+      accent: STATUS.non_compliant,
+      icon: "alert",
       href: serversLink("non_compliant"),
     }),
-    statTile({
-      label: "Unknown / no data",
+    kpiTile({
+      label: "Unknown / No Data",
       value: fmtNumber(k.unknown + k.stale),
-      sub: `${fmtNumber(k.unknown)} unknown · ${fmtNumber(k.stale)} stale`,
-      delta: k.in_scope
-        ? fmtPct(((k.unknown + k.stale) / k.in_scope) * 100) : null,
-      tone: "warn",
-      meter: k.in_scope ? ((k.unknown + k.stale) / k.in_scope) * 100 : 0,
-      accent: STATUS.unknown,
-      foot: "Counted against compliance, never as compliant",
+      share: share(k.unknown + k.stale),
+      foot: `${fmtNumber(k.unknown)} unknown · ${fmtNumber(k.stale)} stale`,
+      accent: "#8ea6cc",
+      icon: "help",
       href: serversLink("unknown"),
     }),
-    remediation ? statTile({
-      label: "Overdue findings",
+    remediation ? kpiTile({
+      label: "Overdue Findings",
       value: fmtNumber(overdue),
-      sub: `of ${fmtNumber(remediation.total)} current`,
+      share: `of ${fmtNumber(remediation.total)} current`,
+      foot: `${fmtNumber(remediation.due_soon)} due within ${remediation.due_soon_days} days`,
       delta: remediation.oldest_days_overdue
         ? `${fmtNumber(remediation.oldest_days_overdue)}d oldest` : null,
       tone: overdue ? "bad" : "good",
-      meter: remediation.total
-        ? (overdue / remediation.total) * 100 : 0,
-      accent: overdue ? STATUS.critical : STATUS.compliant,
-      foot: `${fmtNumber(remediation.due_soon)} due within ${
-        remediation.due_soon_days} days`,
+      accent: STATUS.non_compliant,
+      icon: "clock",
       href: can("findings:view") ? "#/findings?overdue=true" : null,
     }) : null,
-    statTile({
-      label: "Compliance vs target",
+    kpiTile({
+      label: "Compliance vs Target",
       value: fmtPct(k.compliance_pct),
-      sub: `Target ${fmtPct(target, 0)}`,
-      delta: gap === null ? null : `${gap >= 0 ? "+" : ""}${gap.toFixed(1)} pp`,
+      share: `Target ${fmtPct(target, 0)}`,
+      foot: gap === null ? summary.policy?.name || "Baseline policy"
+        : `${gap >= 0 ? "Above" : "Below"} target`,
+      delta: gap === null ? null : `${gap >= 0 ? "↑" : "↓"} ${Math.abs(gap).toFixed(1)} pp`,
       tone: gap === null ? "neutral" : met ? "good" : "bad",
       meter: k.compliance_pct ?? 0,
-      accent: met ? STATUS.compliant : STATUS.critical,
-      foot: gapFoot || summary.policy?.name || "Baseline policy",
+      accent: met ? STATUS.compliant : STATUS.non_compliant,
+      icon: "target",
     }),
   );
 }
@@ -1061,9 +1147,9 @@ function severityCard(summary) {
   const blocking = (summary.severity || [])
     .filter((row) => row.severity === "critical" || row.severity === "important")
     .reduce((sum, row) => sum + Number(row.count || 0), 0);
-  return card("Findings by severity",
+  return card("Patch Findings by Severity",
     `${fmtNumber(blocking)} blocking (critical + important)`,
-    body);
+    body, null, { icon: ICONS.alert, accent: "#ff9f43" });
 }
 
 function freshnessCard(summary) {
@@ -1158,31 +1244,25 @@ function excludedCard(excluded) {
 /* The board pack is generated by the reports service from the latest recorded
  * snapshot. It is queued rather than streamed so the same retention, audit and
  * download path as every other report applies. */
-async function exportBoardPack(button) {
+/* Export the board the reader is looking at as one landscape page. The
+ * console posts the figures it already rendered, so the sheet cannot disagree
+ * with the screen, and the file is returned directly rather than queued as a
+ * report. */
+async function exportDashboardPdf(button) {
   const original = button.textContent;
+  const payload = state.dashboardExport;
+  if (!payload) return;
   button.disabled = true;
   button.textContent = "Preparing…";
   try {
-    const queued = await api("reporting/reports/board-pack", { method: "POST" });
-    for (let attempt = 0; attempt < 60; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-      const report = await api(`reporting/reports/${queued.id}`);
-      if (report.status === "completed") {
-        await download(`reporting/reports/${queued.id}/download`,
-          report.filename || "patchtrack-board-pack.pdf");
-        button.textContent = "Downloaded";
-        setTimeout(() => { button.textContent = original; }, 2500);
-        return;
-      }
-      if (report.status === "failed") {
-        throw new Error(report.error_summary || "Board pack generation failed");
-      }
-    }
-    throw new Error("Board pack is taking longer than expected; find it in Reports");
+    await download("reporting/reports/dashboard-export",
+      "patchtrack-dashboard.pdf", { method: "POST", body: payload });
+    button.textContent = "Downloaded";
+    setTimeout(() => { button.textContent = original; }, 2500);
   } catch (error) {
     button.textContent = original;
-    button.title = `Board pack could not be produced: ${error.message}`;
-    console.error("board pack export failed", error);
+    button.title = `Dashboard could not be exported: ${error.message}`;
+    console.error("dashboard export failed", error);
   } finally {
     button.disabled = false;
   }
@@ -1230,6 +1310,29 @@ function statusChartCard(title, subtitle, rows, mode = "columns", onSelect) {
   return cardEl;
 }
 
+/* A donut legend that carries the count and share beside every swatch: the
+   ring shows proportion, the list makes the numbers readable and searchable. */
+function donutLegend(entries) {
+  return h("div", { class: "donut-legend" }, ...entries.map((entry) => h("div", {
+    class: "donut-legend-row",
+  },
+  h("span", { class: "donut-legend-dot", style: { background: entry.color } }),
+  h("span", { class: "donut-legend-name" }, entry.label),
+  h("span", { class: "donut-legend-value" }, fmtNumber(entry.value)),
+  h("span", { class: "donut-legend-pct" }, entry.pct))));
+}
+
+/* Column caption above a row chart whose figures sit on the right. */
+function chartCols(left, right) {
+  // A second trailing label (Total + Compliance %) needs its own gap; a single
+  // text node would collapse the spacing and read as one run-on caption.
+  const rights = Array.isArray(right) ? right : [right];
+  return h("div", { class: "chart-cols" },
+    h("span", {}, left),
+    h("span", { class: `chart-cols-meta ${rights.length > 1 ? "split" : ""}`.trim() },
+      ...rights.map((label) => h("span", {}, label))));
+}
+
 /* ------------------------------------------------------------------ dashboard */
 /* Panels are reorderable. The order is a per-browser preference like the
  * timeframe and refresh rate, so a wall display keeps its arrangement without
@@ -1237,9 +1340,10 @@ function statusChartCard(title, subtitle, rows, mode = "columns", onSelect) {
  * panel that a later release removes from leaving a stale entry behind. */
 const DASH_ORDER_KEY = "patchtrack.dashorder";
 const DASH_PANEL_IDS = [
-  "kpis", "remediation", "severity", "freshness", "movers", "concentration",
-  "excluded", "by_os", "by_environment", "by_business_group", "distribution",
-  "trend", "top_business", "period_summary", "recent_servers",
+  "kpis", "trend", "distribution", "by_environment", "by_os", "top_business",
+  "severity", "overdue", "server_groups", "recent_servers", "remediation",
+  "freshness", "movers", "concentration", "excluded", "by_business_group",
+  "period_summary",
 ];
 
 function savedDashOrder() {
@@ -1406,13 +1510,12 @@ async function renderDashboard({ silent = false } = {}) {
     ? `Updated ${fmtTime()} · every ${
       REFRESH_CHOICES.find((c) => c.value === String(refreshSeconds))?.label || `${refreshSeconds}s`}`
     : `Updated ${fmtTime()} · auto-refresh off`;
-  // freshnessLine builds a node, so it is mounted rather than stringified.
-  // In period mode the provenance of the frozen snapshot replaces it: the age
-  // of today's collection is not evidence about a past month.
-  pageContext.replaceChildren(
-    periodMode && summary.period
-      ? periodLine(summary.period)
-      : freshnessLine(summary.freshness));
+  // The subtitle names the board; a recorded period names its snapshot instead,
+  // because the age of today's collection is not evidence about a past month.
+  pageContext.textContent = periodMode && summary.period
+    ? `Recorded snapshot · ${summary.period.label} · captured ${
+      fmtDate(summary.period.captured_at, true)}`
+    : "Real-time patch compliance across your fleet";
 
   // One point per month/quarter/year, each the average of the daily snapshots
   // recorded in that period. The API sends the sample count so the table can
@@ -1423,6 +1526,9 @@ async function renderDashboard({ silent = false } = {}) {
     target: row.target_pct,
     total: row.total_servers,
     compliant: row.compliant_servers,
+    non_compliant: row.non_compliant_servers ?? null,
+    unknown: row.unknown_servers ?? null,
+    stale: row.stale_servers ?? null,
     samples: row.samples,
     change: null,
   }));
@@ -1433,36 +1539,55 @@ async function renderDashboard({ silent = false } = {}) {
   });
 
   const donutBody = h("div");
+  const donutRows = [
+    { label: "Compliant", value: summary.kpis.compliant, color: STATUS.compliant },
+    { label: "Non-compliant", value: summary.kpis.non_compliant, color: STATUS.non_compliant },
+    { label: "Unknown", value: summary.kpis.unknown, color: STATUS.unknown },
+    { label: "Stale", value: summary.kpis.stale, color: STATUS.stale },
+  ];
   donut(donutBody, {
-    rows: [
-      { label: "Compliant", value: summary.kpis.compliant, color: STATUS.compliant },
-      { label: "Non-compliant", value: summary.kpis.non_compliant, color: STATUS.non_compliant },
-      { label: "Unknown", value: summary.kpis.unknown, color: STATUS.unknown },
-      { label: "Stale", value: summary.kpis.stale, color: STATUS.stale },
-    ],
-    centerValue: fmtPct(summary.kpis.compliance_pct),
-    centerLabel: "compliance",
+    rows: donutRows,
+    centerValue: fmtNumber(summary.kpis.in_scope),
+    centerLabel: "Total Servers",
+    size: 194,
   });
-  const donutLegend = h("div", { class: "legend" });
-  legend(donutLegend, [
-    { label: `Compliant ${fmtNumber(summary.kpis.compliant)}`, color: STATUS.compliant },
-    { label: `Non-compliant ${fmtNumber(summary.kpis.non_compliant)}`, color: STATUS.non_compliant },
-    { label: `Unknown ${fmtNumber(summary.kpis.unknown)}`, color: STATUS.unknown },
-    { label: `Stale ${fmtNumber(summary.kpis.stale)}`, color: STATUS.stale },
+  const inScope = summary.kpis.in_scope || 0;
+  const shareOf = (value) => (inScope ? fmtPct((value / inScope) * 100) : "—");
+  const complianceLegend = donutLegend([
+    { label: "Compliant", value: summary.kpis.compliant,
+      pct: shareOf(summary.kpis.compliant), color: STATUS.compliant },
+    { label: "Non-compliant", value: summary.kpis.non_compliant,
+      pct: shareOf(summary.kpis.non_compliant), color: STATUS.non_compliant },
+    { label: "Unknown / No data", value: summary.kpis.unknown + summary.kpis.stale,
+      pct: shareOf(summary.kpis.unknown + summary.kpis.stale), color: STATUS.unknown },
   ]);
 
+  // The trend pairs server volumes with the compliance rate. When the trend
+  // endpoint does not carry the status split, the bars fall back to compliant
+  // and non-compliant so the panel still shows volume and rate together.
+  const trendPoints = series.map((point) => ({
+    ...point,
+    non_compliant: point.non_compliant ?? Math.max(0,
+      (point.total || 0) - (point.compliant || 0)),
+    unknown: point.unknown ?? 0,
+  }));
   const trendBody = h("div");
-  if (basis === "monthly") {
-    trendLine(trendBody, {
-      points: series, target: summary.kpis.target_pct,
-      empty: "No daily snapshots recorded in the last 12 months.",
-    });
-  } else {
-    targetColumns(trendBody, {
-      points: series, target: summary.kpis.target_pct,
-      empty: `No daily snapshots recorded in the last ${points} ${noun}.`,
-    });
-  }
+  comboTrend(trendBody, {
+    points: trendPoints,
+    target: summary.kpis.target_pct,
+    keys: ["compliant", "non_compliant", "unknown"],
+    labels: { compliant: "Compliant", non_compliant: "Non-compliant",
+      unknown: "Unknown" },
+    colors: STATUS,
+    empty: `No recorded snapshots in the last ${points} ${noun}.`,
+  });
+  const trendLegend = h("div", { class: "legend trend-legend" });
+  legend(trendLegend, [
+    { label: "Compliance %", color: "#4f7dff" },
+    { label: "Compliant", color: STATUS.compliant },
+    { label: "Non-compliant", color: STATUS.non_compliant },
+    { label: "Unknown", color: STATUS.unknown },
+  ]);
 
   // The table is the accessible counterpart of the chart: same numbers, the
   // observation count behind each point, and the change against the period
@@ -1490,28 +1615,54 @@ async function renderDashboard({ silent = false } = {}) {
   const recent = periodMode ? { items: [] } : await api(
     `compliance/servers?state=non_compliant&page_size=6${query ? `&${query}` : ""}`
   ).catch(() => ({ items: [] }));
-  // This panel now shares its row with the period table, so it shows the
-  // identifying and actionable columns only; address, OS and last-checked
-  // detail remain one click away through "View all".
+  // "Days" on the recent-server list is the age of the last assessment: that
+  // is the only per-server clock the compliance view carries, and it tells the
+  // reader how stale the evidence is as well as what is outstanding.
+  const daysSince = (value) => {
+    if (!value) return null;
+    const days = Math.floor((Date.now() - new Date(value).getTime()) / 86400000);
+    return Number.isFinite(days) ? Math.max(0, days) : null;
+  };
   const recentTable = table([
     { label: "Hostname", render: (r) => h("a", {
       href: "#", onclick: (e) => { e.preventDefault(); openServer(r.id); },
     }, r.hostname) },
-    { label: "Environment", key: "environment" },
-    { label: "Business service", key: "business_group" },
-    { label: "Missing patches", numeric: true, render: (r) => fmtNumber(r.total_patches) },
-    { label: "Last checked", render: (r) => fmtDate(r.last_assessed_at, true) },
+    { label: "Operating System", render: (r) => osCell(r) },
+    { label: "Missing Patches", numeric: true,
+      render: (r) => fmtNumber(r.total_patches) },
+    { label: "Days", numeric: true, render: (r) => {
+      const days = daysSince(r.last_assessed_at);
+      return days === null ? "—" : h("span", {
+        class: days > 30 ? "day-age old" : "day-age",
+        title: `Last assessed ${fmtDate(r.last_assessed_at, true)}`,
+      }, fmtNumber(days));
+    } },
   ], recent.items, {
     compact: true, export: false,
     empty: "No non-compliant servers match these filters.",
   });
 
-  const topBusiness = (summary.by_business_group || [])
+  const byService = (summary.by_business_group || [])
     .slice()
-    .sort((a, b) => (b.non_compliant || 0) - (a.non_compliant || 0))
-    .slice(0, 6);
-  const topTable = table([
-    { label: "Business service", render: (r) => (can("compliance:view")
+    .sort((a, b) => (b.non_compliant || 0) - (a.non_compliant || 0));
+  const topBusiness = byService.slice(0, 6);
+  const businessBars = h("div");
+  rankedBars(businessBars, topBusiness.map((row) => ({
+    label: row.group,
+    value: Number(row.non_compliant || 0),
+    meta: { label: "Of total servers", value: fmtNumber(row.total_servers) },
+  })), {
+    color: "#ff4d7d", maxRows: 6, valueLabel: "Non-compliant servers",
+    empty: "No non-compliant servers match these filters.",
+    label: "Non-compliant servers by business service",
+  });
+
+  // Five groups with the largest non-compliant population. Compliance is
+  // computed against in-scope servers, not the raw total, so an excluded
+  // server can never look like a healthy one.
+  const serverGroups = byService.slice(0, 5);
+  const groupsTable = table([
+    { label: "Server Group", render: (r) => (can("compliance:view")
       ? h("a", {
         href: "#", onclick: (e) => {
           e.preventDefault();
@@ -1519,12 +1670,34 @@ async function renderDashboard({ silent = false } = {}) {
         },
       }, r.group)
       : r.group) },
-    { label: "Total", numeric: true, render: (r) => fmtNumber(r.total_servers) },
     { label: "Non-compliant", numeric: true,
-      render: (r) => h("span", { style: { color: "#ff8fae" } }, fmtNumber(r.non_compliant)) },
-    { label: "%", numeric: true,
-      render: (r) => (r.in_scope ? fmtPct((r.non_compliant / r.in_scope) * 100) : "—") },
-  ], topBusiness, { compact: true, export: false });
+      render: (r) => h("span", { class: "bad-num" }, fmtNumber(r.non_compliant)) },
+    { label: "Total", numeric: true, render: (r) => fmtNumber(r.total_servers) },
+    { label: "Compliance %", numeric: true,
+      render: (r) => (r.in_scope ? fmtPct((r.compliant / r.in_scope) * 100) : "—") },
+  ], serverGroups, {
+    compact: true, export: false,
+    empty: "No business-service groups are in scope.",
+  });
+
+  // The oldest advisories are the ones the SLA panel already ranks; this
+  // register keeps the advisory identity, severity and affected-server count
+  // in one scan line for the executive reader.
+  const overdueRows = (summary.dashboard?.remediation?.oldest || []).slice(0, 6);
+  const overdueTable = table([
+    { label: "Advisory", render: (r) => h("span", {
+      class: "mono advisory-id", title: r.title,
+    }, r.advisory_id || r.title) },
+    { label: "Severity", render: (r) => pill(r.severity, r.severity) },
+    { label: "Affected Servers", numeric: true,
+      render: (r) => fmtNumber(r.affected_servers) },
+    { label: "Oldest Detected", numeric: true, render: (r) => h("span", {
+      class: "overdue-age",
+    }, `${fmtNumber(r.days_overdue)} days`) },
+  ], overdueRows, {
+    compact: true, export: false,
+    empty: "No current finding is past its remediation due date.",
+  });
 
   let board = null;
   const arrangeHint = h("span", {
@@ -1532,11 +1705,14 @@ async function renderDashboard({ silent = false } = {}) {
     "aria-live": "polite",
   });
   const arrangeButton = h("button", {
-    type: "button", class: "btn btn-sm", "aria-pressed": String(state.dashboard.arranging),
+    type: "button", class: "btn btn-sm btn-ghost btn-icon-only",
+    "aria-pressed": String(state.dashboard.arranging),
+    "aria-label": "Arrange dashboard panels",
     title: "Move dashboard panels into the order you prefer",
-  }, state.dashboard.arranging ? "Done arranging" : "Arrange panels");
+  }, h("span", { class: "btn-ico", html: ICONS.arrange }));
   const resetButton = h("button", {
-    type: "button", class: "btn btn-sm", title: "Return panels to their default order",
+    type: "button", class: "btn btn-sm btn-ghost",
+    title: "Return panels to their default order",
   }, "Reset layout");
   resetButton.hidden = !state.dashboard.arranging;
 
@@ -1545,7 +1721,8 @@ async function renderDashboard({ silent = false } = {}) {
     if (!board) return;
     board.classList.toggle("arranging", on);
     arrangeButton.setAttribute("aria-pressed", String(on));
-    arrangeButton.textContent = on ? "Done arranging" : "Arrange panels";
+    arrangeButton.setAttribute("aria-label",
+      on ? "Finish arranging dashboard panels" : "Arrange dashboard panels");
     resetButton.hidden = !on;
     board.querySelectorAll(".dash-grip").forEach((grip) => {
       grip.tabIndex = on ? 0 : -1;
@@ -1570,9 +1747,20 @@ async function renderDashboard({ silent = false } = {}) {
     arrangeHint.textContent = "Panels are back in their default order.";
   });
 
+  // The dashboard's own header controls. They sit in the top bar beside the
+  // page title so the reading order is title, scope, action — the same shape
+  // as the executive boards this console is modelled on.
+  const exportButton = !can("reports:generate") ? null : (() => {
+    const button = h("button", {
+      type: "button", class: "btn btn-primary", title:
+        "Download this dashboard as a one-page landscape PDF",
+    }, h("span", { class: "btn-ico", html: ICONS.download }), "Export Dashboard");
+    button.addEventListener("click", () => exportDashboardPdf(button));
+    return button;
+  })();
   const controls = h("div", { class: "dashboard-controls" },
     select({
-      label: "Timeframe",
+      label: "Reporting period",
       value: period || `live:${basis}`,
       options: timeframeOptions(periods),
       allLabel: null,
@@ -1598,8 +1786,18 @@ async function renderDashboard({ silent = false } = {}) {
         renderDashboard();
       },
     }),
+    periodMode ? null : select({
+      label: "Environment",
+      value: state.filters.environment,
+      options: state.dimensions.environment || [],
+      allLabel: "All environments",
+      onChange: (value) => {
+        state.filters.environment = value;
+        renderDashboard();
+      },
+    }),
     select({
-      label: "Auto-refresh",
+      label: "Refresh",
       value: state.dashboard.refreshSeconds,
       options: REFRESH_CHOICES,
       allLabel: null,
@@ -1609,17 +1807,10 @@ async function renderDashboard({ silent = false } = {}) {
         renderDashboard();
       },
     }),
-    !can("reports:generate") ? null : (() => {
-      const button = h("button", {
-        type: "button", class: "btn btn-sm", title:
-          "Generate a PDF board pack from the latest recorded snapshot",
-      }, "Export board pack");
-      button.addEventListener("click", () => exportBoardPack(button));
-      return button;
-    })(),
     arrangeButton,
     resetButton,
-    arrangeHint);
+    exportButton);
+  mount(pageActions, controls, arrangeHint);
 
   const periodTitle = {
     monthly: "Monthly compliance trend",
@@ -1631,22 +1822,157 @@ async function renderDashboard({ silent = false } = {}) {
   // by a note that says what the reader is looking at and what is unavailable.
   const bottomRow = periodMode
     ? periodNote(summary.period, summary.dimensions)
-    : card("Recent non-compliant servers", "Highest outstanding patch counts",
+    : card("Recent Non-Compliant Servers", "Highest outstanding patch counts",
         recentTable,
-        h("a", { class: "card-link", href: "#/servers" }, "View all →"));
+        h("a", { class: "card-link", href: "#/servers" }, "View all →"),
+        { icon: ICONS.servers, accent: "#ff4d7d" });
+
+  // Environment: the bar lengths are server volume; Total and Compliance %
+  // repeat the figures on the right so length is never the only encoding.
+  const environmentRows = (summary.by_environment || []).slice().sort(
+    (a, b) => (b.total_servers || 0) - (a.total_servers || 0));
+  const environmentBody = h("div");
+  stackedRows(environmentBody, {
+    rows: environmentRows.map((row) => ({
+      ...row, unknown: (row.unknown || 0) + (row.stale || 0),
+    })),
+    keys: STATUS_KEYS, labels: STATUS_LABELS, colors: STATUS,
+    withPct: true, withTotal: true, maxRows: environmentRows.length,
+    onSelect: periodMode ? undefined : (row) =>
+      drillToServers("non_compliant", { environment: row.group }),
+    label: "Compliance by environment",
+  });
+  const environmentCard = card(
+    "Compliance by Environment",
+    periodMode && !environmentRows.length
+      ? "Not recorded on this snapshot" : "Server volume and compliance by environment",
+    h("div", {}, chartCols("Environment", ["Total", "Compliance %"]), environmentBody),
+    null, { icon: ICONS.servers, accent: "#22d3ee" });
+
+  // The Export Dashboard button posts exactly this board, so the PDF is a
+  // picture of the current scope rather than a separately built report.
+  // Assigned after the environment rows are built, for the same reason.
+  state.dashboardExport = {
+    mode: periodMode ? "period" : "live",
+    scope_label: periodMode
+      ? `Recorded snapshot · ${summary.period.label} · captured ${
+        fmtDate(summary.period.captured_at, true)}`
+      : `Live · ${state.filters.environment || "all environments"} · ${
+        BASIS_LABELS[basis] || basis}`,
+    environment: periodMode ? "" : (state.filters.environment || ""),
+    kpis: summary.kpis,
+    remediation: summary.dashboard?.remediation || null,
+    management: summary.management || null,
+    freshness: summary.freshness ? {
+      total_sources: (summary.freshness.sources || []).length,
+      stale_sources: (summary.freshness.sources || [])
+        .filter((source) => source.stale || source.age_hours == null).length,
+      oldest_age_hours: (summary.freshness.sources || [])
+        .reduce((oldest, source) =>
+          Math.max(oldest, Number(source.age_hours) || 0), 0),
+    } : null,
+    by_environment: environmentRows,
+    by_business_group: byService,
+    by_os: summary.by_os || [],
+    severity: summary.severity || [],
+    trend: series.map((point) => ({
+      label: point.label,
+      compliance_pct: point.value,
+      target_pct: point.target,
+      total_servers: point.total,
+    })),
+    servers: recent.items.map((server) => ({
+      hostname: server.hostname,
+      environment: server.environment,
+      os_name: server.os_name,
+      os_version: server.os_version,
+      total_patches: server.total_patches,
+      days_since_assessment: daysSince(server.last_assessed_at),
+    })),
+  };
+
+  // Operating systems are a donut with the same count-and-share legend as the
+  // compliance ring, so the two adjacent panels read as one instrument pair.
+  const osRows = (summary.by_os || []).map((row) => ({
+    ...row,
+    label: OS_FAMILY_LABELS[row.group] || row.group,
+    value: Number(row.compliant || 0) + Number(row.non_compliant || 0)
+      + Number(row.unknown || 0) + Number(row.stale || 0),
+    color: { rhel: "#4f7dff", windows: "#8b5cf6", solaris: "#ffb020",
+      other: "#64748b" }[row.group] || "#64748b",
+  }));
+  const osTotal = osRows.reduce((sum, row) => sum + row.value, 0);
+  const osBody = h("div", { class: "donut-row" });
+  if (osRows.length) {
+    const osDonut = h("div");
+    donut(osDonut, {
+      rows: osRows.map((row) => ({ label: row.label, value: row.value, color: row.color })),
+      centerValue: fmtNumber(osTotal),
+      centerLabel: "Servers",
+      size: 182,
+    });
+    osBody.appendChild(osDonut);
+    osBody.appendChild(donutLegend(osRows.map((row) => ({
+      label: row.label,
+      value: row.value,
+      pct: osTotal ? fmtPct((row.value / osTotal) * 100) : "—",
+      color: row.color,
+    }))));
+  }
+  const osCard = card("Compliance by Operating System",
+    periodMode && !osRows.length ? "Not recorded on this snapshot"
+      : "Servers by operating system",
+    osRows.length ? osBody : h("p", { class: "muted small" },
+      "No operating-system breakdown is available for this view."),
+    null, { icon: ICONS.servers, accent: "#8b5cf6" });
 
   const panels = [
-    { id: "kpis", label: "Key metrics", className: "span-6", node: kpiRow(summary) },
-    ...(periodMode
-      ? [{ id: "severity", label: "Findings by severity", node: severityCard(summary) }]
-      : [
-        { id: "remediation", label: "Remediation deadlines",
-          node: remediationCard(summary.dashboard.remediation) },
-        { id: "severity", label: "Findings by severity", node: severityCard(summary) },
-        { id: "freshness", label: "Data freshness", node: freshnessCard(summary) },
-      ]),
+    { id: "kpis", label: "Key metrics", className: "span-6",
+      node: kpiRow(summary, series) },
+    { id: "trend", label: periodTitle, node: card(periodTitle,
+      `Last ${points} ${noun} · average of daily snapshots · target ${
+        fmtPct(summary.kpis.target_pct, 0)}`,
+      h("div", {}, trendBody, trendLegend), null,
+      { icon: ICONS.trend, accent: "#4f7dff" }) },
+    { id: "distribution", label: "Server compliance",
+      node: card("Server Compliance",
+        `${fmtNumber(summary.kpis.in_scope)} servers judged${
+          summary.kpis.excluded ? ` · ${fmtNumber(summary.kpis.excluded)} excluded` : ""}`,
+        h("div", { class: "donut-row" }, donutBody, complianceLegend),
+        null, { icon: ICONS.dashboard, accent: STATUS.compliant }) },
+    { id: "by_environment", label: "Compliance by environment",
+      node: environmentCard },
+    { id: "by_os", label: "Compliance by operating system", node: osCard },
+    { id: "top_business", label: "Top non-compliant by business service", node: card(
+      "Top Non-Compliant by Business Service",
+      periodMode ? `As recorded in ${summary.period.label}`
+        : "Largest non-compliant population",
+      h("div", {}, chartCols("Business service", "Non-compliant"), businessBars),
+      null, { icon: ICONS.inventory, accent: "#ff4d7d" }) },
+    { id: "severity", label: "Findings by severity", node: severityCard(summary) },
+    { id: "overdue", label: "Top overdue advisories", node: card(
+      "Top Overdue Advisories",
+      `${fmtNumber(summary.dashboard?.remediation?.overdue || 0)} findings past their due date`,
+      overdueTable,
+      can("findings:view")
+        ? h("a", { class: "card-link", href: "#/findings?overdue=true" }, "View all →")
+        : null,
+      { icon: ICONS.clock, accent: "#ff4d7d" }) },
+    { id: "server_groups", label: "Top server groups", node: card(
+      "Top 5 Server Groups (Non-Compliant)",
+      "Largest non-compliant populations",
+      groupsTable,
+      can("compliance:view")
+        ? h("a", { class: "card-link", href: "#/servers" }, "View all →")
+        : null,
+      { icon: ICONS.shield, accent: "#ff4d7d" }) },
+    { id: "recent_servers", label: "Recent non-compliant servers",
+      node: bottomRow },
     ...(!periodMode && summary.dashboard
       ? [
+        { id: "remediation", label: "Remediation deadlines",
+          node: remediationCard(summary.dashboard.remediation) },
+        { id: "freshness", label: "Data freshness", node: freshnessCard(summary) },
         { id: "movers", label: "Biggest movers", node: moversCard(summary.dashboard.movers) },
         { id: "concentration", label: "Missing-patch concentration",
           node: concentrationCard(summary.dashboard.concentration) },
@@ -1654,68 +1980,29 @@ async function renderDashboard({ silent = false } = {}) {
           node: excludedCard(summary.dashboard.excluded) },
       ]
       : []),
-    { id: "by_os", label: "Compliance by operating system", node: statusChartCard(
-      "Compliance by operating system",
-      periodMode && !(summary.by_os || []).length
-        ? "Not recorded on this snapshot"
-        : "Server counts by OS family",
-      (summary.by_os || []).map((row) => ({
-        ...row, groupKey: row.group,
-        group: OS_FAMILY_LABELS[row.group] || row.group,
-      })), "columns", periodMode ? undefined : (row) =>
-        drillToServers("non_compliant", { os_family: row.groupKey })) },
-    { id: "by_environment", label: "Compliance by environment", node: statusChartCard(
-      "Compliance by environment", "Server counts by environment",
-      summary.by_environment || [], "columns",
-      periodMode ? undefined : (row) =>
-        drillToServers("non_compliant", { environment: row.group })) },
     { id: "by_business_group", label: "Compliance by business service",
       node: statusChartCard(
         "Compliance by business service", "Server counts by business service",
         summary.by_business_group || [], "rows",
         periodMode ? undefined : (row) =>
           drillToServers("non_compliant", { business_group: row.group })) },
-    { id: "distribution", label: "Patch status distribution", node: card(
-      "Patch status distribution",
-      `${fmtNumber(summary.kpis.in_scope)} servers judged${
-        summary.kpis.excluded ? ` · ${fmtNumber(summary.kpis.excluded)} excluded` : ""}`,
-      h("div", {
-        class: "row",
-        style: { justifyContent: "center", gap: "18px", flexWrap: "wrap" },
-      }, donutBody, donutLegend)) },
-    { id: "trend", label: periodTitle, node: card(periodTitle,
-      `Last ${points} ${noun} · average of daily snapshots · target ${
-        fmtPct(summary.kpis.target_pct, 0)}`,
-      trendBody) },
-    { id: "top_business", label: "Top non-compliance by business service", node: card(
-      "Top non-compliance by business service",
-      periodMode ? `As recorded in ${summary.period.label}`
-        : "Largest gaps by count",
-      topTable) },
-    { id: "period_summary", label: "Period summary", className: "span-3",
+    { id: "period_summary", label: "Period summary",
       node: card("Period summary",
         `Same observations as the chart · change is against the previous ${basis.slice(0, -2)}`,
-        periodTable) },
-    { id: "recent_servers", label: "Recent non-compliant servers",
-      className: "span-3", node: bottomRow },
+        periodTable, null, { icon: ICONS.trend, accent: "#8b5cf6" }) },
   ];
 
   board = h("div", { class: `dash-board grid${state.dashboard.arranging ? " arranging" : ""}` },
     ...orderDashPanels(panels).map((panel) => dashPanel(panel, state.dashboard.arranging)));
   wireDashboardBoard(board, arrangeHint);
 
+  const filter = periodMode ? null : filterBar(renderDashboard, {
+    skip: ["environment"],
+    note: "",
+  });
   mount(view,
-    filterBar(renderDashboard, {
-      extra: controls,
-      note: periodMode
-        ? "Historical snapshot — dimension filters apply to Live only"
-        : "",
-      skip: periodMode
-        ? ["environment", "business_group", "application_group", "os_family",
-           "patch_source"]
-        : [],
-    }),
-    h("div", { class: "stack", style: { marginTop: "14px" } }, board));
+    filter,
+    h("div", { class: "stack dashboard-stack" }, board));
   startDashboardRefresh(refreshSeconds);
 }
 
@@ -4243,6 +4530,7 @@ function renamePlacementOption(item, label) {
       await api(`inventory/settings/placement/${item.id}`, {
         method: "PATCH", body: { value: input.value },
       });
+      invalidateDimensions();
       close();
       if (item.in_use) {
         // A rename can move servers between policy scope rules, exactly as an
@@ -4288,6 +4576,7 @@ async function removePlacementOption(item, label) {
   if (!window.confirm(`Remove “${item.value}” from the ${label} list?`)) return;
   try {
     await api(`inventory/settings/placement/${item.id}`, { method: "DELETE" });
+    invalidateDimensions();
     SETTINGS_FLASH = alert("ok", "Removed from the list.");
     await renderSettings();
   } catch (error) {
@@ -4307,6 +4596,7 @@ function placementOptionSection(kind, label, items) {
       await api("inventory/settings/placement", {
         method: "POST", body: { kind, value: addInput.value },
       });
+      invalidateDimensions();
       await renderSettings();
     } catch (error) {
       status.appendChild(alert("error", error.message));
@@ -4983,10 +5273,23 @@ async function boot() {
       promptPasswordChange(me);
       return;
     }
-    document.getElementById("user-name").textContent = me.display_name || me.username;
-    document.getElementById("user-role").textContent = me.role.replaceAll("_", " ");
+    const displayName = me.display_name || me.username;
+    const roleLabel = me.role.replaceAll("_", " ");
+    document.getElementById("user-name").textContent = displayName;
+    // A display name like "PatchTrack Administrator" already says the role;
+    // repeating it underneath costs a line and reads like a second person.
+    const roleNode = document.getElementById("user-role");
+    roleNode.textContent = roleLabel;
+    roleNode.hidden = displayName.toLowerCase().includes(roleLabel.toLowerCase());
     document.getElementById("user-initials").textContent =
-      (me.display_name || me.username).slice(0, 2).toUpperCase();
+      displayName.slice(0, 2).toUpperCase();
+    // The sidebar carries the release the console is actually running, read
+    // from the gateway rather than hard-coded, so an upgraded box never shows
+    // the version it used to be.
+    api("version").then((release) => {
+      if (!release?.version) return;
+      document.getElementById("app-version").textContent = `v${release.version}`;
+    }).catch(() => { /* the build default stays in place */ });
   } catch {
     window.location.replace("/login");
     return;

@@ -336,7 +336,11 @@ async def login(payload: LoginBody, response: Response,
             detail = upstream.json().get("detail", detail)
         except ValueError:
             pass
-        raise HTTPException(status_code=upstream.status_code, detail=detail)
+        retry_after = upstream.headers.get("Retry-After")
+        raise HTTPException(
+            status_code=upstream.status_code, detail=detail,
+            headers={"Retry-After": retry_after} if retry_after else None,
+        )
     return _establish_session(upstream.json(), response, request)
 
 
@@ -547,6 +551,22 @@ def _internal_headers(request: Request, payload: dict[str, Any]) -> dict[str, st
     }
 
 
+# Upstream headers the console is allowed to see. Retry-After is what turns
+# identity's 429 into an instruction the browser and an operator can act on;
+# dropping it made a throttled sign-in look like an unexplained refusal.
+FORWARDED_RESPONSE_HEADERS = frozenset({
+    "content-type", "content-disposition", "cache-control", "etag",
+    "content-length", "retry-after",
+})
+
+
+def _forwarded_response_headers(upstream: Any) -> dict[str, str]:
+    return {
+        key: value for key, value in upstream.headers.items()
+        if key.lower() in FORWARDED_RESPONSE_HEADERS
+    }
+
+
 async def _proxy(service: str, path: str, request: Request,
                  authenticated: bool = True) -> Response:
     headers: dict[str, str] = {}
@@ -579,11 +599,7 @@ async def _proxy(service: str, path: str, request: Request,
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail=f"{service} service is temporarily unavailable",
             ) from exc
-    response_headers = {
-        key: value for key, value in upstream.headers.items()
-        if key.lower() in ("content-type", "content-disposition", "cache-control",
-                           "etag", "content-length")
-    }
+    response_headers = _forwarded_response_headers(upstream)
     return Response(
         content=upstream.content, status_code=upstream.status_code,
         headers=response_headers,

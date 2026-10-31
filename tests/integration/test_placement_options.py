@@ -28,6 +28,7 @@ from inventory.app.main import (
     PlacementOverride,
     create_placement_option,
     delete_placement_option,
+    dimensions,
     list_placement_options,
     rename_placement_option,
     set_asset_override,
@@ -311,3 +312,28 @@ def test_deleting_an_unused_option_removes_it(engine, clean_tables):
             {"i": str(option["id"])},
         ).scalar()
     assert audit["value"] == "Staging"
+
+
+def test_dimensions_offer_a_configured_environment_before_any_server_uses_it(
+    engine, clean_tables,
+):
+    """The dashboard filter must show the Settings vocabulary, not only values
+    that happen to appear on a server already synced into the inventory."""
+    create_placement_option(
+        PlacementOptionCreate(kind="environment", value="Staging"),
+        _Request(), ADMIN,
+    )
+
+    assert dimensions(ADMIN)["environment"] == ["Staging"]
+
+
+def test_dimensions_keep_a_value_still_held_by_an_asset(engine, clean_tables):
+    """Removing a value from the list must not strand the servers still showing
+    it: the filter keeps offering it so they remain reachable."""
+    create_asset(engine)
+    create_placement_option(
+        PlacementOptionCreate(kind="environment", value="Staging"),
+        _Request(), ADMIN,
+    )
+
+    assert dimensions(ADMIN)["environment"] == ["Production", "Staging"]
