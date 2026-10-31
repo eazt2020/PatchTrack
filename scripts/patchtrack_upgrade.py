@@ -63,7 +63,7 @@ READY_TIMEOUT = 300
 # 3.0.5 was retracted after publication, so it is deliberately absent: a host
 # still carrying it must be reinstalled or restored from a 3.0.3 backup rather
 # than upgraded in place. Add each newly published version here.
-PUBLISHED_RELEASES = ("3.0.3",)
+PUBLISHED_RELEASES = ("3.0.3", "3.0.7")
 WITHDRAWN_RELEASES = ("3.0.5",)
 APPLICATION_SERVICES = (
     "gateway", "identity", "inventory", "compliance", "reporting",
@@ -201,7 +201,8 @@ def validate_published_source_version(current: str) -> Optional[str]:
     if current in WITHDRAWN_RELEASES:
         return (
             f"{current} was withdrawn and is not a published release; reinstall "
-            f"{PUBLISHED_RELEASES[-1]} and restore its database before upgrading"
+            f"a published release ({', '.join(PUBLISHED_RELEASES)}) and restore "
+            "its database before upgrading"
         )
     return (
         f"{current} is not a published release; only "
