@@ -9,10 +9,16 @@ Run this from the unpacked directory of the new release. The script:
 2. takes a mandatory backup of the previous application tree, configuration
    (``.env``, secrets, manifest) and a PostgreSQL custom-format dump under
    ``/var/lib/patchtrack/upgrades``;
-3. stages the new tree beside the current one, swaps it in, updates the version
-   and builds the new image;
-4. stops the application services, applies migrations and starts the stack;
+3. stages the new tree beside the current one, swaps it in, verifies every
+   managed file matches, refreshes the installer-owned systemd unit, updates
+   the version and builds the new image;
+4. stops the application services, applies migrations and recreates every
+   container at once from the new image (no rolling replacement);
 5. verifies readiness, the sign-in page and the recorded version.
+
+Only a published release may be the source of an upgrade. A host carrying a
+withdrawn build, such as the retracted 3.0.5, is refused and must be
+reinstalled on the published release and restored from its backup.
 
 If any step after the swap fails, it restores the previous tree, ``.env`` and
 manifest, restores the database dump when migrations had started, rebuilds the
@@ -28,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import hashlib
 import json
 import os
 import re
@@ -51,6 +58,25 @@ COMPOSE_FILES = (("-f", "docker-compose.yml"), ("-f", "docker-compose.secrets.ym
 VERSION_RE = re.compile(r"[0-9][A-Za-z0-9._-]{0,31}")
 DISK_HEADROOM = 512 * 1024 ** 2
 READY_TIMEOUT = 300
+
+# Only releases that were actually published may be the source of an upgrade.
+# 3.0.5 was retracted after publication, so it is deliberately absent: a host
+# still carrying it must be reinstalled or restored from a 3.0.3 backup rather
+# than upgraded in place. Add each newly published version here.
+PUBLISHED_RELEASES = ("3.0.3",)
+WITHDRAWN_RELEASES = ("3.0.5",)
+APPLICATION_SERVICES = (
+    "gateway", "identity", "inventory", "compliance", "reporting",
+)
+# Matches the ignored set in patchtrack_install.copy_application, so the file
+# comparison after the swap checks exactly the tree that was meant to move.
+TREE_IGNORED_NAMES = {
+    ".git", ".runtime", "dist", "__pycache__", ".pytest_cache",
+    ".mypy_cache", ".ruff_cache", "venv", ".venv", ".env",
+}
+TREE_IGNORED_SUFFIXES = (
+    ".pyc", ".pyo", ".log", ".pem", ".key", ".crt", ".p12",
+)
 
 
 class UpgradeError(RuntimeError):
@@ -146,8 +172,13 @@ def installation_ready(url: str) -> Tuple[bool, str]:
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
         return False, str(exc)
     services = body.get("services", {})
-    if status == 200 and body.get("status") == "ready" and len(services) == 4 \
-            and all(value == "ok" for value in services.values()):
+    # /readyz also reports the database and backup worker, which are shown in
+    # Operational health but do not decide application readiness. Require the
+    # four application services by name so a new informational entry cannot
+    # make a healthy installation fail its upgrade precheck.
+    required = ("identity", "inventory", "compliance", "reporting")
+    if status == 200 and body.get("status") == "ready" \
+            and all(services.get(name) == "ok" for name in required):
         return True, "all four services are ready"
     return False, f"readyz returned {status} with {len(services)} service(s)"
 
@@ -163,11 +194,28 @@ def version_key(version: str) -> Tuple[int, ...]:
     return tuple(int(part) for part in re.findall(r"\d+", version))
 
 
+def validate_published_source_version(current: str) -> Optional[str]:
+    """An upgrade may only start from a release that was actually published."""
+    if current in PUBLISHED_RELEASES:
+        return None
+    if current in WITHDRAWN_RELEASES:
+        return (
+            f"{current} was withdrawn and is not a published release; reinstall "
+            f"{PUBLISHED_RELEASES[-1]} and restore its database before upgrading"
+        )
+    return (
+        f"{current} is not a published release; only "
+        f"{', '.join(PUBLISHED_RELEASES)} may be upgraded from"
+    )
+
+
 def validate_upgrade_version(current: str, new: str) -> Optional[str]:
     if not new:
         return "a target version is required (--version or PATCHTRACK_UPGRADE_VERSION)"
     if not VERSION_RE.fullmatch(new):
         return "must start with a digit and contain only letters, digits, '.', '_' or '-'"
+    if new in WITHDRAWN_RELEASES:
+        return f"{new} was withdrawn and cannot be an upgrade target"
     if new == current:
         return f"the installation is already at {current}"
     current_key = version_key(current)
@@ -412,6 +460,14 @@ def collect_preflight(ctx: Context) -> Tuple[List[base.Check], RuntimeState]:
         if inside else "separate directories",
     ))
 
+    source_problem = validate_published_source_version(ctx.current_version)
+    checks.append(base.Check(
+        "published source release",
+        source_problem is None,
+        f"{ctx.current_version} is published"
+        if source_problem is None else source_problem,
+    ))
+
     problem = validate_upgrade_version(ctx.current_version, ctx.new_version)
     checks.append(base.Check(
         "target version",
@@ -553,6 +609,56 @@ def _write_backup(ctx: Context, root: Path) -> Backup:
     return Backup(root=root, app=app, config=config, database=database, metadata=metadata)
 
 
+def managed_tree_entries(root: Path) -> Dict[str, Tuple[str, str]]:
+    """Hash every file and record every symlink that an installation owns."""
+    entries: Dict[str, Tuple[str, str]] = {}
+    root = Path(root)
+    for dirpath, dirnames, filenames in os.walk(root):
+        directory = Path(dirpath)
+        traversable = []
+        for name in dirnames:
+            path = directory / name
+            if name in TREE_IGNORED_NAMES or (
+                name.startswith(".env.") and name != ".env.example"
+            ):
+                continue
+            if path.is_symlink():
+                entries[str(path.relative_to(root))] = ("link", os.readlink(path))
+            else:
+                traversable.append(name)
+        dirnames[:] = traversable
+        for name in filenames:
+            if name in TREE_IGNORED_NAMES or (
+                name.startswith(".env.") and name != ".env.example"
+            ):
+                continue
+            if name.endswith(TREE_IGNORED_SUFFIXES):
+                continue
+            path = directory / name
+            relative = str(path.relative_to(root))
+            if path.is_symlink():
+                entries[relative] = ("link", os.readlink(path))
+            else:
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                entries[relative] = ("file", digest)
+    return entries
+
+
+def tree_differences(source: Path, installed: Path) -> List[str]:
+    """Return a short list of paths that differ between two release trees."""
+    expected = managed_tree_entries(source)
+    actual = managed_tree_entries(installed)
+    problems = []
+    for path in sorted(expected.keys() - actual.keys()):
+        problems.append(f"missing from the installation: {path}")
+    for path in sorted(actual.keys() - expected.keys()):
+        problems.append(f"left over from an earlier release: {path}")
+    for path in sorted(expected.keys() & actual.keys()):
+        if expected[path] != actual[path]:
+            problems.append(f"content differs: {path}")
+    return problems
+
+
 # -------------------------------------------------------------------- upgrade
 
 class Upgrade:
@@ -564,6 +670,7 @@ class Upgrade:
         self.services_stopped = False
         self.db_touched = False
         self.unit_owned = systemd_unit_owned(ctx.manifest)
+        self.previous_unit_text: Optional[str] = None
         self.failures: List[str] = []
 
     def _compose(self, *args: str, **kwargs):
@@ -613,6 +720,58 @@ class Upgrade:
             self.swapped = False
             raise
         base.info(f"replaced {self.ctx.manifest.install_dir} (previous tree kept for rollback)")
+
+    def verify_tree_replaced(self) -> None:
+        """Prove the installed tree is the staged release, file for file.
+
+        The swap renames a complete copy into place, so a missing or stale file
+        here means the copy was incomplete. Catch that before any container
+        starts, while the previous tree is still available for rollback.
+        """
+        base.step("Verifying every installed file matches the new release")
+        problems = tree_differences(
+            self.ctx.source, self.ctx.manifest.install_dir
+        )
+        if problems:
+            shown = "; ".join(problems[:5])
+            if len(problems) > 5:
+                shown += f"; and {len(problems) - 5} more"
+            raise UpgradeError(
+                "the installed tree does not match the new release: " + shown
+            )
+        count = len(managed_tree_entries(self.ctx.manifest.install_dir))
+        base.info(f"all {count} release files match; no stale files remain")
+
+    def refresh_systemd_unit(self) -> None:
+        """Replace an installer-owned unit so it matches the new release."""
+        if not self.unit_owned:
+            return
+        base.step("Refreshing the PatchTrack systemd service")
+        path = base.SYSTEMD_UNIT_PATH
+        try:
+            current = path.read_text()
+        except OSError as exc:
+            raise UpgradeError(f"cannot read {path}: {exc}") from None
+        desired = base.compose_service_unit(
+            self.ctx.manifest.install_dir, self.ctx.manifest.runtime
+        )
+        if current == desired:
+            base.info(f"{path} already matches the new release")
+            return
+        self.previous_unit_text = current
+        temporary = path.with_name(path.name + ".upgrade-new")
+        temporary.write_text(desired)
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, path)
+        result = base.run_command(
+            ["systemctl", "daemon-reload"], check=False, capture=True
+        )
+        if result.returncode != 0:
+            raise UpgradeError(
+                "the systemd unit was replaced but daemon-reload failed: "
+                + (result.stderr or result.stdout or "").strip()
+            )
+        base.info(f"updated {path} for the new release")
 
     def set_version(self) -> None:
         base.step(f"Updating the version to {self.ctx.new_version}")
@@ -676,8 +835,7 @@ class Upgrade:
             return
 
         result = self._compose(
-            "stop", "gateway", "identity", "inventory", "compliance", "reporting",
-            check=False, capture=True,
+            "stop", *APPLICATION_SERVICES, check=False, capture=True,
         )
         if result.returncode != 0:
             raise UpgradeError(
@@ -698,25 +856,43 @@ class Upgrade:
             )
         base.info("migrations applied")
 
-    def start(self) -> None:
-        base.step("Starting the upgraded services")
+    def recreate_services(self, label: str) -> None:
+        """Replace every container at once: stop is already done, then start.
+
+        The upgrade uses Compose's recreate strategy, never a rolling one:
+        every service is removed and created from the newly built image before
+        any of them serves traffic again. Volumes, including PostgreSQL data,
+        are preserved; only the containers and their configuration are new.
+        """
+        args = ["up", "-d", "--force-recreate", "--remove-orphans"]
+        if self.ctx.manifest.installation_mode == "airgap":
+            args += ["--pull", "never"]
+        result = self._compose(*args, check=False, capture=True)
+        if result.returncode != 0:
+            raise UpgradeError(
+                f"could not recreate the {label} services: "
+                + (result.stderr or result.stdout or "").strip()
+            )
         if self.unit_owned:
+            # Recreate directly while the unit is stopped, then bring the unit
+            # up so systemd owns the already-running stack and reports it as
+            # active. Compose starts every container simultaneously.
             result = base.run_command(
                 ["systemctl", "start", base.SYSTEMD_SERVICE_NAME],
                 check=False, capture=True,
             )
-        else:
-            args = ["up", "-d"]
-            if self.ctx.manifest.installation_mode == "airgap":
-                args += ["--pull", "never"]
-            result = self._compose(*args, check=False, capture=True)
-        if result.returncode != 0:
-            raise UpgradeError(
-                "could not start the services: "
-                + (result.stderr or result.stdout or "").strip()
-            )
+            if result.returncode != 0:
+                raise UpgradeError(
+                    "the containers were recreated but the systemd service "
+                    "did not start: "
+                    + (result.stderr or result.stdout or "").strip()
+                )
+
+    def start(self) -> None:
+        base.step("Recreating all services from the new image")
+        self.recreate_services("upgraded")
         wait_for_ready(self.ctx.probe, "the upgraded services")
-        base.info("all four services are ready")
+        base.info("all four services are ready from the new image")
 
     def record_manifest(self) -> None:
         base.step("Recording the upgraded version")
@@ -754,6 +930,8 @@ class Upgrade:
     def run(self) -> None:
         self.stage()
         self.swap()
+        self.verify_tree_replaced()
+        self.refresh_systemd_unit()
         self.set_version()
         self.build_image()
         self.stop_services()
@@ -793,8 +971,7 @@ class Upgrade:
 
         if self.services_stopped or self.swapped or self.db_touched:
             stop = self._compose(
-                "stop", "gateway", "identity", "inventory", "compliance", "reporting",
-                check=False, capture=True,
+                "stop", *APPLICATION_SERVICES, check=False, capture=True,
             )
             if stop.returncode != 0:
                 failures.append(
@@ -833,6 +1010,21 @@ class Upgrade:
                 shutil.copy2(self.backup.config / "install.json", self.ctx.manifest.path)
             except OSError as exc:
                 failures.append(f"could not restore install.json: {exc}")
+
+        if self.previous_unit_text is not None:
+            try:
+                temporary = base.SYSTEMD_UNIT_PATH.with_name(
+                    base.SYSTEMD_UNIT_PATH.name + ".upgrade-new"
+                )
+                temporary.write_text(self.previous_unit_text)
+                os.chmod(temporary, 0o644)
+                os.replace(temporary, base.SYSTEMD_UNIT_PATH)
+                base.run_command(
+                    ["systemctl", "daemon-reload"], check=False, capture=True
+                )
+                base.info("restored the previous systemd service unit")
+            except OSError as exc:
+                failures.append(f"could not restore the systemd unit: {exc}")
 
         if self.db_touched:
             base.info("recreating the database from the pre-upgrade dump")
@@ -903,18 +1095,10 @@ class Upgrade:
                 )
 
         if self.services_stopped or self.db_touched:
-            if self.unit_owned:
-                start = base.run_command(
-                    ["systemctl", "start", base.SYSTEMD_SERVICE_NAME],
-                    check=False, capture=True,
-                )
-            else:
-                start = self._compose("up", "-d", check=False, capture=True)
-            if start.returncode != 0:
-                failures.append(
-                    "could not start the previous services: "
-                    + (start.stderr or start.stdout or "").strip()
-                )
+            try:
+                self.recreate_services("restored")
+            except UpgradeError as exc:
+                failures.append(str(exc))
             else:
                 try:
                     wait_for_ready(self.ctx.probe, "the restored services")
