@@ -112,6 +112,19 @@ applied by the migrate service on start-up.
   so the register's leading-wildcard search can use an index instead of a
   sequential scan as the estate grows.
 
+### Upgrade
+
+- **Only published releases can be upgraded from.** The retracted 3.0.5 is no
+  longer a valid source; only 3.0.3 is published. A host on 3.0.5 is refused
+  with an instruction to reinstall 3.0.3 and restore its data, and 3.0.5 can
+  no longer be selected as a target.
+- **The upgrade replaces everything, all at once.** Every managed file and
+  symlink in the installed tree is compared with the staged release before any
+  container starts, and an installer-owned `patchtrack.service` unit is
+  refreshed. All containers are then recreated simultaneously from the new
+  image with `--force-recreate --remove-orphans`; no rolling replacement is
+  used, so no old component keeps serving beside the new release.
+
 ## 3.0.6 — 2026-10-30
 
 Console, backup and operations release. It adds migrations `021_restore_runs`
@@ -163,7 +176,11 @@ manual step is needed.
   smoothly. All of it is disabled under `prefers-reduced-motion`, and the route
   entrance is removed after it plays so silent refreshes do not replay it.
 
-## 3.0.5 — 2026-10-30
+## 3.0.5 — 2026-10-30 (withdrawn)
+
+This release was retracted after publication and is not a supported install or
+upgrade source. 3.0.3 remains the only published release; reinstall it and
+restore the deployment's data instead of upgrading from 3.0.5.
 
 Console-only release; no database migration is required.
 

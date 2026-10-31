@@ -64,6 +64,76 @@ def test_upgrade_version_must_change_and_cannot_downgrade():
     )
 
 
+def test_upgrade_only_starts_from_a_published_release():
+    assert upgrader.validate_published_source_version("3.0.3") is None
+
+    withdrawn = upgrader.validate_published_source_version("3.0.5")
+    assert withdrawn and "withdrawn" in withdrawn
+    assert "reinstall 3.0.3" in withdrawn
+
+    unpublished = upgrader.validate_published_source_version("3.0.4")
+    assert unpublished and "not a published release" in unpublished
+    assert "3.0.3" in unpublished
+
+
+def test_withdrawn_release_cannot_be_an_upgrade_target():
+    problem = upgrader.validate_upgrade_version("3.0.3", "3.0.5")
+
+    assert problem and "withdrawn" in problem
+
+
+def ready_opener(body, status=200):
+    class Response:
+        def __init__(self):
+            self.status = status
+
+        def read(self):
+            return json.dumps(body).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    class OpenURL:
+        def open(self, request, timeout=0):
+            return Response()
+
+    return OpenURL()
+
+
+def test_readiness_accepts_database_and_worker_beside_the_four_services(monkeypatch):
+    body = {
+        "status": "ready",
+        "services": {
+            "identity": "ok", "inventory": "ok", "compliance": "ok",
+            "reporting": "ok", "database": "ok", "backup worker": "ok",
+        },
+    }
+    monkeypatch.setattr(upgrader, "opener", lambda: ready_opener(body))
+
+    ready, detail = upgrader.installation_ready("https://patchtrack.example")
+
+    assert ready, detail
+    assert "four services" in detail
+
+
+def test_readiness_still_requires_every_application_service(monkeypatch):
+    body = {
+        "status": "ready",
+        "services": {
+            "identity": "ok", "inventory": "unreachable", "compliance": "ok",
+            "reporting": "ok", "database": "ok", "backup worker": "ok",
+        },
+    }
+    monkeypatch.setattr(upgrader, "opener", lambda: ready_opener(body))
+
+    ready, _ = upgrader.installation_ready("https://patchtrack.example")
+
+    assert not ready
+
+
 def test_version_key_compares_numeric_parts():
     assert upgrader.version_key("3.1.0") == (3, 1, 0)
     assert upgrader.version_key("3.10.0") > upgrader.version_key("3.9.9")
@@ -219,6 +289,82 @@ def test_online_upgrade_builds_the_image(tmp_path, monkeypatch):
     upgrade.build_image()
 
     assert calls == [("build",)]
+
+
+def test_tree_comparison_accepts_an_exact_release_copy(tmp_path):
+    source = tmp_path / "release"
+    installed = tmp_path / "installed"
+    for root in (source, installed):
+        (root / "services" / "identity").mkdir(parents=True)
+        (root / "docker-compose.yml").write_text("services:\n")
+        (root / "services" / "identity" / "main.py").write_text("app = 1\n")
+        (root / ".env.example").write_text("PATCHTRACK_VERSION=3.1.0\n")
+        (root / "__pycache__").mkdir()
+        (root / "__pycache__" / "ignored.pyc").write_bytes(b"cache")
+
+    assert upgrader.tree_differences(source, installed) == []
+
+
+def test_tree_comparison_reports_missing_differing_and_stale_files(tmp_path):
+    source = tmp_path / "release"
+    installed = tmp_path / "installed"
+    for root in (source, installed):
+        (root / "services").mkdir(parents=True)
+    (source / "services" / "new.py").write_text("new\n")
+    (source / "services" / "same.py").write_text("same\n")
+    (source / "services" / "changed.py").write_text("new\n")
+    (installed / "services" / "same.py").write_text("same\n")
+    (installed / "services" / "changed.py").write_text("old\n")
+    (installed / "services" / "stale.py").write_text("stale\n")
+
+    problems = upgrader.tree_differences(source, installed)
+
+    assert "missing from the installation: services/new.py" in problems
+    assert "content differs: services/changed.py" in problems
+    assert "left over from an earlier release: services/stale.py" in problems
+
+
+def test_upgrade_recreates_every_container_instead_of_rolling(tmp_path, monkeypatch):
+    ctx = _upgrade_context(tmp_path)
+    upgrade = upgrader.Upgrade(ctx, backup=None)
+    upgrade.unit_owned = False
+    calls = []
+    monkeypatch.setattr(
+        upgrade, "_compose",
+        lambda *a, **k: calls.append(a) or SimpleNamespace(returncode=0),
+    )
+    monkeypatch.setattr(upgrader, "wait_for_ready", lambda *a: None)
+
+    upgrade.start()
+
+    assert calls == [
+        ("up", "-d", "--force-recreate", "--remove-orphans"),
+    ]
+
+
+def test_airgap_recreate_never_pulls_and_resumes_the_systemd_unit(
+    tmp_path, monkeypatch,
+):
+    ctx = _upgrade_context(tmp_path, installation_mode="airgap")
+    upgrade = upgrader.Upgrade(ctx, backup=None)
+    upgrade.unit_owned = True
+    compose_calls, command_calls = [], []
+    monkeypatch.setattr(
+        upgrade, "_compose",
+        lambda *a, **k: compose_calls.append(a) or SimpleNamespace(returncode=0),
+    )
+    monkeypatch.setattr(
+        upgrader.base, "run_command",
+        lambda argv, **k: command_calls.append(argv) or SimpleNamespace(returncode=0),
+    )
+    monkeypatch.setattr(upgrader, "wait_for_ready", lambda *a: None)
+
+    upgrade.start()
+
+    assert compose_calls == [(
+        "up", "-d", "--force-recreate", "--remove-orphans", "--pull", "never",
+    )]
+    assert command_calls == [["systemctl", "start", upgrader.base.SYSTEMD_SERVICE_NAME]]
 
 
 def test_upgrade_help_is_safe_to_run_without_root():

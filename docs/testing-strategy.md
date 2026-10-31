@@ -7,7 +7,7 @@ not a pytest or browser test.
 
 | Layer | Location | Needs | Count |
 |-------|----------|-------|-------|
-| Unit tests | `tests/unit/` | Nothing but Python | 534 |
+| Unit tests | `tests/unit/` | Nothing but Python | 542 |
 | Component / API acceptance | `tests/api/acceptance.py` | a running stack and an administrator | 1 script, 63 checks |
 | Database integration tests | `tests/integration/` | PostgreSQL | 151 |
 | Browser end-to-end smoke | `tests/ui/smoke.py` | Playwright + Chromium + a running stack | 1 script, 14 routes |
@@ -19,9 +19,9 @@ not a pytest or browser test.
 Run:
 
 ```bash
-/opt/patchtrack-venv/bin/python -m pytest                       # 534 pass, 151 skip without a DB
+/opt/patchtrack-venv/bin/python -m pytest                       # 542 pass, 151 skip without a DB
 PATCHTRACK_TEST_DATABASE_URL='postgresql+psycopg://patchtrack@/patchtrack_test?host=/tmp' \
-  /opt/patchtrack-venv/bin/python -m pytest                     # 683 pass, 2 environmental skips
+  /opt/patchtrack-venv/bin/python -m pytest                     # 691 pass, 2 environmental skips
 ```
 
 `pytest.ini` sets `testpaths = tests`, `--strict-markers` and fails on an
@@ -58,7 +58,7 @@ so the same command works on a build host without PostgreSQL.
 | `test_secret_files.py` | 13 | A `*_FILE` value supplies each supported credential and a required setting; the file wins over the environment while an explicit constructor value wins over both; only trailing line endings are removed, inner whitespace is kept; an empty file is an explicit empty value and an empty `_FILE` variable means unset; a missing file, a directory and an oversized file stop start-up without falling back; group/world-readable files are warned about without logging the secret; the opt-in Compose override mounts each application secret, masks the plain environment variables and uses the PostgreSQL password file |
 | `test_serve.py` | 4 | The deployment launcher builds a TLS context only for the gateway with TLS enabled, generates the certificate on first launch, leaves other services and disabled deployments on plain HTTP, and defaults `--service` from `PATCHTRACK_SERVICE` |
 | `test_uninstaller.py` | 20 | Reads the installation manifest, refuses a manifest from another directory, a symlinked manifest, an image that is not PatchTrack, overlapping paths, an unknown runtime and an unknown installation mode; accepts an air-gap manifest and treats one without a mode as online; refuses a bundle inside the application directory; removes only installer-created configuration and empty directories; preserves operator files; recognises its own Docker proxy drop-in; and purges sample data only through the running stack's purge script, refusing a combined removal mode |
-| `test_upgrade.py` | 9 | The guided upgrade validates target versions (no no-op, no downgrade, safe characters), edits `PATCHTRACK_VERSION` in place while preserving mode and unrelated lines, appends it when absent, reads quoted proxy values from `.env`, derives the loopback probe address from bind/port/TLS settings, refuses a backup directory inside the deployment, and places staging beside the installed tree |
+| `test_upgrade.py` | 20 | The guided upgrade validates published source releases (3.0.5 and unpublished builds are refused) and target versions (no no-op, no downgrade, no withdrawn release, safe characters); it verifies the staged tree file for file, including missing, changed and stale files; it edits `PATCHTRACK_VERSION` in place while preserving mode and unrelated lines, appends it when absent, reads quoted proxy values from `.env`, derives the loopback probe address from bind/port/TLS settings, refuses a backup directory inside the deployment, places staging beside the installed tree, requires all four named `/readyz` services while ignoring informational entries, and constructs a simultaneous `up -d --force-recreate --remove-orphans` recreation (with `--pull never` in airgap and the systemd unit resumed) rather than a rolling start |
 | `test_installer.py` | 35 | The guided installer validates bind addresses, ports, certificate names and account names, rejecting email suffixes the identity service's `EmailStr` refuses; records the Docker, containerd and Podman data directories it created so rollback removes only those; refuses to install over its source tree or a non-empty target; renders an environment file with no bootstrap secrets; uses loopback for its own probe when published on all interfaces; reverses recorded actions in order; refuses to remove a protected system path; verifies the bootstrap administrator's authenticated session against a local HTTPS gateway, including the refusal when that session belongs to another account; validates proxy URLs, redacts proxy credentials, renders the service proxy environment and escapes systemd specifiers in the Docker proxy drop-in; renders a `patchtrack.service` that owns the Compose stack with the recorded install path and Docker or Podman runtime, and recognises only its own unit; parses and validates sample-data flags and environment variables and builds a one-off container that mounts secrets and scripts read-only; and in air-gap mode verifies bundle checksums, requires the required archives to be listed while tolerating a removed optional archive, refuses a bundle overlapping the install directories, skips registry probes, loads and tags the supplied images, and skips the build; preflight output shows a `how to fix` line for failed and warning checks only |
 | `test_solaris_ssh.py` | 8 | Multi-target collection with one host failing without stopping the rest; stable target-based source refs; pinned host-key match, mismatch and unpinned refusal; Solaris 10 baseline diff including minimum revisions, embedded revisions, obsoletes and the no-baseline case |
 | `test_integration_probe.py` | 11 | Each connector's Test configuration probe uses one page, succeeds on a documented response, reports 401/403 as an authentication failure, rejects a malformed payload and raises rather than silently returning an empty collection; with no Solaris SSH targets the probe checks the inbox exists and every document parses (an SSH target probe is covered by `test_solaris_ssh.py`) |
@@ -439,7 +439,7 @@ reran the affected connector and gateway tests.
 
 ## 5. What the tests have already found
 
-Twenty-one real defects, all fixed:
+Twenty-two real defects, all fixed:
 
 1. **Freshness slack.** The engine rounded assessment age to two decimals
    before comparing it with the threshold, so an assessment up to 30 seconds
@@ -539,6 +539,22 @@ delivery path now has its own tests.
     429 with no instruction on how long to wait. Both paths now forward
     `Retry-After`; `test_gateway_proxy_headers.py` covers the whitelist and the
     login conversion.
+22. **Upgrade refused a healthy installation.** `/readyz` now reports the
+    database and backup worker beside the four application services, but the
+    upgrader still required exactly four entries, so its precheck failed with
+    “200 with 6 service(s)”. It now requires the four application services by
+    name and ignores informational entries; `test_upgrade.py` covers both a
+    healthy six-entry response and a missing application service.
+23. **The upgrade accepted withdrawn builds and did not guarantee full
+    replacement.** A host on retracted 3.0.5 passed the version precheck, the
+    start path let Compose decide whether to recreate containers, and a
+    release-owned systemd unit was never refreshed. The upgrade now accepts
+    only published source releases, rejects withdrawn targets, hashes the
+    installed tree against the staged release, refreshes an installer-owned
+    unit, and recreates every container simultaneously with
+    `--force-recreate --remove-orphans`. `test_upgrade.py` covers the release
+    policy, tree comparison and both recreate paths; the lifecycle run records
+    all seven containers recreated together.
 
 ## 6. Coverage gaps, stated honestly
 

@@ -56,8 +56,11 @@ reported and without the next sync undoing it.
   `uninstall.sh` prechecks the installed deployment, removes only what the
   installation created, preserves data volumes unless `--purge-data` is given,
   and verifies the result. `upgrade.sh` backs up the tree, configuration and
-  database, stages a new release, applies migrations, verifies the stack and
-  restores everything automatically if any step fails.
+  database, replaces every file in the tree, recreates all containers at once
+  from the new image (never a rolling upgrade), applies migrations, verifies
+  the stack and restores everything automatically if any step fails. It only
+  upgrades from a published release; a host on the retracted 3.0.5 is refused
+  and must be reinstalled on 3.0.3 with its data restored.
 - **Transport and secrets** — HTTPS from first start with a generated
   certificate, replacement with the organisation's own certificate in
   Settings, and optional file-backed bootstrap secrets for Docker, Podman or
@@ -272,7 +275,7 @@ PATCHTRACK_TEST_DATABASE_URL=postgresql+psycopg://patchtrack@/patchtrack_test?ho
   /opt/patchtrack-venv/bin/python -m pytest tests/integration
 ```
 
-The suite currently contains 685 tests: 534 unit tests and 151 database
+The suite currently contains 693 tests: 542 unit tests and 151 database
 integration tests. Integration tests create and drop their own scratch
 database; never point them at a database holding real data.
 

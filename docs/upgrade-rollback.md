@@ -6,6 +6,14 @@
 - Migrations are forward-only and checksummed. An applied migration is never
   edited; a new one is added.
 - An upgrade is: back up → load the new image → run migrations → start → verify.
+- Only a release that was actually published may be upgraded from. A host still
+  running a withdrawn release (3.0.5) or an unpublished build is refused; it
+  must be reinstalled on the published release and its data restored rather
+  than upgraded in place.
+- The upgrade replaces the whole application tree and recreates every container
+  at once from the new image (Compose's **recreate / simultaneous** strategy).
+  It never performs a rolling replacement, so no old and new component serves
+  side by side. PostgreSQL volumes are preserved.
 - A rollback is: restore the backup → run the previous image.
 - `upgrade.sh` performs those steps from the unpacked new release, including
   the backup and automatic rollback; the manual commands below remain the
@@ -54,7 +62,11 @@ upgrade backup. See
 
 `--version` defaults to `PATCHTRACK_UPGRADE_VERSION`, then
 `PATCHTRACK_VERSION`. The target must differ from the installed version and
-must not be older; a downgrade needs a database restore, not an upgrade.
+must not be older or a withdrawn release; a downgrade needs a database restore,
+not an upgrade. The installed version must itself be a published release:
+upgrading is supported from 3.0.3. A host carrying the retracted 3.0.5 is
+refused with an instruction to reinstall 3.0.3 and restore its data, because
+no supported upgrade path starts there.
 
 The prechecks read `/etc/patchtrack/install.json`, so they know the runtime,
 image, account and directories the installation created. They require root, a
@@ -78,16 +90,24 @@ Backups are never deleted automatically. The dump contains the whole
 `patchtrack` database; the database password stays in the existing secret
 files and is not passed on a command line.
 
-The upgrade then stages the new tree beside the current one, swaps it into
-place, changes `PATCHTRACK_VERSION`, builds `patchtrack:<version>`, stops the
-five application services (PostgreSQL stays up), runs the `migrate` service
-and starts the stack. It verifies `/readyz`, `/healthz`, the sign-in page and
-the migration table, then records the version in `install.json` and removes
-the previous tree. The previous image is kept on the host.
+The upgrade then stages a complete copy of the new tree beside the current one,
+swaps it into place and compares every managed file and symlink against the
+release that was staged. A missing file, a different digest or a stale file
+left from the previous release stops the upgrade before any container starts.
+It then refreshes an installer-owned systemd unit, changes
+`PATCHTRACK_VERSION`, builds `patchtrack:<version>`, stops the five application
+services (PostgreSQL stays up), runs the `migrate` service and recreates the
+whole stack with `docker compose up -d --force-recreate --remove-orphans`
+(`--pull never` for an air-gapped installation). All containers are replaced
+simultaneously from the new image; no rolling replacement is attempted. It
+verifies `/readyz`, `/healthz`, the sign-in page and the migration table, then
+records the version in `install.json` and removes the previous tree. The
+previous image is kept on the host.
 
 When the installation has the `patchtrack.service` systemd unit, the upgrade
-stops that unit (rather than running Compose directly), starts PostgreSQL for
-the migration, and starts the unit again afterwards. The unit remains active
+stops that unit, starts PostgreSQL for the migration, recreates the stack
+directly while the unit is stopped, and starts the unit afterwards so systemd
+reports the running stack as active. The unit remains active
 and enabled across the upgrade. An installation made before the unit existed
 is upgraded with Compose commands and keeps its previous start method.
 
